@@ -5069,6 +5069,7 @@ type runnerJobPayload struct {
 	ProviderIdentity         string                             `json:"providerIdentity"`
 	TargetDisplayName        string                             `json:"targetDisplayName"`
 	FlowPath                 string                             `json:"flowPath"`
+	IncludeTags              []string                           `json:"includeTags"`
 	EASProfileName           string                             `json:"easProfileName"`
 	TargetClass              string                             `json:"targetClass"`
 	SourceBinding            runnerJobSourceBinding             `json:"sourceBinding"`
@@ -8486,6 +8487,16 @@ func runMaestroSmoke(
 		relativeReportPath,
 	)
 	command.Args = append(command.Args, maestroDevSessionEnvArgs(job)...)
+	// Select a tier (e.g. smoke / full) when the job requests one.
+	var tags []string
+	for _, t := range job.Payload.IncludeTags {
+		if trimmed := strings.TrimSpace(t); trimmed != "" {
+			tags = append(tags, trimmed)
+		}
+	}
+	if len(tags) > 0 {
+		command.Args = append(command.Args, "--include-tags", strings.Join(tags, ","))
+	}
 	command.Args = append(command.Args, flowPath)
 	command.Dir = root
 	command.Env = maestroCommandEnv(os.Environ())
