@@ -5070,6 +5070,7 @@ type runnerJobPayload struct {
 	TargetDisplayName        string                             `json:"targetDisplayName"`
 	FlowPath                 string                             `json:"flowPath"`
 	IncludeTags              []string                           `json:"includeTags"`
+	DeviceProvider           string                             `json:"deviceProvider"`
 	EASProfileName           string                             `json:"easProfileName"`
 	TargetClass              string                             `json:"targetClass"`
 	SourceBinding            runnerJobSourceBinding             `json:"sourceBinding"`
@@ -6096,6 +6097,19 @@ func claimAndHandleMaestroRun(client *http.Client, options runnerOnceOptions, re
 func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
+	}
+
+	// Cloud device-farm execution is a defined-but-not-yet-implemented adapter
+	// (P4). Local runners only execute local targets; surface a clear failure so
+	// the control plane keeps the gate pending rather than mis-running on a sim.
+	if job.Payload.DeviceProvider == "cloud" {
+		return completeRunnerJob(client, options, registration, job, map[string]any{
+			"status": "failed",
+			"failure": map[string]any{
+				"code":    "cloud_farm_unavailable",
+				"message": "cloud device-farm execution is not yet implemented on this runner",
+			},
+		})
 	}
 
 	providerIdentity := job.Payload.ProviderIdentity
