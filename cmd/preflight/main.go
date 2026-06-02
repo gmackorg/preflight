@@ -7440,7 +7440,36 @@ func reportDiscoveryTargets(client *http.Client, options runnerOnceOptions, regi
 	if err := decodeEnvelopeData(data, &targets); err != nil {
 		return runnerTargetsData{}, fmt.Errorf("decode iOS simulator targets: %w", err)
 	}
+
+	// Also register physically-connected iPhones (best-effort; ignored when
+	// devicectl is unavailable or no device is attached).
+	if devicectlOutput, derr := loadDevicectlDevices(options); derr == nil {
+		if deviceData, perr := postPreflightJSON(
+			client,
+			runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/targets/ios-devices", registration.Runner.ID)),
+			registration.Token,
+			map[string]any{"devicectlOutput": devicectlOutput},
+		); perr == nil {
+			var deviceTargets runnerTargetsData
+			if decodeEnvelopeData(deviceData, &deviceTargets) == nil {
+				targets.Targets = append(targets.Targets, deviceTargets.Targets...)
+			}
+		}
+	}
 	return targets, nil
+}
+
+// loadDevicectlDevices returns `xcrun devicectl list devices` JSON for attached
+// physical devices. Returns ("", nil) gracefully when devicectl is unavailable.
+func loadDevicectlDevices(options runnerOnceOptions) (string, error) {
+	out, err := exec.Command(options.xcrunPath, "devicectl", "list", "devices", "--json-output", "-").Output()
+	if err != nil {
+		return "", err
+	}
+	if !json.Valid(out) {
+		return "", fmt.Errorf("devicectl output is not valid JSON")
+	}
+	return string(out), nil
 }
 
 func discoveryTargetLabel(job apiRunnerJob) string {
