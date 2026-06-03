@@ -1,0 +1,16 @@
+app: preflight-runner
+server: https://forgegraf.com
+
+# ForgeGraph operator notes:
+# preflight-runner is a standalone Go CLI (module github.com/forgegraph/preflight)
+# that executes Preflight control-plane jobs (maestro.run / eas.* / device.*) on
+# runner and CI machines. It is a "subapp" of preflight-app: a separate ForgeGraph
+# app + repo, owned under the Preflight family, built via ForgeGraph CI.
+#
+# It is NOT deployed as a long-running node service, so this app declares no
+# deploy stages. The binary is built from `go build ./cmd/preflight` and runs
+# wherever runners/CI need it; production mobile builds are gated to CI by the
+# runner guard (handleEASBuildDevJob -> production_build_ci_only).
+# flakeRef: .
+# build: go build ./cmd/preflight
+# default branch: master
