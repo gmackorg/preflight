@@ -6970,6 +6970,26 @@ func handleEASBuildDevJob(client *http.Client, options runnerOnceOptions, regist
 
 	appDir := appDirectoryForJob(options, job)
 	profileName := easProfileNameForJob(job)
+	// Production builds are produced only through CI. A runner outside a CI
+	// context must refuse the production profile rather than minting a store
+	// build locally — the Mobile Production Build workflow is the sanctioned path.
+	if isProductionBuildProfile(profileName) && !runningInCI() {
+		setupRequired := map[string]any{
+			"code": "production_build_ci_only",
+			"message": "Production builds run only through CI. Trigger the Mobile Production Build workflow " +
+				"instead of building the production profile on a runner.",
+			"commands": []string{"gh workflow run mobile-production.yml"},
+		}
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status":        "setup_required",
+			"easBuild":      easBuildResultPayload(job, profileName),
+			"setupRequired": setupRequired,
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "production build refused (CI-only) %s %s\n", job.ID, profileName)
+		return nil
+	}
 	easEnv, err := easSecretEnvForJob(client, options, registration, job)
 	if err != nil {
 		return err
@@ -12544,6 +12564,26 @@ func easProfileNameForJob(job apiRunnerJob) string {
 		return job.Payload.SourceBinding.EASProfileName
 	}
 	return "development-device"
+}
+
+// isProductionBuildProfile reports whether an EAS profile name denotes a
+// production/store build (which is restricted to CI).
+func isProductionBuildProfile(profileName string) bool {
+	p := strings.ToLower(strings.TrimSpace(profileName))
+	return p == "production" ||
+		strings.HasPrefix(p, "production-") ||
+		strings.HasSuffix(p, "-production")
+}
+
+// runningInCI reports whether the runner is executing inside a CI environment.
+func runningInCI() bool {
+	for _, key := range []string{"CI", "GITHUB_ACTIONS", "EAS_BUILD"} {
+		v := strings.TrimSpace(os.Getenv(key))
+		if v != "" && v != "0" && strings.ToLower(v) != "false" {
+			return true
+		}
+	}
+	return false
 }
 
 func jobPlatform(job apiRunnerJob) string {

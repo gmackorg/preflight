@@ -8078,6 +8078,166 @@ printf '{"id":"build_ios_dev_1","artifacts":{"buildUrl":"https://expo.dev/runtim
 	}
 }
 
+func TestEASBuildRefusesProductionProfileOutsideCI(t *testing.T) {
+	// Production builds run only through CI. When the runner is not in a CI
+	// context it must refuse to invoke the production EAS profile, completing the
+	// job as setup_required with a clear code instead of building.
+	t.Setenv("CI", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+	t.Setenv("EAS_BUILD", "")
+
+	appDir := writeExpoFixture(t)
+	fakeBin := t.TempDir()
+	sentinel := filepath.Join(t.TempDir(), "eas-invoked")
+	if err := os.WriteFile(filepath.Join(fakeBin, "eas"), []byte("#!/usr/bin/env sh\ntouch "+sentinel+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake eas: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var completed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/complete":
+			if err := json.NewDecoder(r.Body).Decode(&completed); err != nil {
+				t.Fatalf("decode completion body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_build","kind":"eas.build.dev","status":"succeeded","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_build"}}`))
+		default:
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	err := handleEASBuildDevJob(
+		server.Client(),
+		runnerOnceOptions{
+			apiURL:        server.URL,
+			workspaceRoot: appDir,
+		},
+		runnerRegistrationData{
+			Runner: apiRunner{ID: "pfrun_cli"},
+			Token:  "runner_token",
+		},
+		apiRunnerJob{
+			ID:     "pfjob_build",
+			Kind:   "eas.build.dev",
+			Status: "running",
+			Payload: runnerJobPayload{
+				Platform:       "ios",
+				Lane:           "store",
+				EASProfileName: "production",
+				TargetClass:    "device",
+				SourceBinding: runnerJobSourceBinding{
+					WorkspaceRoot:    appDir,
+					PackagePath:      ".",
+					ExpoConfigDigest: digestIfExists(filepath.Join(appDir, "app.config.ts")),
+					EASJSONDigest:    digestIfExists(filepath.Join(appDir, "eas.json")),
+					AppScheme:        "forgegraph",
+					ExpoSlug:         "forgegraf",
+				},
+				Readiness: map[string]any{"ready": true},
+			},
+		},
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("expected production guard to complete cleanly, got %v", err)
+	}
+	if _, statErr := os.Stat(sentinel); statErr == nil {
+		t.Fatalf("expected eas NOT to be invoked for a CI-only production build")
+	}
+	result, ok := completed["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected completion result, got %#v", completed)
+	}
+	if result["status"] != "setup_required" {
+		t.Fatalf("expected setup_required, got %#v", result)
+	}
+	setupRequired, ok := result["setupRequired"].(map[string]any)
+	if !ok || setupRequired["code"] != "production_build_ci_only" {
+		t.Fatalf("expected production_build_ci_only, got %#v", result["setupRequired"])
+	}
+}
+
+func TestEASBuildAllowsProductionProfileInCI(t *testing.T) {
+	// In a CI context the runner builds the production profile normally.
+	t.Setenv("CI", "1")
+
+	appDir := writeExpoFixture(t)
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "eas"), []byte(`#!/usr/bin/env sh
+printf '{"id":"build_ios_prod","artifacts":{"buildUrl":"https://expo.dev/artifacts/ios-prod.ipa"},"platform":"ios","profile":"production"}\n'
+`), 0o755); err != nil {
+		t.Fatalf("write fake eas: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var completed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/artifacts":
+			_, _ = w.Write([]byte(`{"data":{"artifact":{"id":"pfart_eas","kind":"tool_output","uri":"/repo/.preflight/eas/pfjob_build/eas-build.json","retentionClass":"diagnostic"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_artifact"}}`))
+		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/complete":
+			if err := json.NewDecoder(r.Body).Decode(&completed); err != nil {
+				t.Fatalf("decode completion body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_build","kind":"eas.build.dev","status":"succeeded","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_build"}}`))
+		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/claim":
+			_, _ = w.Write([]byte(`{"data":null,"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_none"}}`))
+		default:
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	err := handleEASBuildDevJob(
+		server.Client(),
+		runnerOnceOptions{
+			apiURL:        server.URL,
+			workspaceRoot: appDir,
+		},
+		runnerRegistrationData{
+			Runner: apiRunner{ID: "pfrun_cli"},
+			Token:  "runner_token",
+		},
+		apiRunnerJob{
+			ID:     "pfjob_build",
+			Kind:   "eas.build.dev",
+			Status: "running",
+			Payload: runnerJobPayload{
+				Platform:       "ios",
+				Lane:           "store",
+				EASProfileName: "production",
+				TargetClass:    "device",
+				SourceBinding: runnerJobSourceBinding{
+					WorkspaceRoot:    appDir,
+					PackagePath:      ".",
+					ExpoConfigDigest: digestIfExists(filepath.Join(appDir, "app.config.ts")),
+					EASJSONDigest:    digestIfExists(filepath.Join(appDir, "eas.json")),
+					AppScheme:        "forgegraph",
+					ExpoSlug:         "forgegraf",
+				},
+				Readiness: map[string]any{"ready": true},
+			},
+		},
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("expected production build in CI to succeed, got %v", err)
+	}
+	result, ok := completed["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected completion result, got %#v", completed)
+	}
+	if result["status"] != "ok" {
+		t.Fatalf("expected ok production build in CI, got %#v", result)
+	}
+}
+
 func TestEASBuildUploadsRedactedToolOutputArtifacts(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	fakeBin := t.TempDir()
