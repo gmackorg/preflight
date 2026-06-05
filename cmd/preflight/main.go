@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,12 +133,15 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintln(stdout, "Usage: preflight login")
 		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "Authenticate with the Preflight API using a token from the environment.")
+		fmt.Fprintln(stdout, "Authenticate with the Preflight API. By default this opens your browser to")
+		fmt.Fprintln(stdout, "forgegraf.com and authorizes the CLI (if you're already signed in, it just works).")
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "Options:")
-		fmt.Fprintln(stdout, "  --api-url <url>     Preflight API URL")
-		fmt.Fprintln(stdout, "  --token-env <name>  Environment variable containing the Preflight token (default: PREFLIGHT_TOKEN)")
-		fmt.Fprintln(stdout, "  --workspace-id <id> Default workspace ID (default: local)")
+		fmt.Fprintln(stdout, "  --api-url <url>     Preflight API URL (default: https://preflight.forgegraf.com)")
+		fmt.Fprintln(stdout, "  --device            Print a code + URL to authorize from another device (headless/SSH)")
+		fmt.Fprintln(stdout, "  --no-browser        Don't auto-open the browser; print the URL instead")
+		fmt.Fprintln(stdout, "  --token-env <name>  Use a token from this env var instead of the browser flow")
+		fmt.Fprintln(stdout, "  --workspace-id <id> Override the default workspace ID")
 		return 0
 	}
 
@@ -146,9 +150,11 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		fmt.Fprintf(stderr, "load Preflight CLI config failed: %v\n", err)
 		return 1
 	}
-	apiURL := firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL)
-	tokenEnv := "PREFLIGHT_TOKEN"
-	workspaceID := firstNonEmpty(config.WorkspaceID, "local")
+	apiURL := firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL, defaultPreflightAPIURL)
+	tokenEnv := ""
+	workspaceID := config.WorkspaceID
+	deviceMode := false
+	noBrowser := false
 
 	for index := 0; index < len(args); index += 1 {
 		switch args[index] {
@@ -173,29 +179,52 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 				return 2
 			}
 			workspaceID = value
+		case "--device":
+			deviceMode = true
+		case "--no-browser":
+			noBrowser = true
 		default:
 			fmt.Fprintf(stderr, "unknown login flag %q\n", args[index])
 			return 2
 		}
 	}
 
-	if strings.TrimSpace(apiURL) == "" {
+	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
+	if apiURL == "" {
 		fmt.Fprintln(stderr, "missing Preflight API URL; pass --api-url or set PREFLIGHT_API_URL")
 		return 2
 	}
-	token := strings.TrimSpace(os.Getenv(tokenEnv))
-	if token == "" {
-		fmt.Fprintf(stderr, "missing Preflight token; set %s or pass --token-env with a populated variable\n", tokenEnv)
-		return 2
+
+	// Token resolution: an explicit token env var (CI / scripted), an already
+	// populated PREFLIGHT_TOKEN, or the interactive browser/device flow.
+	resolvedWorkspace := firstNonEmpty(workspaceID, "local")
+	var token string
+	if tokenEnv != "" {
+		token = strings.TrimSpace(os.Getenv(tokenEnv))
+		if token == "" {
+			fmt.Fprintf(stderr, "--token-env %s is empty\n", tokenEnv)
+			return 2
+		}
+	} else if envToken := strings.TrimSpace(os.Getenv("PREFLIGHT_TOKEN")); envToken != "" {
+		token = envToken
+	} else {
+		flowToken, flowWorkspace, loginErr := deviceLogin(client, apiURL, !deviceMode && !noBrowser, stdout, stderr)
+		if loginErr != nil {
+			fmt.Fprintf(stderr, "login failed: %v\n", loginErr)
+			return 1
+		}
+		token = flowToken
+		resolvedWorkspace = firstNonEmpty(workspaceID, flowWorkspace, "local")
 	}
+
 	if err := verifyPreflightAPICompatibility(client, apiURL, token); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 1
 	}
 
-	config.APIURL = strings.TrimRight(apiURL, "/")
+	config.APIURL = apiURL
 	config.Token = token
-	config.WorkspaceID = firstNonEmpty(workspaceID, "local")
+	config.WorkspaceID = resolvedWorkspace
 	if config.WorkspaceBindings == nil {
 		config.WorkspaceBindings = map[string]string{}
 	}
@@ -204,8 +233,116 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "saved Preflight login for %s\n", config.APIURL)
+	fmt.Fprintf(stdout, "Signed in to %s (workspace %s)\n", config.APIURL, config.WorkspaceID)
 	return 0
+}
+
+const defaultPreflightAPIURL = "https://preflight.forgegraf.com"
+
+// deviceLogin runs the OAuth 2.0 device-authorization grant against the
+// Preflight API: start a request, send the user to the browser to approve it
+// (authenticated by their forgegraf.com session), and poll for the token.
+func deviceLogin(client *http.Client, apiURL string, openBrowserFlag bool, stdout io.Writer, stderr io.Writer) (string, string, error) {
+	base := strings.TrimRight(apiURL, "/") + "/api/preflight/v1/cli/auth/device"
+
+	start, _, err := postDeviceEndpoint(client, base+"/start", nil)
+	if err != nil {
+		return "", "", err
+	}
+	deviceCode, _ := start["device_code"].(string)
+	userCode, _ := start["user_code"].(string)
+	verifyURI, _ := start["verification_uri"].(string)
+	verifyComplete, _ := start["verification_uri_complete"].(string)
+	if deviceCode == "" || userCode == "" {
+		return "", "", fmt.Errorf("unexpected response from device/start")
+	}
+	intervalSec := 5
+	if v, ok := start["interval"].(float64); ok && v > 0 {
+		intervalSec = int(v)
+	}
+	expiresSec := 600
+	if v, ok := start["expires_in"].(float64); ok && v > 0 {
+		expiresSec = int(v)
+	}
+
+	if openBrowserFlag {
+		fmt.Fprintf(stdout, "Opening your browser to authorize the Preflight CLI...\n")
+		fmt.Fprintf(stdout, "  Confirm this code: %s\n", userCode)
+		fmt.Fprintf(stdout, "  If the browser doesn't open, visit: %s\n\n", firstNonEmpty(verifyComplete, verifyURI))
+		if browserErr := openBrowser(firstNonEmpty(verifyComplete, verifyURI)); browserErr != nil {
+			fmt.Fprintf(stderr, "  (couldn't open a browser automatically: %v)\n", browserErr)
+		}
+	} else {
+		fmt.Fprintf(stdout, "To authorize this CLI, open:\n  %s\nand enter the code:\n  %s\n\n", verifyURI, userCode)
+	}
+	fmt.Fprintln(stdout, "Waiting for approval...")
+
+	interval := time.Duration(intervalSec) * time.Second
+	deadline := time.Now().Add(time.Duration(expiresSec) * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(interval)
+		body, status, pollErr := postDeviceEndpoint(client, base+"/token", map[string]string{"device_code": deviceCode})
+		if pollErr != nil {
+			continue // transient; keep polling until the deadline
+		}
+		if status == http.StatusOK {
+			token, _ := body["access_token"].(string)
+			workspaceID, _ := body["workspace_id"].(string)
+			if token == "" {
+				return "", "", fmt.Errorf("authorization succeeded but no token was returned")
+			}
+			return token, workspaceID, nil
+		}
+		switch errCode, _ := body["error"].(string); errCode {
+		case "authorization_pending", "slow_down":
+			continue
+		case "expired_token":
+			return "", "", fmt.Errorf("the authorization request expired; run `preflight login` again")
+		default:
+			return "", "", fmt.Errorf("authorization failed: %s", firstNonEmpty(errCode, "unknown error"))
+		}
+	}
+	return "", "", fmt.Errorf("timed out waiting for browser approval")
+}
+
+func postDeviceEndpoint(client *http.Client, endpoint string, payload any) (map[string]any, int, error) {
+	var body io.Reader
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return nil, 0, err
+		}
+		body = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequest(http.MethodPost, endpoint, body)
+	if err != nil {
+		return nil, 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	var decoded map[string]any
+	_ = json.NewDecoder(response.Body).Decode(&decoded)
+	if decoded == nil {
+		decoded = map[string]any{}
+	}
+	return decoded, response.StatusCode, nil
+}
+
+// openBrowser opens a URL in the user's default browser, cross-platform.
+func openBrowser(target string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", target).Start()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target).Start()
+	default:
+		return exec.Command("xdg-open", target).Start()
+	}
 }
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer) int {
