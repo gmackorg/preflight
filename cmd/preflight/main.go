@@ -6811,6 +6811,11 @@ func uploadRunnerArtifactRecord(
 		"uri":            uri,
 		"retentionClass": retentionClass,
 		"metadata":       metadata,
+		// Runner artifact content (logs, transcripts) is emitted through the
+		// redaction writers (attachRedactedCommandLog / redactSetupTranscriptText),
+		// which strip tokens and secrets. Declare it so the control plane accepts
+		// the upload (it rejects artifacts that do not assert redacted: true).
+		"redacted": true,
 	}
 	if sizeBytes, ok := artifactSizeBytes(uri); ok {
 		payload["sizeBytes"] = sizeBytes
