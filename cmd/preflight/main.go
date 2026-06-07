@@ -6148,6 +6148,11 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		port = options.metroPort
 	}
 	platform := jobPlatform(job)
+	if platform == "ios" {
+		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
+			fmt.Fprintf(stdout, "warning: could not normalize ios/.xcode.env.local: %v\n", err)
+		}
+	}
 	logPath, err := runExpoAppOpen(
 		options,
 		platform,
@@ -6192,6 +6197,32 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		return err
 	}
 	return claimAndHandleMaestroRun(client, options, registration, stdout)
+}
+
+// ensureXcodeEnvNodeBinary pins ios/.xcode.env.local to this machine's node so
+// React Native pod script phases resolve node regardless of where the project
+// was prebuilt. Synced/prebuilt projects otherwise carry the origin machine's
+// NODE_BINARY path (e.g. an nvm path) which does not exist on a build runner,
+// failing xcodebuild at the "[RNDeps] Replace React Native Dependencies" phase.
+func ensureXcodeEnvNodeBinary(appDir string, stdout io.Writer) error {
+	iosDir := filepath.Join(appDir, "ios")
+	if info, statErr := os.Stat(iosDir); statErr != nil || !info.IsDir() {
+		return nil // no native ios project (android, or prebuild not run)
+	}
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		return fmt.Errorf("node not found on PATH: %w", err)
+	}
+	target := filepath.Join(iosDir, ".xcode.env.local")
+	desired := fmt.Sprintf("export NODE_BINARY=%s\n", nodePath)
+	if existing, readErr := os.ReadFile(target); readErr == nil && string(existing) == desired {
+		return nil
+	}
+	if err := os.WriteFile(target, []byte(desired), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "normalized %s -> NODE_BINARY=%s\n", target, nodePath)
+	return nil
 }
 
 func simulatorOpenResultPayload(job apiRunnerJob, platform string, providerIdentity string, appDir string, port int, logPath string) map[string]any {
