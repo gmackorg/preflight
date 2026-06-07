@@ -43,6 +43,10 @@ const defaultSimulatorOpenTimeout = 10 * time.Minute
 const defaultAndroidDevelopmentOpenTimeout = 5 * time.Minute
 const defaultAndroidDeviceNameTimeout = 2 * time.Second
 const defaultRunnerPollInterval = time.Second
+
+// defaultRunnerLivenessHeartbeatInterval keeps the runner-level heartbeat well
+// under the server's stale-runner threshold (90s) during long jobs.
+const defaultRunnerLivenessHeartbeatInterval = 30 * time.Second
 const defaultProveAppWatchTimeout = 10 * time.Minute
 const defaultLocalArtifactTTL = 24 * time.Hour
 const defaultAppStoreConnectAPIURL = "https://api.appstoreconnect.apple.com"
@@ -4940,6 +4944,26 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	if err := heartbeatRunner(client, options, registration, capabilities); err != nil {
 		return err
 	}
+
+	// Keep the runner-level heartbeat fresh for the whole work sequence. Job
+	// claim/complete/heartbeat persist workflow+job state but not the runner row,
+	// so without this a runner busy on a long job (cold sim boot, build, maestro)
+	// is marked stale (>staleRunnerMs) and rejected on its next claim/write.
+	stopHeartbeat := make(chan struct{})
+	defer close(stopHeartbeat)
+	go func() {
+		ticker := time.NewTicker(runnerLivenessHeartbeatInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopHeartbeat:
+				return
+			case <-ticker.C:
+				_ = heartbeatRunner(client, options, registration, capabilities)
+			}
+		}
+	}()
+
 	if err := reconcileRunnerStartup(client, options, registration); err != nil {
 		return err
 	}
@@ -8858,6 +8882,13 @@ func simulatorOpenTimeout() time.Duration {
 
 func runnerPollInterval() time.Duration {
 	return durationFromEnv("PREFLIGHT_RUNNER_POLL_INTERVAL", defaultRunnerPollInterval)
+}
+
+func runnerLivenessHeartbeatInterval() time.Duration {
+	return durationFromEnv(
+		"PREFLIGHT_RUNNER_LIVENESS_INTERVAL",
+		defaultRunnerLivenessHeartbeatInterval,
+	)
 }
 
 func durationFromEnv(name string, fallback time.Duration) time.Duration {
