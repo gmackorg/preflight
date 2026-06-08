@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -4940,6 +4941,11 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 		fmt.Fprintf(stdout, "cleaned %d stale Preflight local process handle%s\n", cleanedHandles, suffix)
 	}
 
+	// Release the in-flight job's target lock on graceful shutdown (^C / SIGTERM)
+	// so a cancelled run doesn't leave a target locked until TTL.
+	stopShutdownHandler := installRunnerShutdownHandler(stdout)
+	defer stopShutdownHandler()
+
 	capabilities := defaultRunnerCapabilities()
 	registration, err := registerRunner(client, options, capabilities)
 	if err != nil {
@@ -5014,7 +5020,11 @@ func handleRunnerClaim(
 	stdout io.Writer,
 	capabilities map[string]any,
 ) error {
-	switch claim.Job.Kind {
+	// Track this as the in-flight job so a shutdown signal can release its lock.
+	markRunnerJobActive(client, options, registration, job)
+	defer clearRunnerJobActive()
+
+	switch job.Kind {
 	case "runner.capabilities.probe":
 		if err := completeCapabilityProbe(client, options, registration, job, capabilities); err != nil {
 			return err
@@ -7049,6 +7059,79 @@ func devSessionArtifactFailureCode(err error) string {
 func completeRunnerJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, result map[string]any) error {
 	_, err := completeRunnerJobWithResponse(client, options, registration, job, result)
 	return err
+}
+
+// activeRunnerJob tracks the job currently being handled so a graceful-shutdown
+// signal handler can fail it (which makes the server fail the workflow and
+// release its target locks) instead of leaving a stale lock held until TTL.
+// This only covers graceful shutdown (SIGINT/SIGTERM/^C); SIGKILL and crashes
+// can only be recovered server-side by reclaiming locks when the runner's
+// heartbeat goes stale (see the field report in preflight-app).
+var activeRunnerJob struct {
+	mu           sync.Mutex
+	set          bool
+	client       *http.Client
+	options      runnerOnceOptions
+	registration runnerRegistrationData
+	job          apiRunnerJob
+}
+
+func markRunnerJobActive(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob) {
+	activeRunnerJob.mu.Lock()
+	activeRunnerJob.set = true
+	activeRunnerJob.client = client
+	activeRunnerJob.options = options
+	activeRunnerJob.registration = registration
+	activeRunnerJob.job = job
+	activeRunnerJob.mu.Unlock()
+}
+
+func clearRunnerJobActive() {
+	activeRunnerJob.mu.Lock()
+	activeRunnerJob.set = false
+	activeRunnerJob.mu.Unlock()
+}
+
+// releaseActiveRunnerJobOnShutdown fails the in-flight job so the server fails
+// its workflow and releases any target locks the runner acquired. Best-effort:
+// errors are ignored because we are already on the way out.
+func releaseActiveRunnerJobOnShutdown(reason string) {
+	activeRunnerJob.mu.Lock()
+	defer activeRunnerJob.mu.Unlock()
+	if !activeRunnerJob.set {
+		return
+	}
+	_ = completeRunnerJob(activeRunnerJob.client, activeRunnerJob.options, activeRunnerJob.registration, activeRunnerJob.job, map[string]any{
+		"status": "failed",
+		"failure": map[string]any{
+			"code":    "runner_interrupted",
+			"message": reason,
+		},
+	})
+	activeRunnerJob.set = false
+}
+
+// installRunnerShutdownHandler wires SIGINT/SIGTERM to release the in-flight
+// job's target lock before exiting. Returns a stop func to remove the handler
+// once the runner finishes normally. Exit code 130 = terminated by Ctrl-C.
+func installRunnerShutdownHandler(stderr io.Writer) func() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case sig := <-sigCh:
+			fmt.Fprintf(stderr, "received %s — releasing in-flight target lock before exit\n", sig)
+			releaseActiveRunnerJobOnShutdown(fmt.Sprintf("runner interrupted (%s)", sig))
+			os.Exit(130)
+		case <-done:
+			return
+		}
+	}()
+	return func() {
+		signal.Stop(sigCh)
+		close(done)
+	}
 }
 
 type runnerJobCompletionData struct {
