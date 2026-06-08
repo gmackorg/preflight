@@ -47,6 +47,12 @@ const defaultRunnerPollInterval = time.Second
 // defaultRunnerLivenessHeartbeatInterval keeps the runner-level heartbeat well
 // under the server's stale-runner threshold (90s) during long jobs.
 const defaultRunnerLivenessHeartbeatInterval = 30 * time.Second
+
+// defaultRunnerJobHeartbeatInterval keeps the per-JOB lease fresh during a long
+// handler (build, dev-session, sim boot, maestro). Without this, a multi-minute
+// step outlives the job lease and the next write is rejected with HTTP 409
+// (runner_job_not_running). Kept well under the lease window like the runner one.
+const defaultRunnerJobHeartbeatInterval = 20 * time.Second
 const defaultProveAppWatchTimeout = 10 * time.Minute
 const defaultLocalArtifactTTL = 24 * time.Hour
 const defaultAppStoreConnectAPIURL = "https://api.appstoreconnect.apple.com"
@@ -4978,71 +4984,76 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	}
 
 	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
+	return handleRunnerClaim(client, options, registration, claim.Job, stdout, capabilities)
+}
+
+func claimAndHandleNextRunnerJob(
+	client *http.Client,
+	options runnerOnceOptions,
+	registration runnerRegistrationData,
+	stdout io.Writer,
+	capabilities map[string]any,
+) error {
+	claim, err := claimRunnerJob(client, options, registration)
+	if err != nil {
+		return err
+	}
+	if claim == nil {
+		fmt.Fprintln(stdout, "no runner jobs available")
+		return nil
+	}
+	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
+	return handleRunnerClaim(client, options, registration, claim.Job, stdout, capabilities)
+}
+
+func handleRunnerClaim(
+	client *http.Client,
+	options runnerOnceOptions,
+	registration runnerRegistrationData,
+	job apiRunnerJob,
+	stdout io.Writer,
+	capabilities map[string]any,
+) error {
 	switch claim.Job.Kind {
 	case "runner.capabilities.probe":
-		if err := completeCapabilityProbe(client, options, registration, claim.Job, capabilities); err != nil {
+		if err := completeCapabilityProbe(client, options, registration, job, capabilities); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "completed capability probe %s\n", claim.Job.ID)
-
-		nextClaim, err := claimRunnerJob(client, options, registration)
-		if err != nil {
-			return err
-		}
-		if nextClaim == nil {
-			fmt.Fprintln(stdout, "no runner jobs available after capability probe")
-			return nil
-		}
-		fmt.Fprintf(stdout, "claimed job %s %s\n", nextClaim.Job.ID, nextClaim.Job.Kind)
-		if nextClaim.Job.Kind == "eas.readiness.probe" {
-			if err := handleEASReadinessProbeJob(client, options, registration, nextClaim.Job, stdout); err != nil {
-				return err
-			}
-			return claimAndHandleDevelopmentAfterReadiness(client, options, registration, stdout)
-		}
-		if nextClaim.Job.Kind != "device.discover" {
-			return fmt.Errorf("unsupported runner job kind %q", nextClaim.Job.Kind)
-		}
-		if err := handleDeviceDiscoveryJob(client, options, registration, nextClaim.Job, stdout); err != nil {
-			return err
-		}
-		return claimAndHandleDevSessionStart(client, options, registration, stdout)
+		fmt.Fprintf(stdout, "completed capability probe %s\n", job.ID)
+		return claimAndHandleNextRunnerJob(client, options, registration, stdout, capabilities)
 	case "eas.readiness.probe":
-		if err := handleEASReadinessProbeJob(client, options, registration, claim.Job, stdout); err != nil {
+		if err := handleEASReadinessProbeJob(client, options, registration, job, stdout); err != nil {
 			return err
 		}
-		return claimAndHandleDevelopmentAfterReadiness(client, options, registration, stdout)
+		return claimAndHandleNextRunnerJob(client, options, registration, stdout, capabilities)
 	case "eas.build.dev":
-		return handleEASBuildDevJob(client, options, registration, claim.Job, stdout)
+		return handleEASBuildDevJob(client, options, registration, job, stdout)
 	case "device.discover":
-		if err := handleDeviceDiscoveryJob(client, options, registration, claim.Job, stdout); err != nil {
+		if err := handleDeviceDiscoveryJob(client, options, registration, job, stdout); err != nil {
 			return err
 		}
-		return claimAndHandleDevSessionStart(client, options, registration, stdout)
+		return claimAndHandleNextRunnerJob(client, options, registration, stdout, capabilities)
 	case "dev_session.start":
-		continueWorkflow, err := handleDevSessionStartJob(client, options, registration, claim.Job, stdout)
+		continueWorkflow, err := handleDevSessionStartJob(client, options, registration, job, stdout)
 		if err != nil {
 			return err
 		}
 		if !continueWorkflow {
 			return nil
 		}
-		if isDevelopmentDevSessionJob(claim.Job) {
-			return claimAndHandleDevSessionOpen(client, options, registration, stdout)
-		}
-		return claimAndHandleSimulatorOpen(client, options, registration, stdout)
+		return claimAndHandleNextRunnerJob(client, options, registration, stdout, capabilities)
 	case "dev_session.open":
-		return handleDevSessionOpenJob(client, options, registration, claim.Job, stdout)
+		return handleDevSessionOpenJob(client, options, registration, job, stdout)
 	case "dev_session.stop":
-		return handleDevSessionStopJob(client, options, registration, claim.Job, stdout)
+		return handleDevSessionStopJob(client, options, registration, job, stdout)
 	case "simulator.open":
-		return handleSimulatorOpenJob(client, options, registration, claim.Job, stdout)
+		return handleSimulatorOpenJob(client, options, registration, job, stdout)
 	case "maestro.run":
-		return handleMaestroRunJob(client, options, registration, claim.Job, stdout)
+		return handleMaestroRunJob(client, options, registration, job, stdout)
 	case "fastlane.produce", "fastlane.metadata", "fastlane.screenshots":
-		return handleFastlaneJob(client, options, registration, claim.Job, stdout)
+		return handleFastlaneJob(client, options, registration, job, stdout)
 	default:
-		return fmt.Errorf("unsupported runner job kind %q", claim.Job.Kind)
+		return fmt.Errorf("unsupported runner job kind %q", job.Kind)
 	}
 }
 
@@ -5566,6 +5577,7 @@ func claimAndHandleDevSessionStart(client *http.Client, options runnerOnceOption
 }
 
 func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) (bool, error) {
+	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		if completeErr := completeSourceBindingMismatchJob(client, options, registration, job, stdout, err); completeErr != nil {
 			return false, completeErr
@@ -6185,6 +6197,7 @@ func claimAndHandleSimulatorOpen(client *http.Client, options runnerOnceOptions,
 }
 
 func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
@@ -6325,6 +6338,7 @@ func claimAndHandleMaestroRun(client *http.Client, options runnerOnceOptions, re
 }
 
 func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
@@ -7199,6 +7213,7 @@ func handleEASReadinessProbeJob(client *http.Client, options runnerOnceOptions, 
 }
 
 func handleEASBuildDevJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
@@ -9036,6 +9051,45 @@ func runnerLivenessHeartbeatInterval() time.Duration {
 		"PREFLIGHT_RUNNER_LIVENESS_INTERVAL",
 		defaultRunnerLivenessHeartbeatInterval,
 	)
+}
+
+func runnerJobHeartbeatInterval() time.Duration {
+	return durationFromEnv(
+		"PREFLIGHT_RUNNER_JOB_HEARTBEAT_INTERVAL",
+		defaultRunnerJobHeartbeatInterval,
+	)
+}
+
+// startJobHeartbeat keeps the JOB lease fresh for the lifetime of a long-running
+// handler (build, dev-session, simulator boot, maestro). The runner-row
+// heartbeat (see runOnce) keeps the runner alive, but the job lease is otherwise
+// only renewed as a side effect of cancellation polls — so a multi-minute step
+// can outlive it and the server rejects the next write with HTTP 409
+// (runner_job_not_running). Call as `defer startJobHeartbeat(...)()` at the top
+// of the handler: it starts the ticker goroutine now and returns the stop func.
+func startJobHeartbeat(
+	client *http.Client,
+	options runnerOnceOptions,
+	registration runnerRegistrationData,
+	job apiRunnerJob,
+) func() {
+	if !runnerJobHeartbeatEnabled(registration) {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(runnerJobHeartbeatInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				_, _ = heartbeatRunnerJob(client, options, registration, job)
+			}
+		}
+	}()
+	return func() { close(stop) }
 }
 
 func durationFromEnv(name string, fallback time.Duration) time.Duration {
