@@ -8338,10 +8338,15 @@ func ensureHeadlessOsascriptShim() (string, error) {
 		return "", err
 	}
 	shimPath := filepath.Join(dir, "osascript")
+	// expo run:ios probes Simulator.app via AppleScript before installing through
+	// simctl: it counts "Simulator" processes (non-zero => already running, so it
+	// skips the GUI open) and reads the Simulator app bundle id. Answer both so
+	// expo proceeds straight to its headless simctl boot/install/launch.
 	script := "#!/bin/sh\n" +
 		"# Preflight headless shim: simulators run via simctl, no Simulator.app GUI.\n" +
 		"case \"$*\" in\n" +
-		"  *count*) echo 1 ;;\n" +
+		"  *\"count processes\"*) echo 1 ;;\n" +
+		"  *\"id of app\"*) echo com.apple.iphonesimulator ;;\n" +
 		"  *) : ;;\n" +
 		"esac\n" +
 		"exit 0\n"
