@@ -5148,11 +5148,21 @@ func cleanupStaleLocalPreflightProcessHandles(workspaceRoot string) (int, error)
 	cleaned := 0
 	err := filepath.WalkDir(workspaceRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			// Skip unreadable entries instead of aborting the whole reconcile.
+			// A workspace root at a volume root (e.g. /Volumes/dev) contains macOS
+			// system dirs (.DocumentRevisions-V100, .Spotlight-V100) that require
+			// Full Disk Access; permission errors there must not fail the runner.
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.IsDir() {
 			switch entry.Name() {
-			case ".git", "node_modules":
+			case ".git", "node_modules",
+				".DocumentRevisions-V100", ".Spotlight-V100", ".Trashes",
+				".fseventsd", ".TemporaryItems", ".vol", ".PKInstallSandboxManager",
+				".PKInstallSandboxManager-SystemSoftware":
 				return filepath.SkipDir
 			}
 			return nil
