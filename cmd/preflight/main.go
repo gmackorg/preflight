@@ -8295,6 +8295,18 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 	command := exec.Command("npx", expoRunArgs(platform, providerIdentity, port)...)
 	command.Dir = appDir
 	command.Env = expoCommandEnv(job)
+	if platform == "ios" {
+		// Run the simulator headlessly. `expo run:ios` opens the Simulator.app GUI
+		// via `osascript`/System Events, which fails on a runner with no Aqua/window
+		// session (launchd or ssh). All actual install/launch is done through simctl,
+		// which is headless — so we shim `osascript` on PATH to report Simulator as
+		// already running. expo then skips the GUI open and proceeds via simctl.
+		if shimDir, shimErr := ensureHeadlessOsascriptShim(); shimErr == nil {
+			command.Env = prependPathEnv(command.Env, shimDir)
+		} else {
+			fmt.Fprintf(logFile, "warning: could not install headless osascript shim: %v\n", shimErr)
+		}
+	}
 	flushExpoRunLog := attachRedactedCommandLog(command, logFile)
 	if err := runExpoPrebuild(logFile, appDir, platform, job, cancellationCheck); err != nil {
 		return logPath, err
@@ -8313,6 +8325,54 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 		return logPath, err
 	}
 	return logPath, nil
+}
+
+// ensureHeadlessOsascriptShim writes a tiny `osascript` shim into a dedicated
+// bin dir and returns that dir for prepending to a command's PATH. The shim
+// reports Simulator.app as already running (count -> 1) and no-ops everything
+// else, so GUI-dependent tooling (expo run:ios) proceeds via simctl on a host
+// with no Aqua/window session.
+func ensureHeadlessOsascriptShim() (string, error) {
+	dir := filepath.Join(os.TempDir(), "preflight-headless-bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	shimPath := filepath.Join(dir, "osascript")
+	script := "#!/bin/sh\n" +
+		"# Preflight headless shim: simulators run via simctl, no Simulator.app GUI.\n" +
+		"case \"$*\" in\n" +
+		"  *count*) echo 1 ;;\n" +
+		"  *) : ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if existing, err := os.ReadFile(shimPath); err != nil || string(existing) != script {
+		if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Chmod(shimPath, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// prependPathEnv returns env with dir prepended to its PATH entry (adding PATH
+// if absent).
+func prependPathEnv(env []string, dir string) []string {
+	out := make([]string, 0, len(env)+1)
+	found := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			out = append(out, "PATH="+dir+string(os.PathListSeparator)+kv[len("PATH="):])
+			found = true
+		} else {
+			out = append(out, kv)
+		}
+	}
+	if !found {
+		out = append(out, "PATH="+dir)
+	}
+	return out
 }
 
 func resolveStartedAdvertisedDevServerURL(options runnerOnceOptions, job apiRunnerJob, appDir string, process *expoDevServerProcess) (string, error) {
