@@ -10087,6 +10087,7 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		fmt.Fprintln(stdout, "  --app-dir <path>        Expo app directory (default: .)")
 		fmt.Fprintln(stdout, "  --platform ios|android  Platform to prove (default: ios)")
 		fmt.Fprintln(stdout, "  --lane <lane>           simulator or development (default: simulator)")
+		fmt.Fprintln(stdout, "  --priority <n>          scheduling priority; higher is claimed first (default: 0)")
 		fmt.Fprintln(stdout, "  --local-readiness       Validate local Expo/EAS/Maestro readiness without API calls")
 		fmt.Fprintln(stdout, "  --secret-ref <id>       Attach a Preflight-owned secret reference to runner jobs")
 		fmt.Fprintln(stdout, "  --wait-for-runner       Create the workflow even when no runner is currently available")
@@ -10141,6 +10142,18 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 			}
 			options.lane = args[index+1]
 			options.laneExplicit = true
+			index += 1
+		case "--priority":
+			if index+1 >= len(args) {
+				fmt.Fprintln(stderr, "--priority requires a value")
+				return 2
+			}
+			parsedPriority, parseErr := strconv.Atoi(args[index+1])
+			if parseErr != nil {
+				fmt.Fprintf(stderr, "--priority must be an integer: %v\n", parseErr)
+				return 2
+			}
+			options.priority = parsedPriority
 			index += 1
 		case "--json":
 			options.json = true
@@ -10340,6 +10353,9 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 	if len(options.secretReferenceIDs) > 0 {
 		workflowRequest["secretReferenceIds"] = append([]string{}, options.secretReferenceIDs...)
 	}
+	if options.priority != 0 {
+		workflowRequest["priority"] = options.priority
+	}
 
 	requestBody, err := json.Marshal(workflowRequest)
 	if err != nil {
@@ -10439,6 +10455,7 @@ type proveAppOptions struct {
 	pollInterval       time.Duration
 	watchTimeout       time.Duration
 	secretReferenceIDs []string
+	priority           int
 }
 
 type localReadinessReport struct {
