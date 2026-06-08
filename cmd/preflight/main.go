@@ -12156,15 +12156,24 @@ type expoConfigResolution struct {
 }
 
 func resolveExpoConfig(appDir string, env map[string]string) expoConfigResolution {
+	// The digest MUST be computed the same way every time, on every machine, so a
+	// source binding recorded at prove-app validates on any runner. Always digest
+	// the raw expo config FILE: it is deterministic and independent of whether
+	// `npx expo config` succeeds (it can flake/timeout) and of expo version/env —
+	// previously a CLI success digested the evaluated JSON while a CLI failure fell
+	// back to the file, so prove and validate could disagree on identical source
+	// and fail with a spurious source_binding_mismatch. The evaluated config is
+	// still used (when available) for the app identity, which genuinely needs it.
+	fileDigest := digestIfExists(expoConfigPath(appDir))
 	if config, ok := resolveExpoConfigWithExpoCLI(appDir, env); ok {
 		return expoConfigResolution{
 			identity: expoIdentityFromConfig(config),
-			digest:   digestJSON(config),
+			digest:   fileDigest,
 		}
 	}
 	return expoConfigResolution{
 		identity: readExpoAppIdentity(appDir),
-		digest:   digestIfExists(expoConfigPath(appDir)),
+		digest:   fileDigest,
 	}
 }
 
