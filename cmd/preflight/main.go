@@ -5583,6 +5583,27 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	}
 
 	appDir := appDirectoryForJob(options, job)
+	// Resolve the metro port up front: reuse our own dev server on the configured
+	// port; keep the configured port if it's free; otherwise pick the next free
+	// port so a foreign dev server on a multi-app host doesn't make expo decline
+	// to start ("Skipping dev server"). Every URL below derives from the result,
+	// and the chosen port is recorded in the dev-session payload so simulator.open
+	// uses it too.
+	if options.metroStatusURL == "" && options.metroPort > 0 {
+		configuredStatusURL := runnerLocalDevServerURL(options) + "/status"
+		if !preflightOwnedMetroReady(client, appDir, configuredStatusURL) &&
+			!localPortIsFree(options.metroPort) {
+			if freePort := nextFreeLocalPort(options.metroPort, 64); freePort != 0 {
+				fmt.Fprintf(
+					stdout,
+					"metro port %d is in use by another process; using %d\n",
+					options.metroPort,
+					freePort,
+				)
+				options.metroPort = freePort
+			}
+		}
+	}
 	localDevServerURL := runnerLocalDevServerURL(options)
 	advertisedURL, err := advertisedDevServerURL(options, job)
 	if err != nil {
@@ -6185,6 +6206,13 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 	if platform == "ios" {
 		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
 			fmt.Fprintf(stdout, "warning: could not normalize ios/.xcode.env.local: %v\n", err)
+		}
+		// Make the locked target the only booted simulator: expo's install/open
+		// step resolves the generic "booted" device and installs/launches on the
+		// wrong sim ("No development build installed") when several are booted.
+		shutdownOtherBootedIOSSimulators(options, providerIdentity, stdout)
+		if err := bootIOSSimulator(options, providerIdentity); err != nil {
+			fmt.Fprintf(stdout, "warning: could not boot locked simulator %s: %v\n", providerIdentity, err)
 		}
 	}
 	logPath, err := runExpoAppOpen(
@@ -7706,6 +7734,45 @@ func discoveryTargetLabel(job apiRunnerJob) string {
 	return "iOS simulator"
 }
 
+// shutdownOtherBootedIOSSimulators shuts down every booted simulator except the
+// locked target, so a tool that resolves the generic "booted" device (expo's
+// install/open) can't pick the wrong sim when several are booted.
+func shutdownOtherBootedIOSSimulators(
+	options runnerOnceOptions,
+	keepUDID string,
+	logWriter io.Writer,
+) {
+	output, err := exec.Command(
+		options.xcrunPath, "simctl", "list", "devices", "booted", "--json",
+	).Output()
+	if err != nil {
+		return
+	}
+	var parsed struct {
+		Devices map[string][]struct {
+			UDID  string `json:"udid"`
+			State string `json:"state"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return
+	}
+	for _, devices := range parsed.Devices {
+		for _, device := range devices {
+			if device.State != "Booted" || device.UDID == "" {
+				continue
+			}
+			if strings.EqualFold(device.UDID, keepUDID) {
+				continue
+			}
+			_ = exec.Command(options.xcrunPath, "simctl", "shutdown", device.UDID).Run()
+			if logWriter != nil {
+				fmt.Fprintf(logWriter, "shut down extra booted simulator %s\n", device.UDID)
+			}
+		}
+	}
+}
+
 func bootIOSSimulator(options runnerOnceOptions, providerIdentity string) error {
 	_ = exec.Command(options.xcrunPath, "simctl", "boot", providerIdentity).Run()
 	output, err := exec.Command(options.xcrunPath, "simctl", "bootstatus", providerIdentity, "-b").CombinedOutput()
@@ -9202,6 +9269,26 @@ func runnerLocalDevServerURL(options runnerOnceOptions) string {
 	return fmt.Sprintf("http://127.0.0.1:%d", options.metroPort)
 }
 
+// localPortIsFree reports whether a TCP port can be bound on loopback.
+func localPortIsFree(port int) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = listener.Close()
+	return true
+}
+
+// nextFreeLocalPort returns the first free TCP port in [start, start+span), or 0.
+func nextFreeLocalPort(start int, span int) int {
+	for port := start; port < start+span && port < 65536; port++ {
+		if localPortIsFree(port) {
+			return port
+		}
+	}
+	return 0
+}
+
 func lanHost() (string, error) {
 	if override := strings.TrimSpace(os.Getenv("PREFLIGHT_LAN_HOST")); override != "" {
 		return override, nil
@@ -9664,15 +9751,61 @@ func addPreflightAuthHeaders(request *http.Request, token string, workspaceID st
 }
 
 func doPreflightJSON(client *http.Client, request *http.Request) (json.RawMessage, error) {
+	// Retry transient failures (network/transport errors and 5xx) so a brief
+	// control-plane blip doesn't abort a whole `runner once` sequence and orphan
+	// an in-flight build. 4xx (auth, validation, conflict) returns immediately.
+	// Control-plane writes are idempotent (upserts / terminal-state guards), so
+	// re-sending is safe. The request body is rewound via GetBody (set by
+	// http.NewRequest for bytes.Reader bodies).
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			if request.GetBody != nil {
+				body, err := request.GetBody()
+				if err != nil {
+					return nil, lastErr
+				}
+				request.Body = body
+			}
+			time.Sleep(preflightRequestRetryBackoff(attempt))
+		}
+		data, status, err := doPreflightJSONOnce(client, request)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		retryable := status == 0 || (status >= 500 && status <= 599)
+		if !retryable || attempt == maxAttempts {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func preflightRequestRetryBackoff(attempt int) time.Duration {
+	delay := 500 * time.Millisecond * (1 << (attempt - 2))
+	if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	return delay
+}
+
+// doPreflightJSONOnce performs a single request attempt and returns the response
+// status code alongside the decoded data so the caller can decide retryability.
+func doPreflightJSONOnce(
+	client *http.Client,
+	request *http.Request,
+) (json.RawMessage, int, error) {
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read Preflight response: %w", err)
+		return nil, response.StatusCode, fmt.Errorf("read Preflight response: %w", err)
 	}
 
 	var envelope struct {
@@ -9683,18 +9816,18 @@ func doPreflightJSON(client *http.Client, request *http.Request) (json.RawMessag
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("decode Preflight response envelope: %w", err)
+		return nil, response.StatusCode, fmt.Errorf("decode Preflight response envelope: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if envelope.Error != nil {
-			return nil, fmt.Errorf("Preflight API returned HTTP %d (%s): %s", response.StatusCode, envelope.Error.Code, envelope.Error.Message)
+			return nil, response.StatusCode, fmt.Errorf("Preflight API returned HTTP %d (%s): %s", response.StatusCode, envelope.Error.Code, envelope.Error.Message)
 		}
-		return nil, fmt.Errorf("Preflight API returned HTTP %d", response.StatusCode)
+		return nil, response.StatusCode, fmt.Errorf("Preflight API returned HTTP %d", response.StatusCode)
 	}
 	if envelope.Error != nil {
-		return nil, fmt.Errorf("Preflight API error (%s): %s", envelope.Error.Code, envelope.Error.Message)
+		return nil, response.StatusCode, fmt.Errorf("Preflight API error (%s): %s", envelope.Error.Code, envelope.Error.Message)
 	}
-	return envelope.Data, nil
+	return envelope.Data, response.StatusCode, nil
 }
 
 func decodeEnvelopeData(data json.RawMessage, output any) error {
@@ -12575,11 +12708,58 @@ func sourceBindingGitIdentity(workspaceRoot string) (string, string, string) {
 }
 
 func sourceBindingGitState(workspaceRoot string, appDir string) (bool, []string) {
-	changedFiles := gitChangedFiles(workspaceRoot)
+	changedFiles := filterRunnerManagedPaths(
+		workspaceRoot,
+		appDir,
+		gitChangedFiles(workspaceRoot),
+	)
 	if len(changedFiles) == 0 {
 		return false, []string{}
 	}
 	return true, changedPreflightSetupFiles(workspaceRoot, appDir, changedFiles)
+}
+
+// filterRunnerManagedPaths drops paths the runner itself regenerates during a
+// build — the native projects from `expo prebuild` (ios/, android/), Preflight's
+// own artifact dir (.preflight/), and Expo caches (.expo/). These are not source
+// for reproducibility, and including them made every build dirty its own
+// workspace and dead-end at source-binding validation (dirtyWorkspace mismatch).
+// Genuine source changes (eas.json, app.config, src/) are still detected.
+func filterRunnerManagedPaths(
+	workspaceRoot string,
+	appDir string,
+	changed []string,
+) []string {
+	packagePath, err := filepath.Rel(workspaceRoot, appDir)
+	if err != nil {
+		packagePath = ""
+	}
+	packagePath = filepath.ToSlash(packagePath)
+	if packagePath == "." {
+		packagePath = ""
+	}
+	var prefixes []string
+	for _, dir := range []string{"ios", "android", ".preflight", ".expo"} {
+		if packagePath == "" {
+			prefixes = append(prefixes, dir+"/")
+		} else {
+			prefixes = append(prefixes, packagePath+"/"+dir+"/")
+		}
+	}
+	kept := make([]string, 0, len(changed))
+	for _, path := range changed {
+		managed := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(path, prefix) {
+				managed = true
+				break
+			}
+		}
+		if !managed {
+			kept = append(kept, path)
+		}
+	}
+	return kept
 }
 
 func gitChangedFiles(workspaceRoot string) []string {
