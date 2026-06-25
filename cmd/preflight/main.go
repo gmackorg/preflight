@@ -8034,25 +8034,40 @@ func ensureCiDependencies(repoRoot string, headSha string, packagePath string) e
 			return nil
 		}
 	}
+	// Install at the workspace root by default. For a NON-workspace repo (no
+	// root manifest, but the app has its own package.json), install standalone
+	// in the app dir so the app isn't held hostage to a missing root workspace.
+	installDir := repoRoot
+	appDir := repoRoot
+	if packagePath != "" && packagePath != "." {
+		appDir = filepath.Join(repoRoot, packagePath)
+	}
+	atWorkspaceRoot := true
+	if !fileExists(filepath.Join(repoRoot, "package.json")) &&
+		fileExists(filepath.Join(appDir, "package.json")) {
+		installDir = appDir
+		atWorkspaceRoot = false
+	}
+
 	pm, frozen, nonFrozen := "pnpm", []string{"install", "--frozen-lockfile"}, []string{"install"}
 	switch {
-	case fileExists(filepath.Join(repoRoot, "yarn.lock")):
+	case fileExists(filepath.Join(installDir, "yarn.lock")):
 		pm, frozen, nonFrozen = "yarn", []string{"install", "--frozen-lockfile"}, []string{"install"}
-	case fileExists(filepath.Join(repoRoot, "package-lock.json")):
+	case fileExists(filepath.Join(installDir, "package-lock.json")):
 		pm, frozen, nonFrozen = "npm", []string{"ci"}, []string{"install"}
 	}
 	// In a pnpm monorepo, scope the install to the target app's workspace
 	// package (+ its deps) so a broken SIBLING package (e.g. apps/web) doesn't
 	// fail the whole install and block the mobile build.
-	if pm == "pnpm" && packagePath != "" && packagePath != "." {
+	if pm == "pnpm" && atWorkspaceRoot && packagePath != "" && packagePath != "." {
 		filter := []string{"--filter", "./" + strings.TrimPrefix(packagePath, "./") + "..."}
 		frozen = append(filter, frozen...)
 		nonFrozen = append(append([]string{}, filter...), nonFrozen...)
 	}
-	if _, err := runCmd(repoRoot, pm, frozen...); err != nil {
+	if _, err := runCmd(installDir, pm, frozen...); err != nil {
 		// Lockfile drift shouldn't hard-fail a CI build — fall back to a
 		// non-frozen install (reset --hard restores the lockfile next run).
-		if _, err2 := runCmd(repoRoot, pm, nonFrozen...); err2 != nil {
+		if _, err2 := runCmd(installDir, pm, nonFrozen...); err2 != nil {
 			return fmt.Errorf("install deps (%s): %w", pm, err2)
 		}
 	}
