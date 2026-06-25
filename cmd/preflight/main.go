@@ -7997,23 +7997,72 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 		}
 	}
 
+	atRequested := false
 	if sha != "" {
 		if head, headErr := gitOutput(abs, "rev-parse", "HEAD"); headErr == nil && head == sha {
-			return nil
+			atRequested = true
 		}
 	}
 
-	if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
-		return fmt.Errorf("fetch: %w", fetchErr)
+	if !atRequested {
+		if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
+			return fmt.Errorf("fetch: %w", fetchErr)
+		}
+		ref := sha
+		if ref == "" {
+			ref = "origin/" + branch
+		}
+		if _, coErr := gitRun(abs, "checkout", "--force", "--detach", ref); coErr != nil {
+			return fmt.Errorf("checkout %s: %w", ref, coErr)
+		}
 	}
-	ref := sha
-	if ref == "" {
-		ref = "origin/" + branch
-	}
-	if _, coErr := gitRun(abs, "checkout", "--force", "--detach", ref); coErr != nil {
-		return fmt.Errorf("checkout %s: %w", ref, coErr)
+
+	// A fresh CI checkout has no node_modules, so metro/dev-build would fail.
+	// Install dependencies when the tree just changed or deps are absent.
+	if err := ensureCiDependencies(abs, !atRequested); err != nil {
+		return err
 	}
 	return nil
+}
+
+// ensureCiDependencies installs JS dependencies in a Preflight-owned CI
+// checkout so dev-session/build jobs have a ready workspace. It runs only when
+// the tree just changed or node_modules is missing, so repeat jobs in a
+// workflow chain don't reinstall. The package manager is detected from the
+// committed lockfile (pnpm/yarn/npm), defaulting to pnpm.
+func ensureCiDependencies(repoRoot string, treeChanged bool) error {
+	_, statErr := os.Stat(filepath.Join(repoRoot, "node_modules"))
+	if !treeChanged && statErr == nil {
+		return nil
+	}
+	pm, install := "pnpm", []string{"install", "--frozen-lockfile"}
+	switch {
+	case fileExists(filepath.Join(repoRoot, "yarn.lock")):
+		pm, install = "yarn", []string{"install", "--frozen-lockfile"}
+	case fileExists(filepath.Join(repoRoot, "package-lock.json")):
+		pm, install = "npm", []string{"ci"}
+	}
+	if _, err := runCmd(repoRoot, pm, install...); err != nil {
+		// Lockfile drift shouldn't hard-fail a CI build — fall back to a
+		// non-frozen install before giving up.
+		if _, err2 := runCmd(repoRoot, pm, "install"); err2 != nil {
+			return fmt.Errorf("install deps (%s): %w", pm, err2)
+		}
+	}
+	return nil
+}
+
+// runCmd runs an arbitrary command in dir, folding combined output into the
+// error for diagnosability in job logs.
+func runCmd(dir string, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		return trimmed, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, trimmed)
+	}
+	return trimmed, nil
 }
 
 func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob) error {
@@ -8037,6 +8086,16 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	if err := ensureCiCheckout(bindingRoot, binding); err != nil {
 		return sourceBindingMismatch("ciCheckout", bindingRoot, err.Error())
 	}
+	// For a Preflight-owned CI checkout the runner just checked out the exact
+	// commit, so the git-identity checks below are authoritative. The content
+	// digests / dirty-state / app-config comparisons are skipped: they assume a
+	// client computed them against the same tree, but CI omits them (sends a
+	// placeholder digest for persistence) and install legitimately mutates the
+	// tree (lockfile, node_modules, .preflight/ artifacts).
+	isCiRoot := func() bool {
+		abs, absErr := filepath.Abs(bindingRoot)
+		return absErr == nil && pathHasSegment(abs, ciCheckoutRootSegment)
+	}()
 	if strings.TrimSpace(bindingRoot) != "" {
 		absoluteBindingRoot, err := filepath.Abs(bindingRoot)
 		if err != nil {
@@ -8056,54 +8115,56 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		}
 	}
 
-	easProfileEnv := easProfileEnvForJob(appDir, job)
-	resolvedExpoConfig := resolveExpoConfig(appDir, easProfileEnv)
-	if expected := strings.TrimSpace(binding.ExpoConfigDigest); expected != "" {
-		if err := compareSourceBindingValue("expoConfigDigest", expected, resolvedExpoConfig.digest); err != nil {
-			return err
-		}
-	}
-	if expected := strings.TrimSpace(binding.EASJSONDigest); expected != "" {
-		if err := compareSourceBindingValue("easJsonDigest", expected, digestIfExists(filepath.Join(appDir, "eas.json"))); err != nil {
-			return err
-		}
-	}
-	if binding.DirtyWorkspace != nil || binding.ChangedSetupFiles != nil {
-		dirtyWorkspace, changedSetupFiles := sourceBindingGitState(bindingRoot, absoluteAppDir)
-		if binding.ChangedSetupFiles != nil {
-			if err := compareSourceBindingFileList(
-				"changedSetupFiles",
-				*binding.ChangedSetupFiles,
-				changedSetupFiles,
-			); err != nil {
+	if !isCiRoot {
+		easProfileEnv := easProfileEnvForJob(appDir, job)
+		resolvedExpoConfig := resolveExpoConfig(appDir, easProfileEnv)
+		if expected := strings.TrimSpace(binding.ExpoConfigDigest); expected != "" {
+			if err := compareSourceBindingValue("expoConfigDigest", expected, resolvedExpoConfig.digest); err != nil {
 				return err
 			}
 		}
-		if binding.DirtyWorkspace != nil {
-			if err := compareSourceBindingValue("dirtyWorkspace", fmt.Sprint(*binding.DirtyWorkspace), fmt.Sprint(dirtyWorkspace)); err != nil {
+		if expected := strings.TrimSpace(binding.EASJSONDigest); expected != "" {
+			if err := compareSourceBindingValue("easJsonDigest", expected, digestIfExists(filepath.Join(appDir, "eas.json"))); err != nil {
 				return err
 			}
 		}
-	}
+		if binding.DirtyWorkspace != nil || binding.ChangedSetupFiles != nil {
+			dirtyWorkspace, changedSetupFiles := sourceBindingGitState(bindingRoot, absoluteAppDir)
+			if binding.ChangedSetupFiles != nil {
+				if err := compareSourceBindingFileList(
+					"changedSetupFiles",
+					*binding.ChangedSetupFiles,
+					changedSetupFiles,
+				); err != nil {
+					return err
+				}
+			}
+			if binding.DirtyWorkspace != nil {
+				if err := compareSourceBindingValue("dirtyWorkspace", fmt.Sprint(*binding.DirtyWorkspace), fmt.Sprint(dirtyWorkspace)); err != nil {
+					return err
+				}
+			}
+		}
 
-	appIdentity := resolvedExpoConfig.identity
-	if err := compareSourceBindingValue("appScheme", binding.AppScheme, appIdentity.scheme); err != nil {
-		return err
-	}
-	if err := compareSourceBindingValue("expoSlug", binding.ExpoSlug, appIdentity.slug); err != nil {
-		return err
-	}
-	if err := compareSourceBindingValue("iosBundleId", binding.IOSBundleID, appIdentity.iosBundleID); err != nil {
-		return err
-	}
-	if err := compareSourceBindingValue("androidPackage", binding.AndroidPackage, appIdentity.androidPackage); err != nil {
-		return err
-	}
-	if err := compareSourceBindingValue("easProjectId", binding.EASProjectID, appIdentity.easProjectID); err != nil {
-		return err
-	}
-	if err := compareSourceBindingValue("easProfileName", binding.EASProfileName, actualEASProfileNameForJob(appDir, job)); err != nil {
-		return err
+		appIdentity := resolvedExpoConfig.identity
+		if err := compareSourceBindingValue("appScheme", binding.AppScheme, appIdentity.scheme); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("expoSlug", binding.ExpoSlug, appIdentity.slug); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("iosBundleId", binding.IOSBundleID, appIdentity.iosBundleID); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("androidPackage", binding.AndroidPackage, appIdentity.androidPackage); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("easProjectId", binding.EASProjectID, appIdentity.easProjectID); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("easProfileName", binding.EASProfileName, actualEASProfileNameForJob(appDir, job)); err != nil {
+			return err
+		}
 	}
 
 	if expected := strings.TrimSpace(binding.GitRemoteURL); expected != "" {
