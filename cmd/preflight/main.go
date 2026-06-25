@@ -7997,57 +7997,60 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 		}
 	}
 
-	atRequested := false
-	if sha != "" {
-		if head, headErr := gitOutput(abs, "rev-parse", "HEAD"); headErr == nil && head == sha {
-			atRequested = true
-		}
+	// Always fetch and hard-reset to the requested ref. reset --hard restores
+	// tracked files to the exact commit, discarding any lockfile/file drift a
+	// prior build's install left behind, so a frozen install is reproducible.
+	// (A prior non-frozen fallback could otherwise corrupt the lockfile and
+	// poison every later build of this checkout.)
+	if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
+		return fmt.Errorf("fetch: %w", fetchErr)
 	}
-
-	if !atRequested {
-		if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
-			return fmt.Errorf("fetch: %w", fetchErr)
-		}
-		ref := sha
-		if ref == "" {
-			ref = "origin/" + branch
-		}
-		if _, coErr := gitRun(abs, "checkout", "--force", "--detach", ref); coErr != nil {
-			return fmt.Errorf("checkout %s: %w", ref, coErr)
-		}
+	ref := sha
+	if ref == "" {
+		ref = "origin/" + branch
+	}
+	if _, rErr := gitRun(abs, "reset", "--hard", ref); rErr != nil {
+		return fmt.Errorf("reset %s: %w", ref, rErr)
 	}
 
 	// A fresh CI checkout has no node_modules, so metro/dev-build would fail.
-	// Install dependencies when the tree just changed or deps are absent.
-	if err := ensureCiDependencies(abs, !atRequested); err != nil {
+	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
+	if err := ensureCiDependencies(abs, resolved); err != nil {
 		return err
 	}
 	return nil
 }
 
 // ensureCiDependencies installs JS dependencies in a Preflight-owned CI
-// checkout so dev-session/build jobs have a ready workspace. It runs only when
-// the tree just changed or node_modules is missing, so repeat jobs in a
-// workflow chain don't reinstall. The package manager is detected from the
-// committed lockfile (pnpm/yarn/npm), defaulting to pnpm.
-func ensureCiDependencies(repoRoot string, treeChanged bool) error {
-	_, statErr := os.Stat(filepath.Join(repoRoot, "node_modules"))
-	if !treeChanged && statErr == nil {
-		return nil
+// checkout so dev-session/build jobs have a ready workspace. A per-commit
+// success marker means repeat jobs in a workflow chain don't reinstall, but a
+// failed/partial prior install (marker absent) is always repaired — checking
+// only "node_modules exists" would keep a broken partial install. The package
+// manager is detected from the committed lockfile (pnpm/yarn/npm).
+func ensureCiDependencies(repoRoot string, headSha string) error {
+	marker := filepath.Join(repoRoot, ".preflight", "ci-deps.sha")
+	if headSha != "" {
+		if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == headSha {
+			return nil
+		}
 	}
-	pm, install := "pnpm", []string{"install", "--frozen-lockfile"}
+	pm, frozen := "pnpm", []string{"install", "--frozen-lockfile"}
 	switch {
 	case fileExists(filepath.Join(repoRoot, "yarn.lock")):
-		pm, install = "yarn", []string{"install", "--frozen-lockfile"}
+		pm, frozen = "yarn", []string{"install", "--frozen-lockfile"}
 	case fileExists(filepath.Join(repoRoot, "package-lock.json")):
-		pm, install = "npm", []string{"ci"}
+		pm, frozen = "npm", []string{"ci"}
 	}
-	if _, err := runCmd(repoRoot, pm, install...); err != nil {
+	if _, err := runCmd(repoRoot, pm, frozen...); err != nil {
 		// Lockfile drift shouldn't hard-fail a CI build — fall back to a
-		// non-frozen install before giving up.
+		// non-frozen install (reset --hard restores the lockfile next run).
 		if _, err2 := runCmd(repoRoot, pm, "install"); err2 != nil {
 			return fmt.Errorf("install deps (%s): %w", pm, err2)
 		}
+	}
+	if headSha != "" {
+		_ = os.MkdirAll(filepath.Dir(marker), 0o755)
+		_ = os.WriteFile(marker, []byte(headSha), 0o644)
 	}
 	return nil
 }
