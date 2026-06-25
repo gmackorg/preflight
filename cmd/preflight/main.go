@@ -8179,7 +8179,10 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 			return err
 		}
 	}
-	if expected := strings.TrimSpace(binding.GitBranch); expected != "" {
+	// gitBranch is skipped for CI roots: ensureCiCheckout does `git reset --hard
+	// <sha>` which leaves HEAD on the clone's local branch name (or detached),
+	// so the local branch name is not meaningful — gitCommitSha is authoritative.
+	if expected := strings.TrimSpace(binding.GitBranch); expected != "" && !isCiRoot {
 		actual, err := gitOutput(bindingRoot, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
 			return sourceBindingMismatch("gitBranch", expected, err.Error())
