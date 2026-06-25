@@ -8015,7 +8015,7 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 
 	// A fresh CI checkout has no node_modules, so metro/dev-build would fail.
 	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
-	if err := ensureCiDependencies(abs, resolved); err != nil {
+	if err := ensureCiDependencies(abs, resolved, binding.PackagePath); err != nil {
 		return err
 	}
 	return nil
@@ -8027,24 +8027,32 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 // failed/partial prior install (marker absent) is always repaired — checking
 // only "node_modules exists" would keep a broken partial install. The package
 // manager is detected from the committed lockfile (pnpm/yarn/npm).
-func ensureCiDependencies(repoRoot string, headSha string) error {
+func ensureCiDependencies(repoRoot string, headSha string, packagePath string) error {
 	marker := filepath.Join(repoRoot, ".preflight", "ci-deps.sha")
 	if headSha != "" {
 		if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == headSha {
 			return nil
 		}
 	}
-	pm, frozen := "pnpm", []string{"install", "--frozen-lockfile"}
+	pm, frozen, nonFrozen := "pnpm", []string{"install", "--frozen-lockfile"}, []string{"install"}
 	switch {
 	case fileExists(filepath.Join(repoRoot, "yarn.lock")):
-		pm, frozen = "yarn", []string{"install", "--frozen-lockfile"}
+		pm, frozen, nonFrozen = "yarn", []string{"install", "--frozen-lockfile"}, []string{"install"}
 	case fileExists(filepath.Join(repoRoot, "package-lock.json")):
-		pm, frozen = "npm", []string{"ci"}
+		pm, frozen, nonFrozen = "npm", []string{"ci"}, []string{"install"}
+	}
+	// In a pnpm monorepo, scope the install to the target app's workspace
+	// package (+ its deps) so a broken SIBLING package (e.g. apps/web) doesn't
+	// fail the whole install and block the mobile build.
+	if pm == "pnpm" && packagePath != "" && packagePath != "." {
+		filter := []string{"--filter", "./" + strings.TrimPrefix(packagePath, "./") + "..."}
+		frozen = append(filter, frozen...)
+		nonFrozen = append(append([]string{}, filter...), nonFrozen...)
 	}
 	if _, err := runCmd(repoRoot, pm, frozen...); err != nil {
 		// Lockfile drift shouldn't hard-fail a CI build — fall back to a
 		// non-frozen install (reset --hard restores the lockfile next run).
-		if _, err2 := runCmd(repoRoot, pm, "install"); err2 != nil {
+		if _, err2 := runCmd(repoRoot, pm, nonFrozen...); err2 != nil {
 			return fmt.Errorf("install deps (%s): %w", pm, err2)
 		}
 	}
