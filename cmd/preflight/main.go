@@ -5166,6 +5166,29 @@ func cleanupExpiredLocalPreflightArtifacts(workspaceRoot string, ttl time.Durati
 }
 
 func cleanupStaleLocalPreflightProcessHandles(workspaceRoot string) (int, error) {
+	if strings.EqualFold(os.Getenv("PREFLIGHT_RECURSIVE_PROCESS_HANDLE_CLEANUP"), "1") ||
+		strings.EqualFold(os.Getenv("PREFLIGHT_RECURSIVE_PROCESS_HANDLE_CLEANUP"), "true") {
+		return cleanupStaleLocalPreflightProcessHandlesRecursive(workspaceRoot)
+	}
+
+	pidPath := filepath.Join(workspaceRoot, ".preflight", "expo-dev-session.pid")
+	stale, err := localPidFileIsStale(pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !stale {
+		return 0, nil
+	}
+	if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("remove stale Preflight process handle %s: %w", pidPath, err)
+	}
+	return 1, nil
+}
+
+func cleanupStaleLocalPreflightProcessHandlesRecursive(workspaceRoot string) (int, error) {
 	cleaned := 0
 	err := filepath.WalkDir(workspaceRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -5415,7 +5438,8 @@ func claimRunnerJob(client *http.Client, options runnerOnceOptions, registration
 	if runnerJobStreamEnabled(registration) {
 		available, err := streamRunnerJobAvailable(client, options, registration)
 		if err == nil && !available {
-			return nil, nil
+			// The stream is only an optimization. A stale stream projection must
+			// not hide queued jobs from the authoritative claim endpoint.
 		}
 	}
 	data, err := postPreflightJSON(
@@ -5455,8 +5479,8 @@ func runnerJobStreamEnabled(registration runnerRegistrationData) bool {
 }
 
 func runnerJobHeartbeatEnabled(registration runnerRegistrationData) bool {
-	enabled, _ := registration.Runner.Capabilities["runnerJobHeartbeat"].(bool)
-	return enabled
+	enabled, ok := registration.Runner.Capabilities["runnerJobHeartbeat"].(bool)
+	return !ok || enabled
 }
 
 func runnerArtifactUploadEnabled(registration runnerRegistrationData) bool {
@@ -7908,6 +7932,90 @@ func (err *sourceBindingMismatchError) Error() string {
 	return fmt.Sprintf("%s expected %s but local value was %s", err.field, err.expected, err.actual)
 }
 
+// ciCheckoutRootSegment marks workspace roots that Preflight owns for
+// CI-driven builds. Only paths containing this segment are eligible for
+// automatic clone/fetch/checkout — the runner never mutates a developer's
+// working tree under the ordinary runner workspace root.
+const ciCheckoutRootSegment = ".preflight-ci"
+
+// pathHasSegment reports whether any path component of p equals segment.
+func pathHasSegment(p string, segment string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == segment {
+			return true
+		}
+	}
+	return false
+}
+
+// gitRun runs git (optionally with -C dir) and returns combined output, folding
+// any stderr into the error so checkout failures are diagnosable in job logs.
+func gitRun(dir string, args ...string) (string, error) {
+	full := args
+	if strings.TrimSpace(dir) != "" {
+		full = append([]string{"-C", dir}, args...)
+	}
+	output, err := exec.Command("git", full...).CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		return trimmed, fmt.Errorf("%w: %s", err, trimmed)
+	}
+	return trimmed, nil
+}
+
+// ensureCiCheckout makes a Preflight-owned CI workspace root match the source
+// binding's git commit before validation runs. It is a no-op for any path that
+// is not under a .preflight-ci/ root, so developer checkouts under the runner
+// workspace root are never touched. On a CI root it clones the repo when
+// missing and fetches + force-checks-out the requested commit (detached HEAD),
+// skipping the network round-trip when HEAD already matches.
+func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error {
+	if strings.TrimSpace(bindingRoot) == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(bindingRoot)
+	if err != nil {
+		return nil
+	}
+	if !pathHasSegment(abs, ciCheckoutRootSegment) {
+		return nil
+	}
+	remote := strings.TrimSpace(binding.GitRemoteURL)
+	sha := strings.TrimSpace(binding.GitCommitSHA)
+	branch := strings.TrimSpace(binding.GitBranch)
+	if remote == "" || (sha == "" && branch == "") {
+		// Nothing to sync against — leave the directory as-is.
+		return nil
+	}
+
+	if _, statErr := os.Stat(filepath.Join(abs, ".git")); statErr != nil {
+		if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
+			return fmt.Errorf("create parent: %w", mkErr)
+		}
+		if _, cloneErr := gitRun("", "clone", remote, abs); cloneErr != nil {
+			return fmt.Errorf("clone %s: %w", remote, cloneErr)
+		}
+	}
+
+	if sha != "" {
+		if head, headErr := gitOutput(abs, "rev-parse", "HEAD"); headErr == nil && head == sha {
+			return nil
+		}
+	}
+
+	if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
+		return fmt.Errorf("fetch: %w", fetchErr)
+	}
+	ref := sha
+	if ref == "" {
+		ref = "origin/" + branch
+	}
+	if _, coErr := gitRun(abs, "checkout", "--force", "--detach", ref); coErr != nil {
+		return fmt.Errorf("checkout %s: %w", ref, coErr)
+	}
+	return nil
+}
+
 func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob) error {
 	binding := job.Payload.SourceBinding
 	if runnerJobSourceBindingEmpty(binding) {
@@ -7922,6 +8030,12 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	bindingRoot := binding.WorkspaceRoot
 	if bindingRoot == "" {
 		bindingRoot = options.workspaceRoot
+	}
+	// CI-driven builds target a Preflight-owned checkout under .preflight-ci/;
+	// sync it to the requested commit before validating. No-op for developer
+	// working trees, which are never under a CI root.
+	if err := ensureCiCheckout(bindingRoot, binding); err != nil {
+		return sourceBindingMismatch("ciCheckout", bindingRoot, err.Error())
 	}
 	if strings.TrimSpace(bindingRoot) != "" {
 		absoluteBindingRoot, err := filepath.Abs(bindingRoot)
@@ -8493,13 +8607,42 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 	}
 	if err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
 		flushExpoRunLog()
-		return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
+		if !canContinueAfterExpoIOSOpenFailure(logPath, options, providerIdentity, job) {
+			return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
+		}
+		_, _ = fmt.Fprintf(logFile, "warning: expo run:ios reported a development-client open failure after installing the app; continuing with Preflight simctl openurl fallback: %v\n", err)
 	}
 	flushExpoRunLog()
 	if err := openExpoDevelopmentClient(logFile, options, platform, providerIdentity, port, job, cancellationCheck); err != nil {
 		return logPath, err
 	}
 	return logPath, nil
+}
+
+func canContinueAfterExpoIOSOpenFailure(logPath string, options runnerOnceOptions, providerIdentity string, job apiRunnerJob) bool {
+	if strings.TrimSpace(options.xcrunPath) == "" {
+		return false
+	}
+	bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
+	if bundleID == "" {
+		return false
+	}
+	logOutput, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(logOutput), "No development build") {
+		return false
+	}
+	openProviderIdentity := strings.TrimSpace(job.Payload.ProviderIdentity)
+	if openProviderIdentity == "" {
+		openProviderIdentity = strings.TrimSpace(job.TargetID)
+	}
+	if openProviderIdentity == "" {
+		openProviderIdentity = strings.TrimSpace(providerIdentity)
+	}
+	if openProviderIdentity == "" {
+		return false
+	}
+	command := exec.Command(options.xcrunPath, "simctl", "get_app_container", openProviderIdentity, bundleID, "app")
+	return command.Run() == nil
 }
 
 // ensureHeadlessOsascriptShim writes a tiny `osascript` shim into a dedicated
@@ -8809,6 +8952,9 @@ func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, plat
 		if strings.TrimSpace(options.xcrunPath) == "" {
 			return fmt.Errorf("open iOS development client: xcrun path is empty")
 		}
+		if err := bootIOSSimulator(options, openProviderIdentity); err != nil {
+			return fmt.Errorf("boot iOS simulator before dev-client open: %w", err)
+		}
 		if bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID); bundleID != "" {
 			runOptionalLoggedXcrunCommand(logFile, options, "simctl", "terminate", openProviderIdentity, bundleID)
 		}
@@ -8845,7 +8991,11 @@ func simulatorDeepLinkURL(job apiRunnerJob, port int) string {
 		advertisedURL = strings.TrimSpace(job.Payload.DevSession.URL)
 	}
 	if advertisedURL == "" && port > 0 {
-		advertisedURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+		if isAndroidEmulatorJob(job) {
+			advertisedURL = androidEmulatorDevServerURL(port)
+		} else {
+			advertisedURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+		}
 	}
 	if advertisedURL == "" {
 		return ""
@@ -9396,6 +9546,9 @@ func advertisedDevServerURL(options runnerOnceOptions, job apiRunnerJob) (string
 	if options.hostMode == "localhost" {
 		return runnerLocalDevServerURL(options), nil
 	}
+	if isAndroidEmulatorJob(job) {
+		return androidEmulatorDevServerURL(options.metroPort), nil
+	}
 	return fmt.Sprintf("http://127.0.0.1:%d", options.metroPort), nil
 }
 
@@ -9404,6 +9557,14 @@ func runnerLocalDevServerURL(options runnerOnceOptions) string {
 		return fmt.Sprintf("http://localhost:%d", options.metroPort)
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d", options.metroPort)
+}
+
+func isAndroidEmulatorJob(job apiRunnerJob) bool {
+	return jobPlatform(job) == "android" && !isDevelopmentDevSessionJob(job)
+}
+
+func androidEmulatorDevServerURL(port int) string {
+	return fmt.Sprintf("http://10.0.2.2:%d", port)
 }
 
 // localPortIsFree reports whether a TCP port can be bound on loopback.
@@ -9463,11 +9624,11 @@ func developmentQRURL(sourceBinding runnerJobSourceBinding, advertisedURL string
 }
 
 func appSchemeForDevelopmentClient(sourceBinding runnerJobSourceBinding) string {
-	if strings.TrimSpace(sourceBinding.ExpoSlug) != "" {
-		return "exp+" + strings.TrimSpace(sourceBinding.ExpoSlug)
-	}
 	if strings.TrimSpace(sourceBinding.AppScheme) != "" {
 		return strings.TrimSpace(sourceBinding.AppScheme)
+	}
+	if strings.TrimSpace(sourceBinding.ExpoSlug) != "" {
+		return "exp+" + strings.TrimSpace(sourceBinding.ExpoSlug)
 	}
 	return "exp"
 }
@@ -9928,12 +10089,19 @@ func preflightRequestRetryBackoff(attempt int) time.Duration {
 	return delay
 }
 
+func preflightRequestTimeout() time.Duration {
+	return durationFromEnv("PREFLIGHT_API_REQUEST_TIMEOUT", 20*time.Second)
+}
+
 // doPreflightJSONOnce performs a single request attempt and returns the response
 // status code alongside the decoded data so the caller can decide retryability.
 func doPreflightJSONOnce(
 	client *http.Client,
 	request *http.Request,
 ) (json.RawMessage, int, error) {
+	ctx, cancel := context.WithTimeout(request.Context(), preflightRequestTimeout())
+	defer cancel()
+	request = request.Clone(ctx)
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, 0, err
