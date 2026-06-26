@@ -8068,7 +8068,13 @@ func ensureCiDependencies(repoRoot string, headSha string, packagePath string) e
 		// Lockfile drift shouldn't hard-fail a CI build — fall back to a
 		// non-frozen install (reset --hard restores the lockfile next run).
 		if _, err2 := runCmd(installDir, pm, nonFrozen...); err2 != nil {
-			return fmt.Errorf("install deps (%s): %w", pm, err2)
+			// A failing lifecycle script (e.g. a workspace-lint postinstall like
+			// `sherif`) shouldn't block a build — retry skipping scripts so the
+			// dependency tree still gets installed.
+			noScripts := append(append([]string{}, nonFrozen...), "--ignore-scripts")
+			if _, err3 := runCmd(installDir, pm, noScripts...); err3 != nil {
+				return fmt.Errorf("install deps (%s): %w", pm, err2)
+			}
 		}
 	}
 	if headSha != "" {
