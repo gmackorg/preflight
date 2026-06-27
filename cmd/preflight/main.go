@@ -5629,6 +5629,11 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	}
 
 	appDir := appDirectoryForJob(options, job)
+	// The prove-app chain (dev_session.start -> simulator.open -> maestro.run) has
+	// no dev_session.stop, so Metro from a PRIOR build leaks and holds the metro
+	// port, making expo decline to start ("Skipping dev server") for this build.
+	// Reap leftover dev servers from other CI checkouts before we resolve the port.
+	cleanupStalePreflightDevServers(appDir, stdout)
 	// Resolve the metro port up front: reuse our own dev server on the configured
 	// port; keep the configured port if it's free; otherwise pick the next free
 	// port so a foreign dev server on a multi-app host doesn't make expo decline
@@ -8625,6 +8630,57 @@ func terminateExpoDevServer(process *expoDevServerProcess) {
 	}
 	terminateCommandProcess(process.pid)
 	_ = process.command.Wait()
+}
+
+// preflightCiCheckoutSegment extracts the "<repo>" name that follows
+// "/.preflight-ci/" in a path or process command line, or "" if absent.
+func preflightCiCheckoutSegment(s string) string {
+	const marker = "/.preflight-ci/"
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := s[idx+len(marker):]
+	if end := strings.IndexAny(rest, "/ "); end >= 0 {
+		return rest[:end]
+	}
+	return rest
+}
+
+// cleanupStalePreflightDevServers kills leftover `expo start --dev-client` Metro
+// processes from PRIOR preflight CI builds (a different .preflight-ci checkout
+// than the current job). The prove-app chain has no dev_session.stop, so without
+// this each completed build leaks its Metro, which then holds the metro port and
+// makes expo decline to start for the next build. Serial-runner safe: it never
+// touches a dev server for the current job's own checkout (so same-app reuse and
+// concurrent builds of the SAME app are preserved).
+func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
+	currentSeg := preflightCiCheckoutSegment(currentAppDir)
+	out, err := exec.Command("ps", "-eo", "pid=,command=").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "/.preflight-ci/") ||
+			!strings.Contains(line, "--dev-client") ||
+			!strings.Contains(line, "start") {
+			continue
+		}
+		seg := preflightCiCheckoutSegment(line)
+		if seg == "" || (currentSeg != "" && seg == currentSeg) {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 0 {
+			continue
+		}
+		pid, convErr := strconv.Atoi(fields[0])
+		if convErr != nil || pid <= 0 {
+			continue
+		}
+		fmt.Fprintf(stdout, "reaping stale preflight dev server for %s (pid %d)\n", seg, pid)
+		terminateCommandProcess(pid)
+	}
 }
 
 func devSessionStartFailureCode(err error) string {
