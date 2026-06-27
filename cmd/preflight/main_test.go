@@ -5645,8 +5645,8 @@ exit 0
 	if err != nil {
 		t.Fatalf("read xcrun log: %v", err)
 	}
-	if !strings.Contains(string(xcrunOutput), "simctl boot 6BA8F38E-BF97-4830-98A6-E459E4312F29") {
-		t.Fatalf("expected simulator boot command, got %q", string(xcrunOutput))
+	if bootCount := strings.Count(string(xcrunOutput), "simctl boot 6BA8F38E-BF97-4830-98A6-E459E4312F29"); bootCount < 2 {
+		t.Fatalf("expected simulator boot command before install and before dev-client open, got %d in %q", bootCount, string(xcrunOutput))
 	}
 	npxOutput, err := os.ReadFile(npxLog)
 	if err != nil {
@@ -9368,7 +9368,7 @@ sleep 1
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
-			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
+			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"],"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/heartbeat":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","status":"online"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
@@ -9479,7 +9479,7 @@ func TestRunnerOnceStopsPreflightOwnedDevSession(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
-			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
+			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"],"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/heartbeat":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","status":"online"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
@@ -10184,6 +10184,46 @@ func TestAdvertisedDevServerURLUsesLocalhostForLocalhostHostMode(t *testing.T) {
 	}
 }
 
+func TestAdvertisedDevServerURLUsesAndroidEmulatorHostForAndroidSimulator(t *testing.T) {
+	url, err := advertisedDevServerURL(
+		runnerOnceOptions{
+			hostMode:  "lan",
+			metroPort: 19000,
+		},
+		apiRunnerJob{
+			Payload: runnerJobPayload{
+				Platform: "android",
+				Lane:     "simulator",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("advertised dev server URL failed: %v", err)
+	}
+	if url != "http://10.0.2.2:19000" {
+		t.Fatalf("expected Android emulator dev server URL, got %q", url)
+	}
+}
+
+func TestSimulatorDeepLinkURLUsesAndroidEmulatorHostFallback(t *testing.T) {
+	deepLinkURL := simulatorDeepLinkURL(
+		apiRunnerJob{
+			Payload: runnerJobPayload{
+				Platform: "android",
+				Lane:     "simulator",
+				SourceBinding: runnerJobSourceBinding{
+					AppScheme: "forgegraph",
+				},
+			},
+		},
+		19000,
+	)
+	expected := "forgegraph://expo-development-client/?url=http%3A%2F%2F10.0.2.2%3A19000"
+	if deepLinkURL != expected {
+		t.Fatalf("expected Android emulator deep link %q, got %q", expected, deepLinkURL)
+	}
+}
+
 func TestRunnerOnceRegistersClaimsDiscoversAndLocksIOSSimulator(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
@@ -10618,6 +10658,161 @@ exit 42
 	}
 }
 
+func TestRunExpoAppOpenContinuesAfterIOSDevelopmentClientFalseNegative(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	npxLog := filepath.Join(t.TempDir(), "npx.log")
+	xcrunLog := filepath.Join(t.TempDir(), "xcrun.log")
+	t.Setenv("NPX_LOG", npxLog)
+	t.Setenv("XCRUN_LOG", xcrunLog)
+	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$NPX_LOG"
+case "$*" in
+  "expo prebuild"*) exit 0 ;;
+  "expo run:ios"*)
+    printf 'CommandError: No development build (com.gmacko.forgegraph.dev) for this project is installed.\n' >&2
+    exit 1
+    ;;
+esac
+exit 0
+`), 0o755); err != nil {
+		t.Fatalf("write fake npx: %v", err)
+	}
+	xcrunPath := writeFakeExecutable(t, "xcrun", `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$XCRUN_LOG"
+case "$*" in
+  "simctl get_app_container"*) printf '/tmp/LatchFlowDev.app\n'; exit 0 ;;
+esac
+exit 0
+`)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	job := apiRunnerJob{
+		TargetID: "pftgt_cli",
+		Payload: runnerJobPayload{
+			ProviderIdentity: "6BA8F38E-BF97-4830-98A6-E459E4312F29",
+			SourceBinding: runnerJobSourceBinding{
+				AppScheme:   "forgegraph",
+				ExpoSlug:    "forgegraf",
+				IOSBundleID: "com.gmacko.forgegraph.dev",
+			},
+			DevSession: runnerJobDevSession{
+				URL:  "http://127.0.0.1:19000",
+				Port: 19000,
+			},
+		},
+	}
+
+	logPath, err := runExpoAppOpen(
+		runnerOnceOptions{xcrunPath: xcrunPath},
+		"ios",
+		appDir,
+		"6BA8F38E-BF97-4830-98A6-E459E4312F29",
+		19000,
+		job,
+	)
+	if err != nil {
+		t.Fatalf("expected Preflight simctl open fallback after Expo false negative, got %v", err)
+	}
+	logOutput, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read expo log: %v", err)
+	}
+	if !strings.Contains(string(logOutput), "continuing with Preflight simctl openurl fallback") {
+		t.Fatalf("expected fallback warning in expo log, got %q", string(logOutput))
+	}
+	xcrunOutput, err := os.ReadFile(xcrunLog)
+	if err != nil {
+		t.Fatalf("read xcrun log: %v", err)
+	}
+	if !strings.Contains(string(xcrunOutput), "simctl get_app_container 6BA8F38E-BF97-4830-98A6-E459E4312F29 com.gmacko.forgegraph.dev app") {
+		t.Fatalf("expected installed-app probe, got %q", string(xcrunOutput))
+	}
+	if !strings.Contains(string(xcrunOutput), "simctl openurl 6BA8F38E-BF97-4830-98A6-E459E4312F29 forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000") {
+		t.Fatalf("expected Preflight simctl openurl fallback, got %q", string(xcrunOutput))
+	}
+}
+
+func TestOpenExpoDevelopmentClientRebootsIOSSimulatorBeforeOpenURL(t *testing.T) {
+	xcrunPath := writeFakeExecutable(t, "xcrun", `#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$XCRUN_LOG"
+exit 0
+`)
+	xcrunLog := filepath.Join(t.TempDir(), "xcrun.log")
+	t.Setenv("XCRUN_LOG", xcrunLog)
+
+	logPath := filepath.Join(t.TempDir(), "expo-run-ios.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close()
+
+	job := apiRunnerJob{
+		TargetID: "pftgt_cli",
+		Payload: runnerJobPayload{
+			ProviderIdentity: "6BA8F38E-BF97-4830-98A6-E459E4312F29",
+			SourceBinding: runnerJobSourceBinding{
+				AppScheme:   "forgegraph",
+				ExpoSlug:    "forgegraf",
+				IOSBundleID: "com.gmacko.forgegraph.dev",
+			},
+			DevSession: runnerJobDevSession{
+				URL:  "http://127.0.0.1:19000",
+				Port: 19000,
+			},
+		},
+	}
+
+	err = openExpoDevelopmentClient(
+		logFile,
+		runnerOnceOptions{xcrunPath: xcrunPath},
+		"ios",
+		"6BA8F38E-BF97-4830-98A6-E459E4312F29",
+		19000,
+		job,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("open development client: %v", err)
+	}
+
+	xcrunOutput, err := os.ReadFile(xcrunLog)
+	if err != nil {
+		t.Fatalf("read xcrun log: %v", err)
+	}
+	expected := strings.Join([]string{
+		"simctl boot 6BA8F38E-BF97-4830-98A6-E459E4312F29",
+		"simctl bootstatus 6BA8F38E-BF97-4830-98A6-E459E4312F29 -b",
+		"simctl terminate 6BA8F38E-BF97-4830-98A6-E459E4312F29 com.gmacko.forgegraph.dev",
+		"simctl openurl 6BA8F38E-BF97-4830-98A6-E459E4312F29 forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000",
+	}, "\n") + "\n"
+	if string(xcrunOutput) != expected {
+		t.Fatalf("expected simulator to be booted immediately before openurl\nwant:\n%s\ngot:\n%s", expected, string(xcrunOutput))
+	}
+}
+
+func TestRunnerJobHeartbeatDefaultsToEnabledForPersistedRunnerCapabilities(t *testing.T) {
+	registration := runnerRegistrationData{
+		Runner: apiRunner{
+			ID: "pfrun_persisted",
+			Capabilities: map[string]any{
+				"runnerJobStream": true,
+			},
+		},
+		Token: "runner_token",
+	}
+
+	if !runnerJobHeartbeatEnabled(registration) {
+		t.Fatal("expected job heartbeat to default on when persisted runner capabilities omit the feature flag")
+	}
+}
+
 func TestRunnerOnceCancelsInFlightSimulatorOpenWhenJobStatusTurnsCancelled(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
@@ -10647,7 +10842,7 @@ esac
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
-			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
+			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"],"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/heartbeat":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","status":"online"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
@@ -10662,6 +10857,11 @@ esac
 				t.Fatalf("missing runner token on job read: %q", r.Header.Get("Authorization"))
 			}
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_open","kind":"simulator.open","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_job"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_open/heartbeat":
+			if r.Header.Get("Authorization") != "Bearer runner_token" {
+				t.Fatalf("missing runner token on job heartbeat: %q", r.Header.Get("Authorization"))
+			}
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_open","kind":"simulator.open","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_job_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_open/complete":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -10948,20 +11148,20 @@ func TestExpoRunArgsReusePreflightOwnedBundler(t *testing.T) {
 	}
 }
 
-func TestDevelopmentClientURLsUseGeneratedExpoScheme(t *testing.T) {
+func TestDevelopmentClientURLsUseExplicitAppScheme(t *testing.T) {
 	sourceBinding := runnerJobSourceBinding{
 		AppScheme: "forgegraph",
 		ExpoSlug:  "forgegraf",
 	}
 
 	deepLinkURL := developmentDeepLinkURL(sourceBinding, "http://localhost:19000")
-	if deepLinkURL != "exp+forgegraf://expo-development-client/?url=http%3A%2F%2Flocalhost%3A19000" {
-		t.Fatalf("expected generated Expo dev-client scheme, got %q", deepLinkURL)
+	if deepLinkURL != "forgegraph://expo-development-client/?url=http%3A%2F%2Flocalhost%3A19000" {
+		t.Fatalf("expected explicit app dev-client scheme, got %q", deepLinkURL)
 	}
 
 	qrURL := developmentQRURL(sourceBinding, "http://localhost:19000")
-	if qrURL != "https://qr.expo.dev/development-client?appScheme=exp%2Bforgegraf&url=http%3A%2F%2Flocalhost%3A19000" {
-		t.Fatalf("expected QR URL to target generated Expo dev-client scheme, got %q", qrURL)
+	if qrURL != "https://qr.expo.dev/development-client?appScheme=forgegraph&url=http%3A%2F%2Flocalhost%3A19000" {
+		t.Fatalf("expected QR URL to target explicit app dev-client scheme, got %q", qrURL)
 	}
 }
 
@@ -10982,10 +11182,10 @@ func TestDevSessionResultPayloadIncludesSimulatorNetworkingEvidence(t *testing.T
 		development:   false,
 	})
 
-	if payload["deepLinkUrl"] != "exp+forgegraf://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000" {
+	if payload["deepLinkUrl"] != "forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000" {
 		t.Fatalf("expected simulator dev-session deep link, got %#v", payload)
 	}
-	if payload["qrUrl"] != "https://qr.expo.dev/development-client?appScheme=exp%2Bforgegraf&url=http%3A%2F%2F127.0.0.1%3A19000" {
+	if payload["qrUrl"] != "https://qr.expo.dev/development-client?appScheme=forgegraph&url=http%3A%2F%2F127.0.0.1%3A19000" {
 		t.Fatalf("expected simulator dev-session QR URL, got %#v", payload)
 	}
 	if payload["hostIp"] != "127.0.0.1" {

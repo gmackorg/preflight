@@ -6256,6 +6256,15 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 	}
 	platform := jobPlatform(job)
 	if platform == "ios" {
+		// Reap leftover CI builds from prior attempts (lease-expiry reclaims
+		// re-spawn expo run:ios on top of orphaned ones) or concurrent CI jobs
+		// before starting ours. Concurrent xcodebuild invocations share Xcode's
+		// ModuleCache build-session and deadlock (SwiftBuild stalls at 0% CPU),
+		// which makes the build wedge, the lease expire, and the job restack —
+		// a self-sustaining thrash. simulator.open is serial per host, so nothing
+		// for this job is running yet; every CI build process here is an orphan or
+		// a competitor and is safe to kill. Serializes iOS builds on the host.
+		cleanupStaleCiBuildProcesses(stdout)
 		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
 			fmt.Fprintf(stdout, "warning: could not normalize ios/.xcode.env.local: %v\n", err)
 		}
@@ -8679,6 +8688,43 @@ func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
 			continue
 		}
 		fmt.Fprintf(stdout, "reaping stale preflight dev server for %s (pid %d)\n", seg, pid)
+		terminateCommandProcess(pid)
+	}
+}
+
+// cleanupStaleCiBuildProcesses kills leftover `expo run:ios` and `xcodebuild`
+// processes from PRIOR or CONCURRENT preflight CI builds. On a single macOS host,
+// parallel xcodebuild invocations share Xcode's ModuleCache build-session file and
+// deadlock (SwiftBuild stalls mid-compile at 0% CPU), and lease-expiry reclaims
+// re-spawn expo run:ios on top of the orphaned attempt — stacking builds until the
+// host thrashes. simulator.open runs serially per runner host, so when a build
+// reaches this point nothing for the current job exists yet: every matching CI
+// build process is an orphan or a competing build and is safe to reap. Non-CI
+// builds (no /.preflight-ci/ in the command, e.g. a developer's local build) are
+// never touched. Killing the expo/xcodebuild process group cascades to its clang
+// children; the shared SwiftBuild XPC service idles once xcodebuild exits.
+func cleanupStaleCiBuildProcesses(stdout io.Writer) {
+	out, err := exec.Command("ps", "-eo", "pid=,command=").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "/.preflight-ci/") {
+			continue
+		}
+		if !strings.Contains(line, "expo run:ios") && !strings.Contains(line, "xcodebuild") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 0 {
+			continue
+		}
+		pid, convErr := strconv.Atoi(fields[0])
+		if convErr != nil || pid <= 0 {
+			continue
+		}
+		seg := preflightCiCheckoutSegment(line)
+		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", seg, pid)
 		terminateCommandProcess(pid)
 	}
 }
