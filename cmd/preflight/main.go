@@ -6265,6 +6265,12 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		// for this job is running yet; every CI build process here is an orphan or
 		// a competitor and is safe to kill. Serializes iOS builds on the host.
 		cleanupStaleCiBuildProcesses(stdout)
+		// Reclaim disk before building if the shared volume is low. The build host's
+		// APFS container fills across ~14 app checkouts + Xcode DerivedData, and a
+		// full disk silently breaks ciCheckout (git fetch), simulator.open (xcodebuild
+		// write), and Maestro artifact upload. The reap above already killed any build,
+		// so DerivedData has no in-flight consumer and is safe to clear under pressure.
+		ensureBuildDiskHeadroom(appDir, stdout)
 		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
 			fmt.Fprintf(stdout, "warning: could not normalize ios/.xcode.env.local: %v\n", err)
 		}
@@ -8726,6 +8732,41 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer) {
 		seg := preflightCiCheckoutSegment(line)
 		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", seg, pid)
 		terminateCommandProcess(pid)
+	}
+}
+
+// ensureBuildDiskHeadroom clears Xcode DerivedData when free space on the build
+// volume is low. The farm shares one APFS container across ~14 CI checkouts +
+// DerivedData; a full disk silently fails git fetch ("No space left on device"),
+// xcodebuild, and artifact upload. Called right after the build reap (no in-flight
+// build), so DerivedData has no live consumer. Only clears under pressure, so warm
+// incremental builds keep their cache the rest of the time.
+func ensureBuildDiskHeadroom(buildDir string, stdout io.Writer) {
+	const minFreeBytes = 20 * 1024 * 1024 * 1024 // 20 GiB
+	probe := buildDir
+	if probe == "" {
+		probe = "/"
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(probe, &stat); err != nil {
+		return
+	}
+	freeBytes := stat.Bavail * uint64(stat.Bsize)
+	if freeBytes >= minFreeBytes {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	derivedData := filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData")
+	entries, err := os.ReadDir(derivedData)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(stdout, "disk headroom low (%.1f GiB free); clearing Xcode DerivedData\n", float64(freeBytes)/(1024*1024*1024))
+	for _, entry := range entries {
+		_ = os.RemoveAll(filepath.Join(derivedData, entry.Name()))
 	}
 }
 
