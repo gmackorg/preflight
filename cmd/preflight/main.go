@@ -9197,10 +9197,54 @@ func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, plat
 		if bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID); bundleID != "" {
 			runOptionalLoggedXcrunCommand(logFile, options, "simctl", "terminate", openProviderIdentity, bundleID)
 		}
-		return runLoggedXcrunCommandWithCancellation(logFile, options, cancellationCheck, "simctl", "openurl", openProviderIdentity, deepLinkURL)
+		if err := runLoggedXcrunCommandWithCancellation(logFile, options, cancellationCheck, "simctl", "openurl", openProviderIdentity, deepLinkURL); err != nil {
+			return err
+		}
+		// Newer iOS simulators (observed on iOS 26) raise an "Open in <App>?"
+		// confirmation when the dev-client deep link is delivered via
+		// `simctl openurl`. If it isn't accepted, the dev client sits on its
+		// launcher, never loads the JS bundle, and the Maestro smoke times out
+		// waiting for the app's first screen. Best-effort accept it here so the
+		// bundle starts loading before maestro.run begins.
+		acceptIOSDevClientOpenDialog(logFile, openProviderIdentity)
+		return nil
 	default:
 		return nil
 	}
+}
+
+// acceptIOSDevClientOpenDialog dismisses the iOS "Open in <App>?" deep-link
+// confirmation by tapping "Open" via a one-shot Maestro flow. It is non-fatal
+// and the tap is optional: when no dialog is present (e.g. the `expo run:ios`
+// open path already foregrounded the app) it is a harmless no-op, so this never
+// regresses apps that launch cleanly.
+func acceptIOSDevClientOpenDialog(logFile *os.File, udid string) {
+	maestroPath, err := exec.LookPath("maestro")
+	if err != nil {
+		fmt.Fprintf(logFile, "skip dev-client open-dialog accept: maestro not on PATH: %v\n", err)
+		return
+	}
+	flow, err := os.CreateTemp("", "pf-accept-open-*.yaml")
+	if err != nil {
+		fmt.Fprintf(logFile, "skip dev-client open-dialog accept: temp flow: %v\n", err)
+		return
+	}
+	flowPath := flow.Name()
+	defer os.Remove(flowPath)
+	const flowBody = "appId: com.apple.springboard\n---\n- tapOn:\n    text: \"Open\"\n    optional: true\n"
+	if _, err := flow.WriteString(flowBody); err != nil {
+		_ = flow.Close()
+		fmt.Fprintf(logFile, "skip dev-client open-dialog accept: write flow: %v\n", err)
+		return
+	}
+	_ = flow.Close()
+	command := exec.Command(maestroPath, "--device", udid, "--platform", "ios", "test", flowPath)
+	command.Env = maestroCommandEnv(os.Environ())
+	flush := attachRedactedCommandLog(command, logFile)
+	if err := runCommandWithTimeoutAndCancellation(command, 2*time.Minute, nil, runnerPollInterval()); err != nil {
+		fmt.Fprintf(logFile, "dev-client open-dialog accept tap reported: %v (continuing)\n", err)
+	}
+	flush()
 }
 
 func androidDeepLinkOpenArgs(providerIdentity string, androidPackage string, deepLinkURL string) []string {
