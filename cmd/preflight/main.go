@@ -9195,6 +9195,18 @@ func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, plat
 			return fmt.Errorf("boot iOS simulator before dev-client open: %w", err)
 		}
 		if bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID); bundleID != "" {
+			// Prefer the URL scheme the installed dev build actually registers.
+			// The source-binding scheme is unreliable when app.config computes
+			// it per build variant (e.g. `${BASE_SCHEME}-dev`) — static config
+			// extraction misses the non-literal and falls back to exp+<slug>,
+			// which the installed app doesn't register, so `openurl` fails and
+			// the bundle never loads. The installed Info.plist is ground truth.
+			if installedScheme := installedAppDevClientScheme(logFile, options, openProviderIdentity, bundleID); installedScheme != "" {
+				if rebuilt := rebuildDeepLinkWithScheme(deepLinkURL, installedScheme); rebuilt != "" && rebuilt != deepLinkURL {
+					fmt.Fprintf(logFile, "using dev-client scheme %q from installed app (was %q)\n", installedScheme, deepLinkURL)
+					deepLinkURL = rebuilt
+				}
+			}
 			runOptionalLoggedXcrunCommand(logFile, options, "simctl", "terminate", openProviderIdentity, bundleID)
 		}
 		if err := runLoggedXcrunCommandWithCancellation(logFile, options, cancellationCheck, "simctl", "openurl", openProviderIdentity, deepLinkURL); err != nil {
@@ -9211,6 +9223,80 @@ func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, plat
 	default:
 		return nil
 	}
+}
+
+// installedAppDevClientScheme returns a URL scheme that the installed dev build
+// actually registers (CFBundleURLSchemes in its Info.plist), suitable for the
+// development-client deep link. Returns "" on any failure so the caller keeps
+// the source-binding-derived scheme.
+func installedAppDevClientScheme(logFile *os.File, options runnerOnceOptions, udid string, bundleID string) string {
+	if strings.TrimSpace(options.xcrunPath) == "" {
+		return ""
+	}
+	containerOut, err := exec.Command(options.xcrunPath, "simctl", "get_app_container", udid, bundleID, "app").Output()
+	if err != nil {
+		fmt.Fprintf(logFile, "dev-client scheme: get_app_container failed: %v\n", err)
+		return ""
+	}
+	appPath := strings.TrimSpace(string(containerOut))
+	if appPath == "" {
+		return ""
+	}
+	plistPath := filepath.Join(appPath, "Info.plist")
+	jsonOut, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
+	if err != nil {
+		fmt.Fprintf(logFile, "dev-client scheme: plutil read of %s failed: %v\n", plistPath, err)
+		return ""
+	}
+	var info struct {
+		URLTypes []struct {
+			Schemes []string `json:"CFBundleURLSchemes"`
+		} `json:"CFBundleURLTypes"`
+	}
+	if err := json.Unmarshal(jsonOut, &info); err != nil {
+		fmt.Fprintf(logFile, "dev-client scheme: parse Info.plist failed: %v\n", err)
+		return ""
+	}
+	var schemes []string
+	for _, t := range info.URLTypes {
+		schemes = append(schemes, t.Schemes...)
+	}
+	return chooseDevClientScheme(schemes, bundleID)
+}
+
+// chooseDevClientScheme picks the best registered scheme for a development-client
+// deep link: the canonical expo scheme (exp+...) that the Expo CLI itself uses,
+// then the app's own custom scheme, then anything non-empty. The bundle-id
+// scheme is the last resort.
+func chooseDevClientScheme(schemes []string, bundleID string) string {
+	bundleID = strings.TrimSpace(bundleID)
+	for _, s := range schemes {
+		if strings.HasPrefix(strings.TrimSpace(s), "exp+") {
+			return strings.TrimSpace(s)
+		}
+	}
+	for _, s := range schemes {
+		t := strings.TrimSpace(s)
+		if t != "" && t != bundleID {
+			return t
+		}
+	}
+	for _, s := range schemes {
+		if t := strings.TrimSpace(s); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// rebuildDeepLinkWithScheme swaps the scheme of an existing development-client
+// deep link, preserving the `://expo-development-client/?url=...` remainder.
+func rebuildDeepLinkWithScheme(deepLinkURL string, scheme string) string {
+	idx := strings.Index(deepLinkURL, "://")
+	if idx <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(scheme) + deepLinkURL[idx:]
 }
 
 // acceptIOSDevClientOpenDialog dismisses the iOS "Open in <App>?" deep-link
