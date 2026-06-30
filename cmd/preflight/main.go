@@ -6264,12 +6264,12 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		// a self-sustaining thrash. simulator.open is serial per host, so nothing
 		// for this job is running yet; every CI build process here is an orphan or
 		// a competitor and is safe to kill. Serializes iOS builds on the host.
-		cleanupStaleCiBuildProcesses(stdout)
+		cleanupStaleCiBuildProcesses(stdout, preflightCiCheckoutSegment(appDir))
 		// Reclaim disk before building if the shared volume is low. The build host's
 		// APFS container fills across ~14 app checkouts + Xcode DerivedData, and a
 		// full disk silently breaks ciCheckout (git fetch), simulator.open (xcodebuild
-		// write), and Maestro artifact upload. The reap above already killed any build,
-		// so DerivedData has no in-flight consumer and is safe to clear under pressure.
+		// write), and Maestro artifact upload. Only clears IDLE DerivedData so a
+		// concurrent runner's in-flight build cache is preserved.
 		ensureBuildDiskHeadroom(appDir, stdout)
 		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
 			fmt.Fprintf(stdout, "warning: could not normalize ios/.xcode.env.local: %v\n", err)
@@ -8669,14 +8669,31 @@ func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	lines := strings.Split(string(out), "\n")
+	// Multi-runner-per-host safety: a dev server is only a leak if NO build is
+	// actively running for its app. A concurrent runner building a different app
+	// has a live `expo run:ios`/`xcodebuild` for that app plus its dev server —
+	// reaping that server would wedge the other runner. Collect segments with an
+	// active build and spare their dev servers.
+	activeBuildSegs := map[string]bool{}
+	for _, line := range lines {
+		if !strings.Contains(line, "/.preflight-ci/") {
+			continue
+		}
+		if strings.Contains(line, "expo run:ios") || strings.Contains(line, "xcodebuild") {
+			if s := preflightCiCheckoutSegment(line); s != "" {
+				activeBuildSegs[s] = true
+			}
+		}
+	}
+	for _, line := range lines {
 		if !strings.Contains(line, "/.preflight-ci/") ||
 			!strings.Contains(line, "--dev-client") ||
 			!strings.Contains(line, "start") {
 			continue
 		}
 		seg := preflightCiCheckoutSegment(line)
-		if seg == "" || (currentSeg != "" && seg == currentSeg) {
+		if seg == "" || (currentSeg != "" && seg == currentSeg) || activeBuildSegs[seg] {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSpace(line))
@@ -8703,7 +8720,7 @@ func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
 // builds (no /.preflight-ci/ in the command, e.g. a developer's local build) are
 // never touched. Killing the expo/xcodebuild process group cascades to its clang
 // children; the shared SwiftBuild XPC service idles once xcodebuild exits.
-func cleanupStaleCiBuildProcesses(stdout io.Writer) {
+func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
 	out, err := exec.Command("ps", "-eo", "pid=,command=").Output()
 	if err != nil {
 		return
@@ -8715,6 +8732,15 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer) {
 		if !strings.Contains(line, "expo run:ios") && !strings.Contains(line, "xcodebuild") {
 			continue
 		}
+		seg := preflightCiCheckoutSegment(line)
+		// Multi-runner-per-host safety: only reap builds for THIS job's checkout
+		// (orphans/re-spawns of the same app). A build for a DIFFERENT app is a
+		// concurrent runner's in-flight work — killing it would wedge the other
+		// runner. When currentSegment is empty (unknown), fall back to the legacy
+		// reap-all behavior for single-runner hosts.
+		if currentSegment != "" && seg != currentSegment {
+			continue
+		}
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) == 0 {
 			continue
@@ -8723,7 +8749,6 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer) {
 		if convErr != nil || pid <= 0 {
 			continue
 		}
-		seg := preflightCiCheckoutSegment(line)
 		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", seg, pid)
 		terminateCommandProcess(pid)
 	}
@@ -8758,9 +8783,20 @@ func ensureBuildDiskHeadroom(buildDir string, stdout io.Writer) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(stdout, "disk headroom low (%.1f GiB free); clearing Xcode DerivedData\n", float64(freeBytes)/(1024*1024*1024))
+	// Multi-runner-per-host safety: only clear IDLE DerivedData. A concurrent
+	// runner's in-flight build touches its DerivedData subtree constantly, so a
+	// recent mtime means "active build, do not wipe". Clearing only entries
+	// untouched for >15m reclaims stale caches without yanking a live build.
+	const idleCutoff = 15 * time.Minute
+	now := time.Now()
+	fmt.Fprintf(stdout, "disk headroom low (%.1f GiB free); clearing idle Xcode DerivedData\n", float64(freeBytes)/(1024*1024*1024))
 	for _, entry := range entries {
-		_ = os.RemoveAll(filepath.Join(derivedData, entry.Name()))
+		path := filepath.Join(derivedData, entry.Name())
+		if info, statErr := os.Stat(path); statErr == nil && now.Sub(info.ModTime()) < idleCutoff {
+			fmt.Fprintf(stdout, "  keeping active DerivedData %s (modified %s ago)\n", entry.Name(), now.Sub(info.ModTime()).Round(time.Second))
+			continue
+		}
+		_ = os.RemoveAll(path)
 	}
 }
 
