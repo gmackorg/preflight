@@ -6451,18 +6451,12 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		return nil
 	}
 	if err := uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts); err != nil {
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":  "failed",
-			"maestro": maestroResultPayload(job, providerIdentity, flowPath, artifacts),
-			"failure": map[string]any{
-				"code":    "artifact_upload_failed",
-				"message": err.Error(),
-			},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed Maestro artifact upload %s %s\n", job.ID, err.Error())
-		return nil
+		// The smoke already passed (runMaestroSmoke returned no error). Artifact
+		// uploads are diagnostic (logs/junit/screenshots) and post only small
+		// metadata records; a transient control-plane deadline here must NOT fail
+		// a green test and trigger a full, expensive workflow rebuild. Log it and
+		// still report the passing result so the gate advances.
+		fmt.Fprintf(stdout, "warning: Maestro artifact upload failed (smoke passed, continuing) %s %s\n", job.ID, err.Error())
 	}
 	if err := completeRunnerJob(client, options, registration, job, map[string]any{
 		"status":  "ok",
