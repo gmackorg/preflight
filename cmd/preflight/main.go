@@ -13603,6 +13603,26 @@ func selectEASProfile(config easJSON, platform string, lane string) selectedEASP
 		}
 	}
 
+	// The simulator lane needs an iOS simulator build. Apps from the gmacko
+	// template keep a device-only "development" profile (ios.simulator=false)
+	// alongside a sibling "development-simulator" profile; without this branch
+	// the generic fallback below grabs "development" and the readiness check
+	// blocks on eas_ios_simulator_profile. Prefer a named simulator profile,
+	// then any simulator-capable profile (e.g. a "development" that itself sets
+	// ios.simulator=true, as some apps do).
+	if lane == "simulator" && platform == "ios" {
+		for _, name := range []string{"development-simulator", "dev-simulator", "simulator", "development"} {
+			if profile, ok := config.Build[name]; ok && easProfileIsIOSSimulator(profile) {
+				return makeSelectedEASProfile(name, profile, platform)
+			}
+		}
+		for name, profile := range config.Build {
+			if easProfileDevelopmentClient(profile) && easProfileIsIOSSimulator(profile) {
+				return makeSelectedEASProfile(name, profile, platform)
+			}
+		}
+	}
+
 	if profile, ok := config.Build["development"]; ok {
 		return makeSelectedEASProfile("development", profile, platform)
 	}
