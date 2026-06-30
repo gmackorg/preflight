@@ -6277,7 +6277,15 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		// Make the locked target the only booted simulator: expo's install/open
 		// step resolves the generic "booted" device and installs/launches on the
 		// wrong sim ("No development build installed") when several are booted.
-		shutdownOtherBootedIOSSimulators(options, providerIdentity, stdout)
+		// Multi-runner-per-host safety: skip this when another runner is mid-build
+		// (a different checkout has a live expo/xcodebuild) — shutting down its
+		// booted sim would wedge it. With concurrent builds we rely on expo's
+		// explicit --device <udid> targeting instead of the booted-singleton trick.
+		if concurrentPreflightBuildActive(preflightCiCheckoutSegment(appDir)) {
+			fmt.Fprintf(stdout, "concurrent runner build active; skipping booted-simulator shutdown\n")
+		} else {
+			shutdownOtherBootedIOSSimulators(options, providerIdentity, stdout)
+		}
 		if err := bootIOSSimulator(options, providerIdentity); err != nil {
 			fmt.Fprintf(stdout, "warning: could not boot locked simulator %s: %v\n", providerIdentity, err)
 		}
@@ -8720,6 +8728,30 @@ func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
 // builds (no /.preflight-ci/ in the command, e.g. a developer's local build) are
 // never touched. Killing the expo/xcodebuild process group cascades to its clang
 // children; the shared SwiftBuild XPC service idles once xcodebuild exits.
+// concurrentPreflightBuildActive reports whether another runner on this host is
+// mid-build: a live `expo run:ios`/`xcodebuild` for a .preflight-ci checkout whose
+// segment differs from the current job's. Used to avoid host-wide simulator
+// shutdowns that would wedge a concurrent runner.
+func concurrentPreflightBuildActive(currentSegment string) bool {
+	out, err := exec.Command("ps", "-eo", "command=").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "/.preflight-ci/") {
+			continue
+		}
+		if !strings.Contains(line, "expo run:ios") && !strings.Contains(line, "xcodebuild") {
+			continue
+		}
+		seg := preflightCiCheckoutSegment(line)
+		if seg != "" && seg != currentSegment {
+			return true
+		}
+	}
+	return false
+}
+
 func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
 	out, err := exec.Command("ps", "-eo", "pid=,command=").Output()
 	if err != nil {
