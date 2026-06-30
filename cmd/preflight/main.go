@@ -4766,6 +4766,7 @@ type runnerOnceOptions struct {
 	metroPort      int
 	metroStatusURL string
 	hostMode       string
+	simulatorUDID  string
 }
 
 func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
@@ -4781,6 +4782,7 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 		adbPath:       "adb",
 		metroPort:     8091,
 		hostMode:      "lan",
+		simulatorUDID: os.Getenv("PREFLIGHT_SIMULATOR_UDID"),
 	}
 
 	for index := 0; index < len(args); index += 1 {
@@ -4855,6 +4857,12 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 				return runnerOnceOptions{}, fmt.Errorf("--host-mode requires a value")
 			}
 			options.hostMode = value
+		case "--simulator-udid":
+			value, ok := nextFlagValue(args, &index)
+			if !ok {
+				return runnerOnceOptions{}, fmt.Errorf("--simulator-udid requires a value")
+			}
+			options.simulatorUDID = value
 		default:
 			return runnerOnceOptions{}, fmt.Errorf("unknown runner once flag %q", args[index])
 		}
@@ -6281,7 +6289,9 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		// (a different checkout has a live expo/xcodebuild) — shutting down its
 		// booted sim would wedge it. With concurrent builds we rely on expo's
 		// explicit --device <udid> targeting instead of the booted-singleton trick.
-		if concurrentPreflightBuildActive(preflightCiCheckoutSegment(appDir)) {
+		if strings.TrimSpace(options.simulatorUDID) != "" {
+			fmt.Fprintf(stdout, "pinned to simulator %s; skipping booted-simulator shutdown (sole owner of its sim)\n", options.simulatorUDID)
+		} else if concurrentPreflightBuildActive(preflightCiCheckoutSegment(appDir)) {
 			fmt.Fprintf(stdout, "concurrent runner build active; skipping booted-simulator shutdown\n")
 		} else {
 			shutdownOtherBootedIOSSimulators(options, providerIdentity, stdout)
@@ -10380,7 +10390,43 @@ func loadSimctlInventory(options runnerOnceOptions) (json.RawMessage, error) {
 	if !json.Valid(content) {
 		return nil, fmt.Errorf("simctl inventory is not valid JSON")
 	}
+	// Multi-runner-per-host: when pinned to a specific simulator, report ONLY
+	// that device so the control plane locks this runner to its own sim and two
+	// runners never contend for the same simulator.
+	if udid := strings.TrimSpace(options.simulatorUDID); udid != "" {
+		if filtered, err := filterSimctlInventoryToUDID(content, udid); err == nil {
+			return filtered, nil
+		}
+	}
 	return json.RawMessage(content), nil
+}
+
+// filterSimctlInventoryToUDID returns a simctl `list devices --json` payload
+// containing only the device whose udid matches, preserving the {"devices":
+// {"<runtime>": [...]}} shape (empty runtimes dropped).
+func filterSimctlInventoryToUDID(content []byte, udid string) (json.RawMessage, error) {
+	var parsed struct {
+		Devices map[string][]map[string]any `json:"devices"`
+	}
+	if err := json.Unmarshal(content, &parsed); err != nil {
+		return nil, err
+	}
+	out := map[string][]map[string]any{}
+	for runtime, devices := range parsed.Devices {
+		for _, d := range devices {
+			if s, _ := d["udid"].(string); strings.EqualFold(strings.TrimSpace(s), udid) {
+				out[runtime] = append(out[runtime], d)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("pinned simulator udid %q not found in inventory", udid)
+	}
+	marshaled, err := json.Marshal(map[string]any{"devices": out})
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(marshaled), nil
 }
 
 func loadADBDevices(options runnerOnceOptions) ([]byte, error) {
