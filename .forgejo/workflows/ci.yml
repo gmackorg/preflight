@@ -24,3 +24,35 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Report CI result to ForgeGraph
+        if: always()
+        env:
+          FG_CI_TOKEN: ${{ secrets.FORGEGRAPH_TOKEN }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            STATUS="success"
+          elif [ "${{ job.status }}" = "cancelled" ]; then
+            STATUS="cancelled"
+          else
+            STATUS="failure"
+          fi
+
+          REPO_FULL="${{ github.repository }}"
+          OWNER="${REPO_FULL%%/*}"
+          REPO="${REPO_FULL##*/}"
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+
+          curl -sf -X POST "https://forgegraf.com/api/fg/ci/report" \
+            -H "Authorization: Bearer ${FG_CI_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"owner\": \"${OWNER}\",
+              \"repo\": \"${REPO}\",
+              \"sha\": \"${{ github.sha }}\",
+              \"branch\": \"${BRANCH}\",
+              \"status\": \"${STATUS}\",
+              \"runId\": \"${{ github.run_id }}\",
+              \"runUrl\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+              \"workflowName\": \"CI\"
+            }" || echo "::warning::Failed to report CI result to ForgeGraph"
