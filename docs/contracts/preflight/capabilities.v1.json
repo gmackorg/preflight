@@ -1,0 +1,20 @@
+{
+  "data": {
+    "apiVersion": "v1",
+    "supportedContractVersions": ["2026-05-20"],
+    "auth": {
+      "authenticated": false
+    },
+    "capabilities": {
+      "platforms": ["ios", "android"],
+      "lanes": ["simulator", "device", "development"],
+      "adapters": ["eas.development", "eas.build", "maestro"],
+      "runnerArtifactUpload": true
+    }
+  },
+  "meta": {
+    "apiVersion": "v1",
+    "contractVersion": "2026-05-20",
+    "requestId": "req_capabilities_fixture"
+  }
+}
