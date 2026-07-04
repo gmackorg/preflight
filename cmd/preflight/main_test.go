@@ -4737,8 +4737,14 @@ exit 42
 	if sourceBinding["easProjectId"] != "05e5245e-6da8-4f7a-a557-324d36b02979" {
 		t.Fatalf("expected resolved EAS project ID, got %#v", sourceBinding)
 	}
-	if sourceBinding["expoConfigDigest"] == digestIfExists(filepath.Join(appDir, "app.config.js")) {
-		t.Fatalf("expected digest of resolved Expo config, got raw app.config.js digest")
+	// resolveExpoConfig always digests the raw expo config file, even when the
+	// Expo CLI resolution succeeds (see 1e5a641: digesting the evaluated JSON
+	// let prove-app and runner-side validation compute different digests for
+	// identical source when the CLI flaked, causing spurious
+	// source_binding_mismatch failures). The evaluated config is only used to
+	// resolve app identity (scheme/slug/bundle ids), not the digest.
+	if sourceBinding["expoConfigDigest"] != digestIfExists(filepath.Join(appDir, "app.config.js")) {
+		t.Fatalf("expected digest of raw app.config.js file, got %#v", sourceBinding["expoConfigDigest"])
 	}
 	expectedEnvDigest := digestJSON(map[string]string{
 		"APP_VARIANT":    "development",
@@ -5250,6 +5256,13 @@ func TestRunnerOnceCleansExpiredLocalPreflightArtifactDirectories(t *testing.T) 
 	}
 
 	t.Setenv("PREFLIGHT_LOCAL_ARTIFACT_TTL", "1h")
+	// cleanupStaleLocalPreflightProcessHandles only reconciles the workspace
+	// root's own .preflight/expo-dev-session.pid by default (see 9053bf417,
+	// which added the opt-in recursive variant to avoid a full workspace walk
+	// on every runner tick). This test wants the nested
+	// apps/mobile/.preflight/expo-dev-session.pid to be reconciled too, so it
+	// must opt into the recursive walk explicitly.
+	t.Setenv("PREFLIGHT_RECURSIVE_PROCESS_HANDLE_CLEANUP", "1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
@@ -5661,7 +5674,13 @@ exit 0
 	if !strings.Contains(string(xcrunOutput), "simctl terminate 6BA8F38E-BF97-4830-98A6-E459E4312F29 com.gmacko.forgegraph.dev") {
 		t.Fatalf("expected simulator app termination before Preflight URL open, got %q", string(xcrunOutput))
 	}
-	if !strings.Contains(string(xcrunOutput), "exp+forgegraf://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000") {
+	// developmentDeepLinkURL/appSchemeForDevelopmentClient always prefer the
+	// source binding's explicit appScheme ("forgegraph", set on the
+	// simulator.open job claim above) over the exp+<slug> fallback; the fake
+	// xcrun here is a no-op stub, so installedAppDevClientScheme's
+	// get_app_container/plutil lookup finds nothing and the source binding
+	// scheme is used as-is.
+	if !strings.Contains(string(xcrunOutput), "forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000") {
 		t.Fatalf("expected simulator openurl to target Preflight dev client URL, got %q", string(xcrunOutput))
 	}
 	maestroOutput, err := os.ReadFile(maestroLog)
@@ -5768,8 +5787,11 @@ exit 1
 		runnerName = "Development Runner"
 	)
 	devInstallURL := "https://expo.dev/runtime-artifacts/ios-dev-accept.ipa"
-	deepLinkURL := "exp+forgegraf://expo-development-client/?url=http%3A%2F%2F192.168.4.10%3A19000"
-	qrURL := "https://qr.expo.dev/development-client?appScheme=exp%2Bforgegraf&url=http%3A%2F%2F192.168.4.10%3A19000"
+	// developmentDeepLinkURL/appSchemeForDevelopmentClient always prefer the
+	// source binding's explicit appScheme ("forgegraph", set below in
+	// sourceBindingPayload) over the exp+<slug> fallback.
+	deepLinkURL := "forgegraph://expo-development-client/?url=http%3A%2F%2F192.168.4.10%3A19000"
+	qrURL := "https://qr.expo.dev/development-client?appScheme=forgegraph&url=http%3A%2F%2F192.168.4.10%3A19000"
 
 	var mu sync.Mutex
 	var calls []string
@@ -5939,6 +5961,15 @@ exit 1
 				t.Fatalf("missing runner token on job read: %q", r.Header.Get("Authorization"))
 			}
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_dev_accept"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_devsession"}}`))
+		case "POST /api/preflight/v1/runners/pfrun_dev_accept/jobs/pfjob_devsession/heartbeat":
+			if r.Header.Get("Authorization") != "Bearer runner_token" {
+				t.Fatalf("missing runner token on job heartbeat: %q", r.Header.Get("Authorization"))
+			}
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_dev_accept"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case "POST /api/preflight/v1/runners/pfrun_dev_accept/jobs/pfjob_devsession/complete":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -6229,8 +6260,11 @@ exit 0
 		runnerName = "Android Development Runner"
 	)
 	devInstallURL := "https://expo.dev/runtime-artifacts/android-dev-accept.apk"
-	deepLinkURL := "exp+forgegraf://expo-development-client/?url=http%3A%2F%2F192.168.4.10%3A19000"
-	qrURL := "https://qr.expo.dev/development-client?appScheme=exp%2Bforgegraf&url=http%3A%2F%2F192.168.4.10%3A19000"
+	// developmentDeepLinkURL/appSchemeForDevelopmentClient always prefer the
+	// source binding's explicit appScheme ("forgegraph", set below in
+	// sourceBindingPayload) over the exp+<slug> fallback.
+	deepLinkURL := "forgegraph://expo-development-client/?url=http%3A%2F%2F192.168.4.10%3A19000"
+	qrURL := "https://qr.expo.dev/development-client?appScheme=forgegraph&url=http%3A%2F%2F192.168.4.10%3A19000"
 
 	var mu sync.Mutex
 	var calls []string
@@ -6426,6 +6460,15 @@ exit 0
 				t.Fatalf("missing runner token on job read: %q", r.Header.Get("Authorization"))
 			}
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_android_dev_accept"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_devsession"}}`))
+		case "POST /api/preflight/v1/runners/pfrun_android_dev_accept/jobs/pfjob_devsession/heartbeat":
+			if r.Header.Get("Authorization") != "Bearer runner_token" {
+				t.Fatalf("missing runner token on job heartbeat: %q", r.Header.Get("Authorization"))
+			}
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_android_dev_accept"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case "POST /api/preflight/v1/runners/pfrun_android_dev_accept/jobs/pfjob_devsession/complete":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -7348,6 +7391,18 @@ exit 1
 				t.Fatalf("unexpected dev build payload %#v", devBuild)
 			}
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_build","kind":"eas.build.dev","status":"succeeded","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_build"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/heartbeat":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected method for job heartbeat: %s", r.Method)
+			}
+			if r.Header.Get("Authorization") != "Bearer runner_token" {
+				t.Fatalf("missing runner token on job heartbeat: %q", r.Header.Get("Authorization"))
+			}
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
 			if r.Method != http.MethodGet {
 				t.Fatalf("unexpected method for job read: %s", r.Method)
@@ -7369,10 +7424,13 @@ exit 1
 			if devSession["advertisedUrl"] != "http://192.168.4.10:19000" {
 				t.Fatalf("unexpected advertised URL %#v", devSession)
 			}
-			if devSession["deepLinkUrl"] != "exp+forgegraf://expo-development-client/?url=http%3A%2F%2F192.168.4.10%3A19000" {
+			// The source binding sets an explicit appScheme ("forgegraph"), which
+			// appSchemeForDevelopmentClient always prefers over the exp+<slug>
+			// fallback, so the deep link/QR URL use that scheme literally.
+			if devSession["deepLinkUrl"] != "forgegraph://expo-development-client/?url=http%3A%2F%2F192.168.4.10%3A19000" {
 				t.Fatalf("unexpected deep link %#v", devSession)
 			}
-			if devSession["qrUrl"] != "https://qr.expo.dev/development-client?appScheme=exp%2Bforgegraf&url=http%3A%2F%2F192.168.4.10%3A19000" {
+			if devSession["qrUrl"] != "https://qr.expo.dev/development-client?appScheme=forgegraph&url=http%3A%2F%2F192.168.4.10%3A19000" {
 				t.Fatalf("unexpected QR URL %#v", devSession)
 			}
 			if devSession["installUrl"] != "https://expo.dev/runtime-artifacts/ios-dev.ipa" {
@@ -7549,6 +7607,12 @@ exit 1
 				t.Fatalf("unexpected reusable dev build %#v", devBuild)
 			}
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_readiness","kind":"eas.readiness.probe","status":"succeeded","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_readiness"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/heartbeat":
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_devsession"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/complete":
@@ -7627,14 +7691,26 @@ exit 1
 	}))
 	t.Cleanup(metroServer.Close)
 
+	// developmentDeepLinkURL/appSchemeForDevelopmentClient always prefer the
+	// source binding's explicit appScheme ("forgegraph") over the exp+<slug>
+	// fallback; only the advertised URL itself is scraped from the Expo CLI's
+	// tunnel output (via expoTunnelDevServerURLFromLogContent).
 	expectedAdvertisedURL := "https://preflight-tunnel.ngrok-free.app"
-	expectedDeepLinkURL := "exp+forgegraf://expo-development-client/?url=https%3A%2F%2Fpreflight-tunnel.ngrok-free.app"
-	expectedQRURL := "https://qr.expo.dev/development-client?appScheme=exp%2Bforgegraf&url=https%3A%2F%2Fpreflight-tunnel.ngrok-free.app"
+	expectedDeepLinkURL := "forgegraph://expo-development-client/?url=https%3A%2F%2Fpreflight-tunnel.ngrok-free.app"
+	expectedQRURL := "https://qr.expo.dev/development-client?appScheme=forgegraph&url=https%3A%2F%2Fpreflight-tunnel.ngrok-free.app"
 	completed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method+" "+r.URL.Path == "GET /api/preflight/v1/runners/pfrun_tunnel/jobs/pfjob_tunnel" {
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_tunnel","kind":"dev_session.start","status":"running","runnerId":"pfrun_tunnel"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_tunnel"}}`))
+			return
+		}
+		if r.Method+" "+r.URL.Path == "POST /api/preflight/v1/runners/pfrun_tunnel/jobs/pfjob_tunnel/heartbeat" {
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_tunnel","kind":"dev_session.start","status":"running","runnerId":"pfrun_tunnel"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_tunnel_heartbeat"}}`))
 			return
 		}
 		if r.Method+" "+r.URL.Path != "POST /api/preflight/v1/runners/pfrun_tunnel/jobs/pfjob_tunnel/complete" {
@@ -7735,6 +7811,12 @@ exit 1
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/preflight/v1/runners/pfrun_qr/jobs/pfjob_devsession":
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_qr"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_devsession"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/runners/pfrun_qr/jobs/pfjob_devsession/heartbeat":
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_qr"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/runners/pfrun_qr/jobs/pfjob_devsession/artifacts":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -7833,8 +7915,11 @@ exit 1
 	if readErr != nil {
 		t.Fatalf("read QR payload artifact: %v", readErr)
 	}
+	// developmentDeepLinkURL/appSchemeForDevelopmentClient always prefer the
+	// source binding's explicit appScheme ("forgegraph") over the exp+<slug>
+	// fallback, so the QR payload's deep link uses that scheme literally.
 	if !strings.Contains(string(qrPayload), "https://qr.expo.dev/development-client") ||
-		!strings.Contains(string(qrPayload), "exp+forgegraf://expo-development-client/") {
+		!strings.Contains(string(qrPayload), "forgegraph://expo-development-client/") {
 		t.Fatalf("expected QR payload to preserve Expo QR/deep-link evidence, got %q", string(qrPayload))
 	}
 }
@@ -8500,6 +8585,15 @@ exit 0
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read"}}`))
 			return
 		}
+		if r.URL.Path == "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/heartbeat" {
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
+			return
+		}
 		if r.URL.Path != "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/complete" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -8731,6 +8825,12 @@ exit 42
 				t.Fatalf("unexpected lock body %#v", body)
 			}
 			_, _ = w.Write([]byte(`{"data":{"target":{"id":"pftgt_android","displayName":"sdk_gphone64_arm64","providerIdentity":"emulator-5554","availability":"busy"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_lock_android_target"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/heartbeat":
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_devsession"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/complete":
@@ -9072,6 +9172,19 @@ printf '{"id":"build_ios_dev_1","platform":"ios","profile":"development-device",
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_build","kind":"eas.build.dev","status":"running","runnerId":"pfrun_cli","payload":{"easProfileName":"development-device","targetClass":"device","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile"},"readiness":{"ready":true}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_build"}}`, workspaceRoot)
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/heartbeat":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected method for job heartbeat: %s", r.Method)
+			}
+			if r.Header.Get("Authorization") != "Bearer runner_token" {
+				t.Fatalf("missing runner token on job heartbeat: %q", r.Header.Get("Authorization"))
+			}
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would: with the job's
+			// current (cancelled) status, not just the plain job-read route.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_build","kind":"eas.build.dev","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_job_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build":
 			if r.Method != http.MethodGet {
 				t.Fatalf("unexpected method for job read: %s", r.Method)
@@ -9123,8 +9236,8 @@ printf '{"id":"build_ios_dev_1","platform":"ios","profile":"development-device",
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
-	if countCalls(calls, "GET /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build") == 0 {
-		t.Fatalf("expected runner to poll EAS build job status, got %v", calls)
+	if countCalls(calls, "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/heartbeat") == 0 {
+		t.Fatalf("expected runner to poll EAS build job status via heartbeat (default-enabled), got %v", calls)
 	}
 	if !completedCancelled {
 		t.Fatalf("expected runner to complete cancelled EAS build job, got calls %v", calls)
@@ -9598,6 +9711,15 @@ sleep 1
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli","payload":{"sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile","appScheme":"forgegraph","expoSlug":"forgegraf"},"targetId":"pftgt_cli","providerIdentity":"6BA8F38E-BF97-4830-98A6-E459E4312F29"}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_devsession"}}`, workspaceRoot)
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/heartbeat":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected method for job heartbeat: %s", r.Method)
+			}
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_devsession_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
 			if r.Method != http.MethodGet {
 				t.Fatalf("unexpected method for job read: %s", r.Method)
@@ -10254,10 +10376,34 @@ func TestRunnerOnceRegistersClaimsDiscoversAndLocksIOSSimulator(t *testing.T) {
 	}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	xcrunPath := writeFakeExecutable(t, "xcrun", `#!/usr/bin/env sh
-printf '%s\n' "$*" >> "$XCRUN_LOG"
+	// installedAppDevClientScheme reads the installed dev build's real URL
+	// scheme from its Info.plist (see 69c3d577) via
+	// `simctl get_app_container <udid> <bundleId> app` (ground truth app
+	// bundle path) followed by `plutil -convert json -o - <app>/Info.plist`.
+	// To exercise the actual scheme-rewrite (not just fall back to the
+	// source-binding scheme), the fake xcrun below serves a real app bundle
+	// directory containing an Info.plist that (fake) plutil can convert to
+	// JSON, with CFBundleURLSchemes advertising the canonical exp+ scheme —
+	// which chooseDevClientScheme prefers over the source binding's
+	// "forgegraph" scheme.
+	appContainerDir := filepath.Join(t.TempDir(), "Bundle", "Application", "com.gmacko.forgegraph.dev.app")
+	if err := os.MkdirAll(appContainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	infoPlistPath := filepath.Join(appContainerDir, "Info.plist")
+	infoPlistJSON := `{"CFBundleURLTypes":[{"CFBundleURLSchemes":["exp+forgegraf"]}]}`
+	if err := os.WriteFile(infoPlistPath, []byte(infoPlistJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	xcrunPath := writeFakeExecutable(t, "xcrun", fmt.Sprintf(`#!/usr/bin/env sh
+printf '%%s\n' "$*" >> "$XCRUN_LOG"
+if [ "$1" = "simctl" ] && [ "$2" = "get_app_container" ]; then
+  printf '%%s\n' %q
+  exit 0
+fi
 exit 0
-`)
+`, appContainerDir))
 	xcrunLog := filepath.Join(t.TempDir(), "xcrun.log")
 	t.Setenv("XCRUN_LOG", xcrunLog)
 	fakeBin := t.TempDir()
@@ -10267,6 +10413,17 @@ printf '%s :: %s\n' "$PWD" "$*" >> "$NPX_LOG"
 exit 0
 `), 0o755); err != nil {
 		t.Fatalf("write fake npx: %v", err)
+	}
+	// installedAppDevClientScheme shells out to "plutil" directly (not via
+	// options.xcrunPath), so the fake must be resolvable on PATH like npx and
+	// maestro below. It only ever needs to convert an Info.plist that is
+	// already valid JSON (the fixture above), so a passthrough cat suffices.
+	if err := os.WriteFile(filepath.Join(fakeBin, "plutil"), []byte(`#!/usr/bin/env sh
+# Usage in this codebase: plutil -convert json -o - <path>
+path="$5"
+cat "$path"
+`), 0o755); err != nil {
+		t.Fatalf("write fake plutil: %v", err)
 	}
 	maestroLog := filepath.Join(t.TempDir(), "maestro.log")
 	if err := os.WriteFile(filepath.Join(fakeBin, "maestro"), []byte(`#!/usr/bin/env sh
@@ -11603,10 +11760,17 @@ func TestPreflightOwnedMetroRemovesStalePidHandle(t *testing.T) {
 func readCapabilitiesFixture(t *testing.T) []byte {
 	t.Helper()
 
+	// This fixture is preflight-runner's own copy of the shared Preflight
+	// capabilities contract (see docs/contracts/preflight/capabilities.v1.json
+	// at the repo root): the response shape /api/preflight/v1/capabilities
+	// returns, matching preflightCapabilitiesData in main.go (apiVersion,
+	// supportedContractVersions, auth.authenticated). It is checked into this
+	// repo so a fresh clone can run the test suite without any other repo
+	// checked out alongside it. PREFLIGHT_CAPABILITIES_FIXTURE can override
+	// the path (e.g. to point at a different contract during development).
 	candidates := []string{
 		os.Getenv("PREFLIGHT_CAPABILITIES_FIXTURE"),
-		"/Volumes/dev/ForgeGraph/docs/contracts/preflight/capabilities.v1.json",
-		"../../../ForgeGraph/docs/contracts/preflight/capabilities.v1.json",
+		"../../docs/contracts/preflight/capabilities.v1.json",
 	}
 
 	for _, candidate := range candidates {
