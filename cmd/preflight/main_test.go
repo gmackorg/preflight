@@ -10789,6 +10789,7 @@ exit 0
 	expected := strings.Join([]string{
 		"simctl boot 6BA8F38E-BF97-4830-98A6-E459E4312F29",
 		"simctl bootstatus 6BA8F38E-BF97-4830-98A6-E459E4312F29 -b",
+		"simctl get_app_container 6BA8F38E-BF97-4830-98A6-E459E4312F29 com.gmacko.forgegraph.dev app",
 		"simctl terminate 6BA8F38E-BF97-4830-98A6-E459E4312F29 com.gmacko.forgegraph.dev",
 		"simctl openurl 6BA8F38E-BF97-4830-98A6-E459E4312F29 forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000",
 	}, "\n") + "\n"
@@ -10955,6 +10956,19 @@ printf 'maestro finished\n'
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_maestro","kind":"maestro.run","status":"running","runnerId":"pfrun_cli","targetId":"pftgt_cli","payload":{"targetId":"pftgt_cli","providerIdentity":"6BA8F38E-BF97-4830-98A6-E459E4312F29","flowPath":"apps/mobile/.maestro/01-app-launches.yaml","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile"},"devSession":{"url":"http://127.0.0.1:19000","port":19000}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_maestro"}}`, workspaceRoot)
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_maestro/heartbeat":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected method for job heartbeat: %s", r.Method)
+			}
+			if r.Header.Get("Authorization") != "Bearer runner_token" {
+				t.Fatalf("missing runner token on job heartbeat: %q", r.Header.Get("Authorization"))
+			}
+			// The runner defaults to heartbeat-based cancellation polling (job
+			// heartbeat capability defaults on unless explicitly disabled, see
+			// runnerJobHeartbeatEnabled), so the fake control plane must answer
+			// this route the same way a live server would: with the job's
+			// current (cancelled) status, not just the plain job-read route.
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_maestro","kind":"maestro.run","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_job_heartbeat"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_maestro":
 			if r.Method != http.MethodGet {
 				t.Fatalf("unexpected method for job read: %s", r.Method)
@@ -11006,8 +11020,8 @@ printf 'maestro finished\n'
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
-	if countCalls(calls, "GET /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_maestro") == 0 {
-		t.Fatalf("expected runner to poll job status, got %v", calls)
+	if countCalls(calls, "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_maestro/heartbeat") == 0 {
+		t.Fatalf("expected runner to poll job status via heartbeat (default-enabled), got %v", calls)
 	}
 	if !completedCancelled {
 		t.Fatalf("expected runner to complete cancelled Maestro job, got calls %v", calls)
