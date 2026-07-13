@@ -4327,6 +4327,9 @@ func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
+	if received["targetClass"] != "device" {
+		t.Fatalf("expected development workflow to request a physical device, got %#v", received)
+	}
 	sourceBinding := received["sourceBinding"].(map[string]any)
 	if sourceBinding["platform"] != "ios" || sourceBinding["lane"] != "development" {
 		t.Fatalf("unexpected source binding lane %#v", sourceBinding)

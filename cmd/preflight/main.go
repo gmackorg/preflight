@@ -10995,6 +10995,9 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		"workspaceId":   options.workspaceID,
 		"sourceBinding": sourceBinding,
 	}
+	if options.lane == "development" {
+		workflowRequest["targetClass"] = proveAppTargetClass(options)
+	}
 	if len(options.secretReferenceIDs) > 0 {
 		workflowRequest["secretReferenceIds"] = append([]string{}, options.secretReferenceIDs...)
 	}
@@ -11069,6 +11072,17 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 	}
 
 	return 0
+}
+
+func proveAppTargetClass(options proveAppOptions) string {
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(options.targetKind)))
+	if normalized == "ios_simulator" || normalized == "simulator" {
+		return "simulator"
+	}
+	if normalized == "android_emulator" || normalized == "emulator" {
+		return "emulator"
+	}
+	return "device"
 }
 
 type proveAppOptions struct {
