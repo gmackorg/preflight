@@ -4317,6 +4317,8 @@ func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
 			"ios",
 			"--lane",
 			"development",
+			"--build-strategy",
+			"eas",
 			"--json",
 		},
 		&stdout,
@@ -4331,6 +4333,9 @@ func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
 		t.Fatalf("expected development workflow to request a physical device, got %#v", received)
 	}
 	sourceBinding := received["sourceBinding"].(map[string]any)
+	if sourceBinding["buildStrategy"] != "eas" {
+		t.Fatalf("expected EAS build strategy in source binding, got %#v", sourceBinding)
+	}
 	if sourceBinding["platform"] != "ios" || sourceBinding["lane"] != "development" {
 		t.Fatalf("unexpected source binding lane %#v", sourceBinding)
 	}

@@ -10732,6 +10732,7 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		fmt.Fprintln(stdout, "  --app-dir <path>        Expo app directory (default: .)")
 		fmt.Fprintln(stdout, "  --platform ios|android  Platform to prove (default: ios)")
 		fmt.Fprintln(stdout, "  --lane <lane>           simulator or development (default: simulator)")
+		fmt.Fprintln(stdout, "  --build-strategy <name> local or eas development build strategy")
 		fmt.Fprintln(stdout, "  --priority <n>          scheduling priority; higher is claimed first (default: 0)")
 		fmt.Fprintln(stdout, "  --local-readiness       Validate local Expo/EAS/Maestro readiness without API calls")
 		fmt.Fprintln(stdout, "  --secret-ref <id>       Attach a Preflight-owned secret reference to runner jobs")
@@ -10874,6 +10875,17 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 				return 2
 			}
 			options.buildProfile = value
+		case "--build-strategy":
+			value, ok := nextFlagValue(args, &index)
+			if !ok {
+				fmt.Fprintln(stderr, "--build-strategy requires a value")
+				return 2
+			}
+			if value != "local" && value != "eas" {
+				fmt.Fprintln(stderr, "--build-strategy must be local or eas")
+				return 2
+			}
+			options.buildStrategy = value
 		case "--version":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -11105,6 +11117,7 @@ type proveAppOptions struct {
 	flowPath           string
 	artifactDir        string
 	buildProfile       string
+	buildStrategy      string
 	version            string
 	buildNumber        string
 	message            string
@@ -12953,6 +12966,7 @@ type sourceBinding struct {
 	WorkspaceRoot       string   `json:"workspaceRoot"`
 	PackagePath         string   `json:"packagePath"`
 	WorkflowIntent      string   `json:"workflowIntent"`
+	BuildStrategy       string   `json:"buildStrategy,omitempty"`
 	Platform            string   `json:"platform"`
 	Lane                string   `json:"lane"`
 	ExpoConfigDigest    string   `json:"expoConfigDigest"`
@@ -13559,6 +13573,7 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 		WorkspaceRoot:       workspaceRoot,
 		PackagePath:         packagePath,
 		WorkflowIntent:      "prove-app",
+		BuildStrategy:       options.buildStrategy,
 		Platform:            options.platform,
 		Lane:                options.lane,
 		ExpoConfigDigest:    resolvedExpoConfig.digest,
