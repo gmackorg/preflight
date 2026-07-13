@@ -1525,6 +1525,25 @@ esac
 	}
 }
 
+func TestResolveStandalonePlanEnvAllowsLocalEASSessionWithoutExpoToken(t *testing.T) {
+	t.Setenv("EXPO_TOKEN", "")
+	t.Setenv("PREFLIGHT_SECRET_EXPO_TOKEN", "")
+
+	resolved, err := resolveStandalonePlanEnv(map[string]string{
+		"EXPO_NO_TELEMETRY": "1",
+		"EXPO_TOKEN":        "${PREFLIGHT_SECRET:expoToken}",
+	})
+	if err != nil {
+		t.Fatalf("resolve standalone plan env: %v", err)
+	}
+	if resolved["EXPO_NO_TELEMETRY"] != "1" {
+		t.Fatalf("expected non-secret plan env to be preserved, got %#v", resolved)
+	}
+	if _, ok := resolved["EXPO_TOKEN"]; ok {
+		t.Fatalf("expected missing Expo token to defer to the local EAS session, got %#v", resolved)
+	}
+}
+
 func TestProveAppStandaloneDevelopmentBuildPollsBuildViewUntilTerminal(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	writeMaestroLaunchFixture(t, appDir)

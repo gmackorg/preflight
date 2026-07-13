@@ -12084,6 +12084,9 @@ func resolveStandalonePlanEnv(planEnv map[string]string) (map[string]string, err
 		}
 		secretValue, envName := standaloneSecretValue(secretName)
 		if secretValue == "" {
+			if secretName == "expoToken" {
+				continue
+			}
 			return nil, fmt.Errorf("missing Preflight secret %s; set %s", secretName, envName)
 		}
 		resolved[key] = secretValue
