@@ -11437,16 +11437,29 @@ func createStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sourc
 	if buildProfile == "" {
 		buildProfile = "development"
 	}
+	readinessOptions := options
+	readinessOptions.buildProfile = ""
+	readinessBinding, err := discoverSourceBinding(readinessOptions)
+	if err != nil {
+		fmt.Fprintf(stderr, "discover development readiness binding failed: %v\n", err)
+		return 1
+	}
+	developmentReadiness, err := readStandaloneDevelopmentReadiness(readinessOptions, readinessBinding)
+	if err != nil {
+		fmt.Fprintf(stderr, "read development readiness failed: %v\n", err)
+		return 1
+	}
 
 	payload := map[string]any{
-		"workspaceId":       options.workspaceID,
-		"workflowId":        workflowID,
-		"platform":          options.platform,
-		"targetKind":        targetKind,
-		"appDirectory":      appDirectory,
-		"buildProfile":      buildProfile,
-		"version":           version,
-		"artifactDirectory": artifactDir,
+		"workspaceId":          options.workspaceID,
+		"workflowId":           workflowID,
+		"platform":             options.platform,
+		"targetKind":           targetKind,
+		"appDirectory":         appDirectory,
+		"buildProfile":         buildProfile,
+		"version":              version,
+		"artifactDirectory":    artifactDir,
+		"developmentReadiness": developmentReadiness,
 	}
 	if targetID != "" {
 		payload["targetId"] = targetID
@@ -11484,6 +11497,31 @@ func createStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sourc
 		fmt.Fprintf(stdout, "%s %s\n", command.Command, strings.Join(command.Args, " "))
 	}
 	return 0
+}
+
+func readStandaloneDevelopmentReadiness(options proveAppOptions, binding sourceBinding) (map[string]any, error) {
+	appDirectory := sourceBindingAppDirectory(binding)
+	packageConfig, err := readPackageJSON(filepath.Join(appDirectory, "package.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read package.json: %w", err)
+	}
+	easConfig, err := loadEASJSON(appDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("read eas.json: %w", err)
+	}
+	flowPath := localReadinessMaestroFlowPath(options, appDirectory)
+	flowContent, err := os.ReadFile(flowPath)
+	if err != nil {
+		return nil, fmt.Errorf("read Maestro flow: %w", err)
+	}
+	return map[string]any{
+		"sourceBinding": binding,
+		"packageJson":   packageConfig,
+		"easJson":       easConfig,
+		"maestroFlows": []map[string]string{
+			{"path": flowPath, "content": string(flowContent)},
+		},
+	}, nil
 }
 
 func standaloneDevelopmentBuildVersion(options proveAppOptions, appDirectory string) (string, error) {

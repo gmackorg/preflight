@@ -1596,6 +1596,17 @@ sleep 30
 
 func TestProveAppStandaloneDevelopmentPlanUsesDerivedEASProfile(t *testing.T) {
 	appDir := writeExpoFixture(t)
+	maestroDir := filepath.Join(appDir, ".maestro")
+	if err := os.MkdirAll(maestroDir, 0o755); err != nil {
+		t.Fatalf("create Maestro fixture directory: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(maestroDir, "01-app-launches.yaml"),
+		[]byte("appId: com.gmacko.forgegraph.dev\n---\n- launchApp\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("write Maestro fixture: %v", err)
+	}
 	if err := os.WriteFile(
 		filepath.Join(appDir, "eas.json"),
 		[]byte(`{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":true}},"development-device":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":false}},"development-android":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"android":{"buildType":"apk"}}}}`),
@@ -1661,6 +1672,22 @@ func TestProveAppStandaloneDevelopmentPlanUsesDerivedEASProfile(t *testing.T) {
 	}
 	if androidPlanBody["buildProfile"] != "development-android" {
 		t.Fatalf("expected Android development profile from source binding, got %#v", androidPlanBody)
+	}
+	for platform, body := range map[string]map[string]any{
+		"ios":     iosPlanBody,
+		"android": androidPlanBody,
+	} {
+		readiness, ok := body["developmentReadiness"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected %s plan body to include development readiness, got %#v", platform, body)
+		}
+		if readiness["packageJson"] == nil || readiness["easJson"] == nil {
+			t.Fatalf("expected %s development readiness to include package and EAS config, got %#v", platform, readiness)
+		}
+		flows, ok := readiness["maestroFlows"].([]any)
+		if !ok || len(flows) == 0 {
+			t.Fatalf("expected %s development readiness to include Maestro flows, got %#v", platform, readiness)
+		}
 	}
 }
 
