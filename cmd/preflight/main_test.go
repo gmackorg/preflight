@@ -1159,8 +1159,24 @@ printf 'mp4\n' > "$output_dir/video-1.mp4"
 	}
 }
 
+func writeMaestroLaunchFixture(t *testing.T, appDir string) {
+	t.Helper()
+	maestroDir := filepath.Join(appDir, ".maestro")
+	if err := os.MkdirAll(maestroDir, 0o755); err != nil {
+		t.Fatalf("create Maestro fixture directory: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(maestroDir, "01-app-launches.yaml"),
+		[]byte("appId: com.gmacko.forgegraph.dev\n---\n- launchApp\n"),
+		0o644,
+	); err != nil {
+		t.Fatalf("write Maestro fixture: %v", err)
+	}
+}
+
 func TestProveAppStandaloneRunExecutesDevelopmentBuildPlanAndPostsResult(t *testing.T) {
 	appDir := writeExpoFixture(t)
+	writeMaestroLaunchFixture(t, appDir)
 	commandLog := filepath.Join(t.TempDir(), "eas-commands.log")
 	artifactDir := filepath.Join(t.TempDir(), "runtime-artifacts")
 	fakeBin := t.TempDir()
@@ -1426,8 +1442,92 @@ sleep 30
 	}
 }
 
+func TestProveAppStandaloneRunPostsPreviewBuildWithoutDevelopmentSession(t *testing.T) {
+	appDir := writeExpoFixture(t)
+	writeMaestroLaunchFixture(t, appDir)
+	artifactDir := filepath.Join(t.TempDir(), "runtime-artifacts")
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "eas"), []byte(`#!/usr/bin/env sh
+case "$1" in
+  config)
+    printf '{"projectId":"eas_project_preview"}\n'
+    ;;
+  build)
+    printf '{"id":"eas_build_preview","status":"in-progress","platform":"ios"}\n'
+    ;;
+  build:view)
+    printf '{"id":"eas_build_preview","status":"finished","platform":"ios","artifacts":{"buildUrl":"https://expo.dev/runtime-artifacts/eas_build_preview.ipa"}}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatalf("write fake eas: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PREFLIGHT_TOKEN", "standalone_preview_token")
+	t.Setenv("EXPO_TOKEN", "expo_token_preview")
+
+	var resultBody map[string]any
+	sessionPlanCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-build-plans":
+			_, _ = fmt.Fprintf(w, `{"data":{"workflowId":"pfw_preview","platform":"ios","targetKind":"iphone","build":{"id":"pfbuild_pfw_preview","appId":"pfapp_forgegraph_mobile","platform":"ios","profile":"preview","version":"1.2.3","environment":"preview","status":"queued"},"installation":{"id":"pfinstall_pfw_preview","workspaceId":"ws_preview","appId":"pfapp_forgegraph_mobile","targetId":"pftarget_iphone","buildId":"pfbuild_pfw_preview","workflowId":"pfw_preview","status":"installing","installUrl":"","metadata":{"buildProfile":"preview"}},"commands":[{"id":"eas_config","kind":"one_shot","command":"eas","args":["config","--platform","ios","--profile","preview","--json","--non-interactive"],"cwd":%q,"env":{"EXPO_TOKEN":"${PREFLIGHT_SECRET:expoToken}"},"stdoutArtifactPath":%q},{"id":"eas_build","kind":"one_shot","command":"eas","args":["build","--platform","ios","--profile","preview","--json","--non-interactive"],"cwd":%q,"env":{"EXPO_TOKEN":"${PREFLIGHT_SECRET:expoToken}"},"stdoutArtifactPath":%q},{"id":"eas_build_view","kind":"one_shot","command":"eas","args":["build:view","${EAS_BUILD_ID}","--json"],"cwd":%q,"env":{"EXPO_TOKEN":"${PREFLIGHT_SECRET:expoToken}"},"stdoutArtifactPath":%q}]}}`,
+				appDir,
+				filepath.Join(artifactDir, "eas", "config.json"),
+				appDir,
+				filepath.Join(artifactDir, "eas", "build.json"),
+				appDir,
+				filepath.Join(artifactDir, "eas", "build-view.json"),
+			)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-build-results":
+			if err := json.NewDecoder(r.Body).Decode(&resultBody); err != nil {
+				t.Fatalf("decode result body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"data":{"build":{"id":"pfbuild_pfw_preview","status":"completed"},"installation":{"id":"pfinstall_pfw_preview","status":"installed"}}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/runtime-artifacts":
+			_, _ = w.Write([]byte(`{"data":{"id":"pfart_preview"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-session-plans":
+			sessionPlanCalls++
+			http.Error(w, "preview must not start a development session", http.StatusBadRequest)
+		default:
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run(
+		[]string{
+			"prove-app", "--standalone-run", "--lane", "development",
+			"--api-url", server.URL, "--workspace-id", "ws_preview",
+			"--app-dir", appDir, "--platform", "ios", "--target-kind", "iphone",
+			"--target-id", "pftarget_iphone", "--workflow-id", "pfw_preview",
+			"--build-profile", "preview", "--version", "1.2.3",
+			"--artifact-dir", artifactDir,
+		},
+		&stdout,
+		&stderr,
+		server.Client(),
+	)
+	if code != 0 {
+		t.Fatalf("standalone preview run exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if resultBody["buildProfile"] != "preview" {
+		t.Fatalf("expected preview result profile, got %#v", resultBody)
+	}
+	if sessionPlanCalls != 0 {
+		t.Fatalf("expected no development session for preview, got %d calls", sessionPlanCalls)
+	}
+}
+
 func TestProveAppStandaloneDevelopmentBuildPollsBuildViewUntilTerminal(t *testing.T) {
 	appDir := writeExpoFixture(t)
+	writeMaestroLaunchFixture(t, appDir)
 	commandLog := filepath.Join(t.TempDir(), "eas-commands.log")
 	stateFile := filepath.Join(t.TempDir(), "build-view-count")
 	artifactDir := filepath.Join(t.TempDir(), "runtime-artifacts")

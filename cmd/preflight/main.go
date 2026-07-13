@@ -11582,6 +11582,7 @@ func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sour
 		"workflowId":         plan.WorkflowID,
 		"targetId":           targetID,
 		"platform":           plan.Platform,
+		"buildProfile":       readMapString(plan.Build, "profile"),
 		"version":            version,
 		"easBuild":           finalEASBuild,
 	}
@@ -11595,6 +11596,10 @@ func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sour
 	if _, err := postPreflightWorkspaceJSON(client, endpoint, options.token, options.workspaceID, payload); err != nil {
 		fmt.Fprintf(stderr, "post development build result failed: %v\n", err)
 		return 1
+	}
+	if readMapString(plan.Build, "profile") == "preview" {
+		fmt.Fprintf(stdout, "preview build run %s posted %s\n", plan.WorkflowID, readMapString(finalEASBuild, "id"))
+		return 0
 	}
 	if code := executeStandaloneDevelopmentSessionPlan(options, binding, plan, targetID, stdout, stderr, client); code != 0 {
 		return code
