@@ -11484,10 +11484,19 @@ func createStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sourc
 		_, _ = fmt.Fprintln(stdout, string(data))
 		return 0
 	}
-	var plan developmentBuildPlanData
-	if err := decodeEnvelopeData(data, &plan); err != nil {
+	var response struct {
+		Plan developmentBuildPlanData `json:"plan"`
+	}
+	if err := decodeEnvelopeData(data, &response); err != nil {
 		fmt.Fprintf(stderr, "decode development build plan failed: %v\n", err)
 		return 1
+	}
+	plan := response.Plan
+	if plan.WorkflowID == "" {
+		if err := decodeEnvelopeData(data, &plan); err != nil {
+			fmt.Fprintf(stderr, "decode development build plan failed: %v\n", err)
+			return 1
+		}
 	}
 	if options.standaloneRun {
 		return executeStandaloneDevelopmentBuildPlan(options, binding, plan, stdout, stderr, client)
@@ -11634,10 +11643,19 @@ func executeStandaloneDevelopmentSessionPlan(options proveAppOptions, binding so
 		fmt.Fprintf(stderr, "standalone development session plan failed: %v\n", err)
 		return 1
 	}
-	var plan developmentSessionPlanData
-	if err := decodeEnvelopeData(data, &plan); err != nil {
+	var response struct {
+		Plan developmentSessionPlanData `json:"plan"`
+	}
+	if err := decodeEnvelopeData(data, &response); err != nil {
 		fmt.Fprintf(stderr, "decode development session plan failed: %v\n", err)
 		return 1
+	}
+	plan := response.Plan
+	if plan.WorkflowID == "" {
+		if err := decodeEnvelopeData(data, &plan); err != nil {
+			fmt.Fprintf(stderr, "decode development session plan failed: %v\n", err)
+			return 1
+		}
 	}
 	for _, plannedCommand := range plan.Commands {
 		if plannedCommand.Kind != "long_running" {
