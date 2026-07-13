@@ -1471,6 +1471,7 @@ esac
 
 	var resultBody map[string]any
 	sessionPlanCalls := 0
+	resultPosted := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -1487,8 +1488,13 @@ esac
 			if err := json.NewDecoder(r.Body).Decode(&resultBody); err != nil {
 				t.Fatalf("decode result body: %v", err)
 			}
+			resultPosted = true
 			_, _ = w.Write([]byte(`{"data":{"build":{"id":"pfbuild_pfw_preview","status":"completed"},"installation":{"id":"pfinstall_pfw_preview","status":"installed"}}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/runtime-artifacts":
+			if !resultPosted {
+				http.Error(w, "build result must be persisted before artifacts", http.StatusInternalServerError)
+				return
+			}
 			_, _ = w.Write([]byte(`{"data":{"id":"pfart_preview"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-session-plans":
 			sessionPlanCalls++

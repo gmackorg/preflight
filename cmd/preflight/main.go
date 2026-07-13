@@ -11547,12 +11547,14 @@ func standaloneDevelopmentBuildVersion(options proveAppOptions, appDirectory str
 func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sourceBinding, plan developmentBuildPlanData, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	easBuildID := ""
 	var finalEASBuild map[string]any
+	completedCommands := make([]developmentBuildPlanCommand, 0, len(plan.Commands))
 	for _, plannedCommand := range plan.Commands {
 		_, record, err := runStandaloneDevelopmentBuildCommandForPlan(plannedCommand, easBuildID)
 		if err != nil {
 			fmt.Fprintf(stderr, "run %s failed: %v\n", standaloneCommandLabel(plannedCommand.simulatorProofPlanCommand), err)
 			return 1
 		}
+		completedCommands = append(completedCommands, plannedCommand)
 		if record == nil {
 			continue
 		}
@@ -11565,10 +11567,6 @@ func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sour
 		}
 		if plannedCommand.ID == "eas_build" || plannedCommand.ID == "eas_build_view" {
 			finalEASBuild = record
-		}
-		if err := postStandaloneDevelopmentBuildArtifact(client, options, binding.AppID, plan, plannedCommand, easBuildID); err != nil {
-			fmt.Fprintf(stderr, "post EAS artifact failed: %v\n", err)
-			return 1
 		}
 	}
 	if finalEASBuild == nil {
@@ -11605,6 +11603,12 @@ func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sour
 	if _, err := postPreflightWorkspaceJSON(client, endpoint, options.token, options.workspaceID, payload); err != nil {
 		fmt.Fprintf(stderr, "post development build result failed: %v\n", err)
 		return 1
+	}
+	for _, plannedCommand := range completedCommands {
+		if err := postStandaloneDevelopmentBuildArtifact(client, options, binding.AppID, plan, plannedCommand, easBuildID); err != nil {
+			fmt.Fprintf(stderr, "post EAS artifact failed: %v\n", err)
+			return 1
+		}
 	}
 	if readMapString(plan.Build, "profile") == "preview" {
 		fmt.Fprintf(stdout, "preview build run %s posted %s\n", plan.WorkflowID, readMapString(finalEASBuild, "id"))
