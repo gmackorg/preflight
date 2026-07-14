@@ -12002,7 +12002,17 @@ func runStandaloneDevelopmentBuildCommandForPlan(plannedCommand developmentBuild
 	if plannedCommand.ID == "eas_build_view" {
 		return pollStandaloneDevelopmentBuildView(plannedCommand, easBuildID)
 	}
-	output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, interactiveSetup && plannedCommand.ID == "eas_build")
+	if interactiveSetup && plannedCommand.ID == "eas_build" {
+		if _, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, true); err != nil {
+			return nil, nil, err
+		}
+		platform := standaloneCommandFlagValue(plannedCommand.Args, "--platform")
+		lookupCommand := plannedCommand
+		lookupCommand.ID = "eas_build_list"
+		lookupCommand.Args = []string{"build:list", "--platform", platform, "--limit", "1", "--json", "--non-interactive"}
+		return runStandaloneDevelopmentBuildCommandForPlan(lookupCommand, "", false)
+	}
+	output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, false)
 	if err != nil {
 		return output, nil, err
 	}
@@ -12014,6 +12024,15 @@ func runStandaloneDevelopmentBuildCommandForPlan(plannedCommand developmentBuild
 		return output, nil, fmt.Errorf("decode %s JSON: %w", standaloneCommandLabel(plannedCommand.simulatorProofPlanCommand), err)
 	}
 	return output, record, nil
+}
+
+func standaloneCommandFlagValue(args []string, name string) string {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == name {
+			return args[index+1]
+		}
+	}
+	return ""
 }
 
 func pollStandaloneDevelopmentBuildView(plannedCommand developmentBuildPlanCommand, easBuildID string) ([]byte, map[string]any, error) {
@@ -12068,7 +12087,9 @@ func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCom
 		"EAS_BUILD_ID": easBuildID,
 	})
 	if interactive {
-		args = slices.DeleteFunc(args, func(arg string) bool { return arg == "--non-interactive" })
+		args = slices.DeleteFunc(args, func(arg string) bool {
+			return arg == "--non-interactive" || arg == "--json"
+		})
 	}
 	command := exec.Command(plannedCommand.Command, args...)
 	if strings.TrimSpace(plannedCommand.CWD) != "" {

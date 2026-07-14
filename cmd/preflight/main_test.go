@@ -1457,6 +1457,9 @@ case "$1" in
   build)
     printf '{"id":"eas_build_preview","status":"in-progress","platform":"ios"}\n'
     ;;
+  build:list)
+    printf '[{"id":"eas_build_preview","status":"in-progress","platform":"ios"}]\n'
+    ;;
   build:view)
     printf '{"id":"eas_build_preview","status":"finished","platform":"ios","artifacts":{"buildUrl":"https://expo.dev/runtime-artifacts/eas_build_preview.ipa"}}\n'
     ;;
@@ -1537,11 +1540,15 @@ esac
 	if err != nil {
 		t.Fatalf("read command log: %v", err)
 	}
-	if strings.Contains(string(commands), "build --platform ios --profile preview --json --non-interactive") {
-		t.Fatalf("interactive setup must remove --non-interactive from EAS build, got %q", string(commands))
+	if strings.Contains(string(commands), "build --platform ios --profile preview --json") ||
+		strings.Contains(string(commands), "build --platform ios --profile preview --non-interactive") {
+		t.Fatalf("interactive setup must remove JSON and non-interactive flags from EAS build, got %q", string(commands))
 	}
-	if !strings.Contains(string(commands), "build --platform ios --profile preview --json") {
+	if !strings.Contains(string(commands), "build --platform ios --profile preview") {
 		t.Fatalf("expected interactive EAS preview build command, got %q", string(commands))
+	}
+	if !strings.Contains(string(commands), "build:list --platform ios --limit 1 --json --non-interactive") {
+		t.Fatalf("expected build lookup after interactive setup, got %q", string(commands))
 	}
 }
 
