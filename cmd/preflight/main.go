@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -10735,6 +10736,7 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		fmt.Fprintln(stdout, "  --build-strategy <name> local or eas development build strategy")
 		fmt.Fprintln(stdout, "  --priority <n>          scheduling priority; higher is claimed first (default: 0)")
 		fmt.Fprintln(stdout, "  --local-readiness       Validate local Expo/EAS/Maestro readiness without API calls")
+		fmt.Fprintln(stdout, "  --interactive-setup     Allow EAS credential prompts during a standalone build run")
 		fmt.Fprintln(stdout, "  --secret-ref <id>       Attach a Preflight-owned secret reference to runner jobs")
 		fmt.Fprintln(stdout, "  --wait-for-runner       Create the workflow even when no runner is currently available")
 		return 0
@@ -10814,6 +10816,8 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		case "--standalone-run":
 			options.standalonePlan = true
 			options.standaloneRun = true
+		case "--interactive-setup":
+			options.interactiveSetup = true
 		case "--target-kind":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -11109,6 +11113,7 @@ type proveAppOptions struct {
 	localReadiness     bool
 	standalonePlan     bool
 	standaloneRun      bool
+	interactiveSetup   bool
 	targetKind         string
 	targetKey          string
 	targetID           string
@@ -11576,7 +11581,7 @@ func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sour
 	var finalEASBuild map[string]any
 	completedCommands := make([]developmentBuildPlanCommand, 0, len(plan.Commands))
 	for _, plannedCommand := range plan.Commands {
-		_, record, err := runStandaloneDevelopmentBuildCommandForPlan(plannedCommand, easBuildID)
+		_, record, err := runStandaloneDevelopmentBuildCommandForPlan(plannedCommand, easBuildID, options.interactiveSetup)
 		if err != nil {
 			fmt.Fprintf(stderr, "run %s failed: %v\n", standaloneCommandLabel(plannedCommand.simulatorProofPlanCommand), err)
 			return 1
@@ -11993,11 +11998,11 @@ func postStandaloneDevelopmentBuildArtifact(client *http.Client, options proveAp
 	return postStandaloneRuntimeState(client, options, appID, "runtime-artifacts", payload)
 }
 
-func runStandaloneDevelopmentBuildCommandForPlan(plannedCommand developmentBuildPlanCommand, easBuildID string) ([]byte, map[string]any, error) {
+func runStandaloneDevelopmentBuildCommandForPlan(plannedCommand developmentBuildPlanCommand, easBuildID string, interactiveSetup bool) ([]byte, map[string]any, error) {
 	if plannedCommand.ID == "eas_build_view" {
 		return pollStandaloneDevelopmentBuildView(plannedCommand, easBuildID)
 	}
-	output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID)
+	output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, interactiveSetup && plannedCommand.ID == "eas_build")
 	if err != nil {
 		return output, nil, err
 	}
@@ -12016,7 +12021,7 @@ func pollStandaloneDevelopmentBuildView(plannedCommand developmentBuildPlanComma
 	var lastOutput []byte
 	var lastRecord map[string]any
 	for {
-		output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID)
+		output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, false)
 		if err != nil {
 			return output, nil, err
 		}
@@ -12054,7 +12059,7 @@ func decodeStandaloneEASBuildRecord(output []byte) (map[string]any, error) {
 	return record, nil
 }
 
-func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCommand, easBuildID string) ([]byte, error) {
+func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCommand, easBuildID string, interactive bool) ([]byte, error) {
 	env, err := resolveStandalonePlanEnv(plannedCommand.Env)
 	if err != nil {
 		return nil, err
@@ -12062,14 +12067,23 @@ func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCom
 	args := substituteStandaloneCommandArgs(plannedCommand.Args, map[string]string{
 		"EAS_BUILD_ID": easBuildID,
 	})
+	if interactive {
+		args = slices.DeleteFunc(args, func(arg string) bool { return arg == "--non-interactive" })
+	}
 	command := exec.Command(plannedCommand.Command, args...)
 	if strings.TrimSpace(plannedCommand.CWD) != "" {
 		command.Dir = plannedCommand.CWD
 	}
 	command.Env = easCommandEnv(os.Environ(), env)
 	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
+	if interactive {
+		command.Stdin = os.Stdin
+		command.Stdout = io.MultiWriter(os.Stdout, &output)
+		command.Stderr = io.MultiWriter(os.Stderr, &output)
+	} else {
+		command.Stdout = &output
+		command.Stderr = &output
+	}
 	timeout := easReadinessTimeout()
 	if plannedCommand.ID == "eas_build" {
 		timeout = easBuildTimeout()

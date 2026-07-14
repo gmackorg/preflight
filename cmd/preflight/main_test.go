@@ -1446,8 +1446,10 @@ func TestProveAppStandaloneRunPostsPreviewBuildWithoutDevelopmentSession(t *test
 	appDir := writeExpoFixture(t)
 	writeMaestroLaunchFixture(t, appDir)
 	artifactDir := filepath.Join(t.TempDir(), "runtime-artifacts")
+	commandLog := filepath.Join(t.TempDir(), "commands.log")
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "eas"), []byte(`#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$COMMAND_LOG"
 case "$1" in
   config)
     printf '{"projectId":"eas_project_preview"}\n'
@@ -1468,6 +1470,7 @@ esac
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PREFLIGHT_TOKEN", "standalone_preview_token")
 	t.Setenv("EXPO_TOKEN", "expo_token_preview")
+	t.Setenv("COMMAND_LOG", commandLog)
 
 	var resultBody map[string]any
 	sessionPlanCalls := 0
@@ -1510,6 +1513,7 @@ esac
 	code := run(
 		[]string{
 			"prove-app", "--standalone-run", "--lane", "development",
+			"--interactive-setup",
 			"--api-url", server.URL, "--workspace-id", "ws_preview",
 			"--app-dir", appDir, "--platform", "ios", "--target-kind", "iphone",
 			"--target-id", "pftarget_iphone", "--workflow-id", "pfw_preview",
@@ -1528,6 +1532,16 @@ esac
 	}
 	if sessionPlanCalls != 0 {
 		t.Fatalf("expected no development session for preview, got %d calls", sessionPlanCalls)
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatalf("read command log: %v", err)
+	}
+	if strings.Contains(string(commands), "build --platform ios --profile preview --json --non-interactive") {
+		t.Fatalf("interactive setup must remove --non-interactive from EAS build, got %q", string(commands))
+	}
+	if !strings.Contains(string(commands), "build --platform ios --profile preview --json") {
+		t.Fatalf("expected interactive EAS preview build command, got %q", string(commands))
 	}
 }
 
