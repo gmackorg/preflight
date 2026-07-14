@@ -12099,8 +12099,8 @@ func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCom
 	var output bytes.Buffer
 	if interactive {
 		command.Stdin = os.Stdin
-		command.Stdout = io.MultiWriter(os.Stdout, &output)
-		command.Stderr = io.MultiWriter(os.Stderr, &output)
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
 	} else {
 		command.Stdout = &output
 		command.Stderr = &output
