@@ -12114,10 +12114,34 @@ func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCom
 	if plannedCommand.ID == "eas_build" {
 		timeout = easBuildTimeout()
 	}
-	if err := runCommandWithTimeout(command, timeout); err != nil {
-		return output.Bytes(), fmt.Errorf("%s %s failed: %w: %s", plannedCommand.Command, strings.Join(args, " "), err, redactCommandOutput(strings.TrimSpace(output.String()), env))
+	runErr := error(nil)
+	if interactive {
+		runErr = runInteractiveCommandWithTimeout(command, timeout)
+	} else {
+		runErr = runCommandWithTimeout(command, timeout)
+	}
+	if runErr != nil {
+		return output.Bytes(), fmt.Errorf("%s %s failed: %w: %s", plannedCommand.Command, strings.Join(args, " "), runErr, redactCommandOutput(strings.TrimSpace(output.String()), env))
 	}
 	return output.Bytes(), nil
+}
+
+func runInteractiveCommandWithTimeout(command *exec.Cmd, timeout time.Duration) error {
+	if err := command.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = command.Process.Kill()
+		<-done
+		return context.DeadlineExceeded
+	}
 }
 
 func isTerminalEASBuildStatus(status string) bool {

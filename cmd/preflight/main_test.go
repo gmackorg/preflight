@@ -1556,6 +1556,16 @@ esac
 	}
 }
 
+func TestRunInteractiveCommandWithTimeoutDoesNotUseBackgroundProcessGroup(t *testing.T) {
+	command := exec.Command("sh", "-c", "exit 0")
+	if err := runInteractiveCommandWithTimeout(command, time.Second); err != nil {
+		t.Fatalf("run interactive command: %v", err)
+	}
+	if command.SysProcAttr != nil && command.SysProcAttr.Setpgid {
+		t.Fatal("interactive command must remain in the terminal foreground process group")
+	}
+}
+
 func TestResolveStandalonePlanEnvAllowsLocalEASSessionWithoutExpoToken(t *testing.T) {
 	t.Setenv("EXPO_TOKEN", "")
 	t.Setenv("PREFLIGHT_SECRET_EXPO_TOKEN", "")
