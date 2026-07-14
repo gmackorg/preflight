@@ -1455,6 +1455,7 @@ case "$1" in
     printf '{"projectId":"eas_project_preview"}\n'
     ;;
   build)
+    printf 'build-env CI=%s EXPO_NO_INTERACTIVE=%s\n' "${CI-unset}" "${EXPO_NO_INTERACTIVE-unset}" >> "$COMMAND_LOG"
     printf '{"id":"eas_build_preview","status":"in-progress","platform":"ios"}\n'
     ;;
   build:list)
@@ -1549,6 +1550,9 @@ esac
 	}
 	if !strings.Contains(string(commands), "build:list --platform ios --limit 1 --json --non-interactive") {
 		t.Fatalf("expected build lookup after interactive setup, got %q", string(commands))
+	}
+	if !strings.Contains(string(commands), "build-env CI=unset EXPO_NO_INTERACTIVE=unset") {
+		t.Fatalf("interactive setup must remove forced non-interactive environment, got %q", string(commands))
 	}
 }
 

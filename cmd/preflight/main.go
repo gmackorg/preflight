@@ -12096,6 +12096,11 @@ func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCom
 		command.Dir = plannedCommand.CWD
 	}
 	command.Env = easCommandEnv(os.Environ(), env)
+	if interactive {
+		command.Env = slices.DeleteFunc(command.Env, func(entry string) bool {
+			return strings.HasPrefix(entry, "CI=") || strings.HasPrefix(entry, "EXPO_NO_INTERACTIVE=")
+		})
+	}
 	var output bytes.Buffer
 	if interactive {
 		command.Stdin = os.Stdin
