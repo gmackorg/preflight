@@ -13634,7 +13634,9 @@ func filterRunnerManagedPaths(
 	if packagePath == "." {
 		packagePath = ""
 	}
-	var prefixes []string
+	// EAS job logs and build metadata are written at the workspace root even
+	// when the Expo package lives below it (for example apps/mobile).
+	prefixes := []string{".preflight/"}
 	for _, dir := range []string{"ios", "android", ".preflight", ".expo"} {
 		if packagePath == "" {
 			prefixes = append(prefixes, dir+"/")

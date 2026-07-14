@@ -7359,6 +7359,19 @@ exit 0
 	}
 }
 
+func TestFilterRunnerManagedPathsDropsRootAndAppPreflightArtifacts(t *testing.T) {
+	workspaceRoot := filepath.Join(string(os.PathSeparator), "repo")
+	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
+	got := filterRunnerManagedPaths(workspaceRoot, appDir, []string{
+		".preflight/eas/pfjob_build/eas-build-output.json",
+		"apps/mobile/.preflight/expo-dev-session.pid",
+		"apps/mobile/src/App.tsx",
+	})
+	if fmt.Sprint(got) != "[apps/mobile/src/App.tsx]" {
+		t.Fatalf("expected only source changes to remain, got %v", got)
+	}
+}
+
 func TestSourceBindingValidationAllowsDiscoveryJobToUseBindingEASProfile(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
