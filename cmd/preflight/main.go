@@ -9786,7 +9786,7 @@ func concurrentPreflightBuildActive(currentSegment string) bool {
 }
 
 func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
-	out, err := exec.Command("ps", "-eo", "pid=,command=").Output()
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=,command=").Output()
 	if err != nil {
 		return
 	}
@@ -9807,11 +9807,19 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) == 0 {
+		if len(fields) < 2 {
 			continue
 		}
 		pid, convErr := strconv.Atoi(fields[0])
 		if convErr != nil || pid <= 0 {
+			continue
+		}
+		// Only reap true orphans. A build whose runner died is reparented to
+		// launchd (ppid 1); a build with a live parent belongs to another
+		// runner working the same checkout (duplicate-claim races) — killing
+		// it made two runners "reap" each other's in-flight xcodebuild.
+		ppid, convErr := strconv.Atoi(fields[1])
+		if convErr != nil || ppid != 1 {
 			continue
 		}
 		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", seg, pid)
