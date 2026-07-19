@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"text/tabwriter"
 	"time"
 )
 
@@ -42,6 +43,7 @@ const defaultEASBuildTimeout = 45 * time.Minute
 const defaultExpoConfigTimeout = 30 * time.Second
 const defaultExpoDevSessionStartTimeout = 2 * time.Minute
 const defaultSimulatorOpenTimeout = 10 * time.Minute
+const defaultUnityBuildTimeout = 60 * time.Minute
 const defaultAndroidDevelopmentOpenTimeout = 5 * time.Minute
 const defaultAndroidDeviceNameTimeout = 2 * time.Second
 const defaultRunnerPollInterval = time.Second
@@ -88,6 +90,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runProveApp(args[1:], stdout, stderr, client)
 	case "runner":
 		return runRunner(args[1:], stdout, stderr, client)
+	case "apps":
+		return runApps(args[1:], stdout, stderr, client)
+	case "status":
+		return runStatusAlias(args[1:], stdout, stderr, client)
 	case "capabilities":
 		return runCapabilities(args[1:], stdout, stderr, client)
 	case "targets":
@@ -118,6 +124,8 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  version       Print CLI and contract version")
 	fmt.Fprintln(w, "  login         Authenticate with the Preflight API")
+	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist)")
+	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
 	fmt.Fprintln(w, "  capabilities  Probe /api/preflight/v1/capabilities")
 	fmt.Fprintln(w, "  targets       Register and list local simulator/device inventory")
@@ -4955,7 +4963,7 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	stopShutdownHandler := installRunnerShutdownHandler(stdout)
 	defer stopShutdownHandler()
 
-	capabilities := defaultRunnerCapabilities()
+	capabilities := defaultRunnerCapabilities(options.hostMode)
 	registration, err := registerRunner(client, options, capabilities)
 	if err != nil {
 		return err
@@ -5069,52 +5077,71 @@ func handleRunnerClaim(
 		return handleSimulatorOpenJob(client, options, registration, job, stdout)
 	case "maestro.run":
 		return handleMaestroRunJob(client, options, registration, job, stdout)
+	case "unity.build.player":
+		return handleUnityBuildPlayerJob(client, options, registration, job, stdout)
 	case "fastlane.produce", "fastlane.metadata", "fastlane.screenshots":
 		return handleFastlaneJob(client, options, registration, job, stdout)
+	case "eas.submit":
+		return handleEASSubmitJob(client, options, registration, job, stdout)
+	case "ota.export", "ota.publish", "ota.fingerprint":
+		return handleOtaJob(client, options, registration, job, stdout)
 	default:
 		return fmt.Errorf("unsupported runner job kind %q", job.Kind)
 	}
 }
 
-func defaultRunnerCapabilities() map[string]any {
+func defaultRunnerCapabilities(hostMode string) map[string]any {
+	localTools := []string{
+		"adb",
+		"avdmanager",
+		"eas",
+		"emulator",
+		"expo",
+		"fastlane",
+		"gcloud",
+		"java",
+		"maestro",
+		"sdkmanager",
+		"simctl",
+		"xcrun",
+	}
+	adapters := []string{
+		"android.emulator",
+		"android.emulator.discovery",
+		"android.emulator.install",
+		"android.sdk.management",
+		"apple_oauth.management",
+		"app_store_connect.api",
+		"eas.development",
+		"eas.cli",
+		"expo.dev_client",
+		"expo.dev_server",
+		"expo.local_build",
+		"fastlane.cli",
+		"google_cloud.cli",
+		"google_oauth.management",
+		"google_play.api",
+		"ios.simulator",
+		"ios.simulator.boot",
+		"ios.simulator.discovery",
+		"ios.simulator.install",
+		"sentry.api",
+		"sentry.source_maps.upload",
+	}
+	if unityCommandAvailable() {
+		localTools = append(localTools, "unity")
+		adapters = append(adapters, "unity.editor", "unity.android", "unity.android.build_support")
+	}
+	// Physical-device development sessions must run behind an Expo tunnel; the
+	// control plane routes tunnel-required dev_session jobs to runners that
+	// advertise this instead of letting a lan runner claim-and-refuse them.
+	if strings.TrimSpace(hostMode) == "tunnel" {
+		adapters = append(adapters, "expo.dev_server.tunnel")
+	}
 	return map[string]any{
-		"platforms": []string{"ios", "android"},
-		"localTools": []string{
-			"adb",
-			"avdmanager",
-			"eas",
-			"emulator",
-			"expo",
-			"fastlane",
-			"gcloud",
-			"maestro",
-			"sdkmanager",
-			"simctl",
-			"xcrun",
-		},
-		"adapters": []string{
-			"android.emulator",
-			"android.emulator.discovery",
-			"android.emulator.install",
-			"android.sdk.management",
-			"apple_oauth.management",
-			"app_store_connect.api",
-			"eas.development",
-			"eas.cli",
-			"expo.dev_client",
-			"expo.dev_server",
-			"expo.local_build",
-			"fastlane.cli",
-			"google_cloud.cli",
-			"google_oauth.management",
-			"google_play.api",
-			"ios.simulator",
-			"ios.simulator.boot",
-			"ios.simulator.discovery",
-			"ios.simulator.install",
-			"sentry.api",
-			"sentry.source_maps.upload",
-		},
+		"platforms":             []string{"ios", "android"},
+		"localTools":            localTools,
+		"adapters":              adapters,
 		"runnerContractVersion": contractVersion,
 		"runnerJobStream":       true,
 		"runnerJobHeartbeat":    true,
@@ -5145,6 +5172,7 @@ func cleanupExpiredLocalPreflightArtifacts(workspaceRoot string, ttl time.Durati
 		filepath.Join(".preflight", "dev-sessions"),
 		filepath.Join(".preflight", "eas"),
 		filepath.Join(".preflight", "maestro"),
+		filepath.Join(".preflight", "unity-builds"),
 	} {
 		root := filepath.Join(workspaceRoot, relativeRoot)
 		entries, err := os.ReadDir(root)
@@ -5301,6 +5329,9 @@ type runnerJobPayload struct {
 	DevSession               runnerJobDevSession                `json:"devSession"`
 	DevBuild                 map[string]any                     `json:"devBuild"`
 	Readiness                map[string]any                     `json:"readiness"`
+	UnityProject             map[string]any                     `json:"unityProject"`
+	CommandPlan              runnerJobCommandPlan               `json:"commandPlan"`
+	BuildProvider            string                             `json:"buildProvider"`
 	RequiredSecretReferences []runnerJobRequiredSecretReference `json:"requiredSecretReferences"`
 	SecretReferences         []runnerJobSecretReference         `json:"secretReferences"`
 	// Fastlane (produce/metadata/screenshots) fields:
@@ -5312,6 +5343,47 @@ type runnerJobPayload struct {
 	Action          string            `json:"action"`
 	Metadata        map[string]string `json:"metadata"`
 	Locales         []string          `json:"locales"`
+	// eas.submit (one-click distribute) fields:
+	SubmissionID string `json:"submissionId"`
+	EASBuildID   string `json:"easBuildId"`
+	ASCAppID     string `json:"ascAppId"`
+	Destination  string `json:"destination"`
+	Profile      string `json:"profile"`
+	// Preflight-native OTA fields:
+	AppSlug        string `json:"appSlug"`
+	Channel        string `json:"channel"`
+	RuntimeVersion string `json:"runtimeVersion"`
+	Message        string `json:"message"`
+	ExportDir      string `json:"exportDir"`
+	BinaryBuildId  string `json:"binaryBuildId"`
+	GitCommitSha   string `json:"gitCommitSha"`
+	DependsOnJobId string `json:"dependsOnJobId"`
+}
+
+type runnerJobCommandPlan struct {
+	Tool                 string                     `json:"tool"`
+	Command              string                     `json:"command"`
+	WorkingDirectory     string                     `json:"workingDirectory"`
+	CWD                  string                     `json:"cwd"`
+	Executable           runnerJobCommandExecutable `json:"executable"`
+	ExecutableCandidates []string                   `json:"executableCandidates"`
+	Args                 []string                   `json:"args"`
+	Env                  map[string]string          `json:"env"`
+	Output               runnerJobCommandPlanOutput `json:"output"`
+	LevelForge           map[string]any             `json:"levelForge"`
+}
+
+type runnerJobCommandExecutable struct {
+	Env        string   `json:"env"`
+	Candidates []string `json:"candidates"`
+}
+
+type runnerJobCommandPlanOutput struct {
+	BuildTarget          string `json:"buildTarget"`
+	ArtifactKind         string `json:"artifactKind"`
+	BuildOutputDirectory string `json:"buildOutputDirectory"`
+	OutputPath           string `json:"outputPath"`
+	LogPath              string `json:"logPath"`
 }
 
 type runnerJobRequiredSecretReference struct {
@@ -5954,7 +6026,7 @@ func handleDevSessionOpenJob(client *http.Client, options runnerOnceOptions, reg
 		}
 		fmt.Fprintf(stdout, "opened Android development build %s %s\n", job.ID, providerIdentity)
 		if completed.WorkflowProjection.Phase == "maestro_queued" {
-			if err := heartbeatRunner(client, options, registration, defaultRunnerCapabilities()); err != nil {
+			if err := heartbeatRunner(client, options, registration, defaultRunnerCapabilities(options.hostMode)); err != nil {
 				return err
 			}
 			return claimAndHandleMaestroRun(client, options, registration, stdout)
@@ -6341,7 +6413,7 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		return err
 	}
 	fmt.Fprintf(stdout, "opened simulator app %s\n", job.ID)
-	if err := heartbeatRunner(client, options, registration, defaultRunnerCapabilities()); err != nil {
+	if err := heartbeatRunner(client, options, registration, defaultRunnerCapabilities(options.hostMode)); err != nil {
 		return err
 	}
 	return claimAndHandleMaestroRun(client, options, registration, stdout)
@@ -6487,6 +6559,790 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 	return nil
 }
 
+func handleUnityBuildPlayerJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	defer startJobHeartbeat(client, options, registration, job)()
+	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
+	}
+
+	artifacts, err := runUnityBuildPlayer(
+		options,
+		job,
+		runnerJobCancellationCheck(client, options, registration, job),
+	)
+	if err != nil {
+		_ = uploadUnityBuildArtifacts(client, options, registration, job, artifacts)
+		if errors.Is(err, errCommandCancelled) {
+			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+				"status":     "cancelled",
+				"unityBuild": unityBuildResultPayload(artifacts),
+				"artifacts":  unityBuildArtifactResultPayloads(artifacts),
+			}); completeErr != nil {
+				return completeErr
+			}
+			fmt.Fprintf(stdout, "cancelled Unity build %s\n", job.ID)
+			return nil
+		}
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status":     "failed",
+			"unityBuild": unityBuildResultPayload(artifacts),
+			"artifacts":  unityBuildArtifactResultPayloads(artifacts),
+			"failure": map[string]any{
+				"code":    unityBuildFailureCode(err),
+				"message": err.Error(),
+			},
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "failed Unity build %s %s\n", job.ID, err.Error())
+		return nil
+	}
+
+	if err := uploadUnityBuildArtifacts(client, options, registration, job, artifacts); err != nil {
+		fmt.Fprintf(stdout, "warning: Unity artifact upload failed (build completed, continuing) %s %s\n", job.ID, err.Error())
+	}
+	if err := completeRunnerJob(client, options, registration, job, map[string]any{
+		"status":     "ok",
+		"unityBuild": unityBuildResultPayload(artifacts),
+		"artifacts":  unityBuildArtifactResultPayloads(artifacts),
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "completed Unity build %s %s\n", job.ID, artifacts.Target)
+	return nil
+}
+
+type unityBuildArtifacts struct {
+	Target          string
+	ArtifactKind    string
+	OutputPath      string
+	OutputDirectory string
+	LogPath         string
+	BuildSeconds    float64
+	LevelForge      map[string]any
+	BuildArtifacts  []unityBuildArtifact
+}
+
+type unityBuildArtifact struct {
+	Kind string
+	URI  string
+}
+
+func runUnityBuildPlayer(
+	options runnerOnceOptions,
+	job apiRunnerJob,
+	cancellationChecks ...func() (bool, error),
+) (unityBuildArtifacts, error) {
+	plan := job.Payload.CommandPlan
+	if err := validateUnityBuildCommandPlan(plan); err != nil {
+		return unityBuildArtifactsFromPlan(options, job), err
+	}
+	executable, err := resolveUnityExecutable(plan)
+	if err != nil {
+		return unityBuildArtifactsFromPlan(options, job), err
+	}
+	artifacts := unityBuildArtifactsFromPlan(options, job)
+	if artifacts.LogPath == "" {
+		return artifacts, fmt.Errorf("unity.build.player command plan did not include a log path")
+	}
+	if artifacts.OutputPath == "" {
+		return artifacts, fmt.Errorf("unity.build.player command plan did not include a build output path")
+	}
+	if err := os.MkdirAll(filepath.Dir(artifacts.LogPath), 0o755); err != nil {
+		return artifacts, fmt.Errorf("create Unity log directory: %w", err)
+	}
+	if err := os.MkdirAll(unityOutputDirectoryForPath(artifacts.OutputPath), 0o755); err != nil {
+		return artifacts, fmt.Errorf("create Unity build output directory: %w", err)
+	}
+	logFile, err := os.OpenFile(artifacts.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return artifacts, fmt.Errorf("open Unity build log: %w", err)
+	}
+	defer logFile.Close()
+
+	command := exec.Command(executable, plan.Args...)
+	command.Dir = unityCommandWorkingDirectory(options, job, plan)
+	command.Env = unityCommandEnv(os.Environ(), plan.Env)
+	flushLog := attachRedactedCommandLog(command, logFile)
+	var cancellationCheck func() (bool, error)
+	if len(cancellationChecks) > 0 {
+		cancellationCheck = cancellationChecks[0]
+	}
+	startedAt := time.Now()
+	err = runCommandWithTimeoutAndCancellation(
+		command,
+		unityBuildTimeout(),
+		cancellationCheck,
+		runnerPollInterval(),
+	)
+	flushLog()
+	artifacts.BuildSeconds = time.Since(startedAt).Seconds()
+	artifacts.BuildArtifacts = discoverUnityBuildArtifacts(artifacts.ArtifactKind, artifacts.OutputPath)
+	if err != nil {
+		return artifacts, fmt.Errorf("run Unity batchmode build: %w", err)
+	}
+	if len(artifacts.BuildArtifacts) == 0 {
+		return artifacts, fmt.Errorf("Unity build completed but no %s artifact was found under %s", artifacts.ArtifactKind, artifacts.OutputPath)
+	}
+	return artifacts, nil
+}
+
+func unityBuildArtifactsFromPlan(options runnerOnceOptions, job apiRunnerJob) unityBuildArtifacts {
+	plan := job.Payload.CommandPlan
+	target := strings.TrimSpace(plan.Output.BuildTarget)
+	if target == "" {
+		target = unityArgValue(plan.Args, "-lfBuildTarget")
+	}
+	if target == "" && strings.EqualFold(job.Payload.Platform, "android") {
+		target = "Android"
+	}
+	if target == "" {
+		target = job.Payload.Platform
+	}
+	artifactKind := strings.TrimSpace(plan.Output.ArtifactKind)
+	if artifactKind == "" {
+		artifactKind = unityArtifactKindForTarget(target)
+	}
+	outputPath := firstNonEmpty(
+		strings.TrimSpace(plan.Output.OutputPath),
+		strings.TrimSpace(plan.Output.BuildOutputDirectory),
+		unityArgValue(plan.Args, "-lfBuildOutput"),
+	)
+	logPath := firstNonEmpty(
+		strings.TrimSpace(plan.Output.LogPath),
+		unityArgValue(plan.Args, "-logFile"),
+	)
+	return unityBuildArtifacts{
+		Target:          target,
+		ArtifactKind:    artifactKind,
+		OutputPath:      outputPath,
+		OutputDirectory: unityOutputDirectoryForPath(outputPath),
+		LogPath:         logPath,
+		LevelForge:      copyMapAny(plan.LevelForge),
+	}
+}
+
+func validateUnityBuildCommandPlan(plan runnerJobCommandPlan) error {
+	if strings.ToLower(strings.TrimSpace(plan.Tool)) != "unity" {
+		return fmt.Errorf("unity.build.player command plan tool must be unity")
+	}
+	if strings.ToLower(strings.TrimSpace(plan.Command)) != "batchmode" {
+		return fmt.Errorf("unity.build.player command plan command must be batchmode")
+	}
+	for _, required := range []string{
+		"-batchmode",
+		"-nographics",
+		"-quit",
+		"-projectPath",
+		"-executeMethod",
+		"-lfBuildTarget",
+		"-lfBuildOutput",
+		"-logFile",
+	} {
+		if !containsString(plan.Args, required) {
+			return fmt.Errorf("unity.build.player command plan missing required arg %s", required)
+		}
+	}
+	if method := unityArgValue(plan.Args, "-executeMethod"); method != "LevelForge.Editor.LevelForgeBuild.RunHeadlessBuild" {
+		return fmt.Errorf("unity.build.player command plan execute method %q is not allowlisted", method)
+	}
+	for _, valueArg := range []string{"-projectPath", "-executeMethod", "-lfBuildTarget", "-lfBuildOutput", "-logFile"} {
+		if unityArgValue(plan.Args, valueArg) == "" {
+			return fmt.Errorf("unity.build.player command plan arg %s requires a value", valueArg)
+		}
+	}
+	return nil
+}
+
+func unityArgValue(args []string, name string) string {
+	for index := 0; index < len(args)-1; index += 1 {
+		if args[index] == name {
+			return strings.TrimSpace(args[index+1])
+		}
+	}
+	return ""
+}
+
+func resolveUnityExecutable(plan runnerJobCommandPlan) (string, error) {
+	for _, candidate := range unityExecutableCandidates(plan) {
+		if resolved, ok := resolveExecutableCandidate(candidate); ok {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("Unity editor executable not found; set PREFLIGHT_UNITY_COMMAND or UNITY_EDITOR")
+}
+
+func unityExecutableCandidates(plan runnerJobCommandPlan) []string {
+	var candidates []string
+	if configured := strings.TrimSpace(os.Getenv("PREFLIGHT_UNITY_COMMAND")); configured != "" {
+		candidates = append(candidates, configured)
+	}
+	if envName := strings.TrimSpace(plan.Executable.Env); envName != "" {
+		if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+			candidates = append(candidates, value)
+		}
+	}
+	candidates = append(candidates, plan.Executable.Candidates...)
+	candidates = append(candidates, plan.ExecutableCandidates...)
+	if value := strings.TrimSpace(os.Getenv("UNITY_EDITOR")); value != "" {
+		candidates = append(candidates, value)
+	}
+	candidates = append(candidates, "unity", "Unity")
+	return candidates
+}
+
+func resolveExecutableCandidate(candidate string) (string, bool) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return "", false
+	}
+	if strings.ContainsAny(candidate, "*?[") {
+		matches, err := filepath.Glob(candidate)
+		if err != nil {
+			return "", false
+		}
+		sort.Strings(matches)
+		for _, match := range matches {
+			if resolved, ok := resolveExecutableCandidate(match); ok {
+				return resolved, true
+			}
+		}
+		return "", false
+	}
+	if filepath.IsAbs(candidate) || strings.Contains(candidate, string(os.PathSeparator)) {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, true
+		}
+		return "", false
+	}
+	resolved, err := exec.LookPath(candidate)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
+}
+
+func unityCommandAvailable() bool {
+	_, err := resolveUnityExecutable(runnerJobCommandPlan{
+		Executable: runnerJobCommandExecutable{
+			Env: "UNITY_EDITOR",
+			Candidates: []string{
+				"/opt/unity/Editor/Unity",
+				"/opt/Unity/Editor/Unity",
+				"/Applications/Unity/Hub/Editor/*/Unity.app/Contents/MacOS/Unity",
+			},
+		},
+	})
+	return err == nil
+}
+
+func unityCommandWorkingDirectory(options runnerOnceOptions, job apiRunnerJob, plan runnerJobCommandPlan) string {
+	workingDirectory := firstNonEmpty(strings.TrimSpace(plan.WorkingDirectory), strings.TrimSpace(plan.CWD))
+	if workingDirectory == "" {
+		return appDirectoryForJob(options, job)
+	}
+	if filepath.IsAbs(workingDirectory) {
+		return workingDirectory
+	}
+	root := job.Payload.SourceBinding.WorkspaceRoot
+	if root == "" {
+		root = options.workspaceRoot
+	}
+	return filepath.Join(root, workingDirectory)
+}
+
+func unityCommandEnv(base []string, env map[string]string) []string {
+	values := map[string]string{
+		"CI": "1",
+	}
+	for key, value := range env {
+		values[key] = value
+	}
+	return upsertEnvValues(append([]string{}, base...), values)
+}
+
+func unityBuildTimeout() time.Duration {
+	return durationFromEnv("PREFLIGHT_UNITY_BUILD_TIMEOUT", defaultUnityBuildTimeout)
+}
+
+func unityArtifactKindForTarget(target string) string {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "android":
+		return "android_apk"
+	case "ios":
+		return "ios_xcode_archive"
+	default:
+		return "tool_output"
+	}
+}
+
+func unityOutputDirectoryForPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	extension := strings.ToLower(filepath.Ext(path))
+	switch extension {
+	case ".apk", ".aab", ".ipa", ".zip":
+		return filepath.Dir(path)
+	default:
+		return path
+	}
+}
+
+func discoverUnityBuildArtifacts(kind string, outputPath string) []unityBuildArtifact {
+	outputPath = strings.TrimSpace(outputPath)
+	if outputPath == "" {
+		return nil
+	}
+	if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
+		return []unityBuildArtifact{{Kind: unityArtifactKindForPath(kind, outputPath), URI: outputPath}}
+	}
+	outputDir := unityOutputDirectoryForPath(outputPath)
+	var artifacts []unityBuildArtifact
+	for _, path := range findFilesWithExtensions(outputDir, ".apk", ".aab", ".ipa", ".zip") {
+		artifacts = append(artifacts, unityBuildArtifact{
+			Kind: unityArtifactKindForPath(kind, path),
+			URI:  path,
+		})
+	}
+	for _, path := range findUnityXcodeArchives(outputDir) {
+		artifacts = append(artifacts, unityBuildArtifact{
+			Kind: "ios_xcode_archive",
+			URI:  path,
+		})
+	}
+	return artifacts
+}
+
+func unityArtifactKindForPath(fallback string, path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".apk":
+		return "android_apk"
+	case ".aab":
+		return "android_aab"
+	case ".ipa":
+		return "ios_ipa"
+	case ".zip":
+		return firstNonEmpty(fallback, "tool_output")
+	default:
+		return firstNonEmpty(fallback, "tool_output")
+	}
+}
+
+func findUnityXcodeArchives(root string) []string {
+	var matches []string
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || !info.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(path), ".xcarchive") {
+			matches = append(matches, path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	sort.Strings(matches)
+	return matches
+}
+
+func uploadUnityBuildArtifacts(
+	client *http.Client,
+	options runnerOnceOptions,
+	registration runnerRegistrationData,
+	job apiRunnerJob,
+	artifacts unityBuildArtifacts,
+) error {
+	if !runnerArtifactUploadEnabled(registration) {
+		return nil
+	}
+	metadata := map[string]any{
+		"target":        artifacts.Target,
+		"artifactKind":  artifacts.ArtifactKind,
+		"outputPath":    artifacts.OutputPath,
+		"levelForge":    artifacts.LevelForge,
+		"buildSeconds":  artifacts.BuildSeconds,
+		"unityJobKind":  job.Kind,
+		"buildProvider": job.Payload.BuildProvider,
+	}
+	for _, artifact := range artifacts.BuildArtifacts {
+		if err := uploadRunnerArtifact(client, options, registration, job, artifact.Kind, artifact.URI, "release", metadata); err != nil {
+			return err
+		}
+	}
+	if artifacts.LogPath != "" {
+		if err := uploadRunnerArtifact(client, options, registration, job, "unity_build_log", artifacts.LogPath, "debug", metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func unityBuildResultPayload(artifacts unityBuildArtifacts) map[string]any {
+	result := map[string]any{
+		"target":          artifacts.Target,
+		"artifactKind":    artifacts.ArtifactKind,
+		"outputPath":      artifacts.OutputPath,
+		"outputDirectory": artifacts.OutputDirectory,
+		"logPath":         artifacts.LogPath,
+		"buildSeconds":    artifacts.BuildSeconds,
+		"levelForge":      artifacts.LevelForge,
+	}
+	if len(artifacts.BuildArtifacts) > 0 {
+		result["primaryArtifactPath"] = artifacts.BuildArtifacts[0].URI
+	}
+	return result
+}
+
+func unityBuildArtifactResultPayloads(artifacts unityBuildArtifacts) []map[string]any {
+	result := make([]map[string]any, 0, len(artifacts.BuildArtifacts))
+	for _, artifact := range artifacts.BuildArtifacts {
+		entry := map[string]any{
+			"kind": artifact.Kind,
+			"uri":  artifact.URI,
+		}
+		if sizeBytes, ok := artifactSizeBytes(artifact.URI); ok {
+			entry["sizeBytes"] = sizeBytes
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
+func unityBuildFailureCode(err error) string {
+	if err == nil {
+		return "unity_build_failed"
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "unity editor executable not found") ||
+		strings.Contains(message, "executable file not found") ||
+		strings.Contains(message, "no such file") {
+		return "unity_missing"
+	}
+	if strings.Contains(message, "license") || strings.Contains(message, "serial") {
+		return "unity_license_unavailable"
+	}
+	if strings.Contains(message, "timed out") {
+		return "unity_build_timeout"
+	}
+	if strings.Contains(message, "no android_apk artifact") || strings.Contains(message, "no android_aab artifact") {
+		return "unity_artifact_missing"
+	}
+	return "unity_build_failed"
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func copyMapAny(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+// handleOtaJob runs Preflight-native OTA jobs (not EAS Update):
+//
+//	ota.export      — npx expo export
+//	ota.publish     — publish-local.mjs into PREFLIGHT_OTA_STORE
+//	ota.fingerprint — npx expo-updates fingerprint:generate
+func handleOtaJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	appDir := appDirectoryForJob(options, job)
+	p := job.Payload
+	platform := strings.TrimSpace(p.Platform)
+	if platform == "" {
+		platform = "ios"
+	}
+	channel := strings.TrimSpace(p.Channel)
+	if channel == "" {
+		channel = "preview"
+	}
+	appSlug := strings.TrimSpace(p.AppSlug)
+	if appSlug == "" {
+		appSlug = strings.TrimSpace(p.SourceBinding.ExpoSlug)
+	}
+	if appSlug == "" {
+		appSlug = "app"
+	}
+	exportDir := strings.TrimSpace(p.ExportDir)
+	if exportDir == "" {
+		exportDir = "dist"
+	}
+	if !filepath.IsAbs(exportDir) {
+		exportDir = filepath.Join(appDir, exportDir)
+	}
+	runtimeVersion := strings.TrimSpace(p.RuntimeVersion)
+	if runtimeVersion == "" {
+		runtimeVersion = appSlug + "-p0"
+	}
+	message := strings.TrimSpace(p.Message)
+	if message == "" {
+		message = fmt.Sprintf("ota %s %s", job.Kind, time.Now().UTC().Format(time.RFC3339))
+	}
+
+	var (
+		output []byte
+		err    error
+		result map[string]any
+	)
+
+	switch job.Kind {
+	case "ota.export":
+		output, err = runOtaExport(appDir, platform, exportDir, channel, runtimeVersion, runnerJobCancellationCheck(client, options, registration, job))
+		result = map[string]any{
+			"exportDir":      exportDir,
+			"runtimeVersion": runtimeVersion,
+			"platform":       platform,
+			"channel":        channel,
+			"appSlug":        appSlug,
+			"output":         truncateRunnerOutput(string(output)),
+		}
+	case "ota.publish":
+		updateID, pubOut, pubErr := runOtaPublish(options, appDir, exportDir, appSlug, channel, platform, runtimeVersion, message, runnerJobCancellationCheck(client, options, registration, job))
+		output, err = pubOut, pubErr
+		result = map[string]any{
+			"updateId":       updateID,
+			"exportDir":      exportDir,
+			"runtimeVersion": runtimeVersion,
+			"platform":       platform,
+			"channel":        channel,
+			"appSlug":        appSlug,
+			"storeRoot":      otaStoreRoot(),
+			"output":         truncateRunnerOutput(string(output)),
+		}
+	case "ota.fingerprint":
+		fp, fpOut, fpErr := runOtaFingerprint(appDir, platform, runnerJobCancellationCheck(client, options, registration, job))
+		output, err = fpOut, fpErr
+		result = map[string]any{
+			"fingerprintHash": fp,
+			"runtimeVersion":  runtimeVersion,
+			"platform":        platform,
+			"appSlug":         appSlug,
+			"output":          truncateRunnerOutput(string(output)),
+		}
+	default:
+		return fmt.Errorf("unsupported ota job kind %q", job.Kind)
+	}
+
+	if err != nil {
+		if errors.Is(err, errCommandCancelled) {
+			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+				"status": "cancelled",
+			}); completeErr != nil {
+				return completeErr
+			}
+			fmt.Fprintf(stdout, "cancelled ota job %s\n", job.ID)
+			return nil
+		}
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status": "failed",
+			"failure": map[string]any{
+				"code":    otaFailureCode(err),
+				"message": err.Error(),
+			},
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "failed ota job %s %s\n", job.ID, err.Error())
+		return nil
+	}
+
+	result["status"] = "ok"
+	if completeErr := completeRunnerJob(client, options, registration, job, result); completeErr != nil {
+		return completeErr
+	}
+	fmt.Fprintf(stdout, "completed ota job %s (%s)\n", job.ID, job.Kind)
+	return nil
+}
+
+func otaFailureCode(err error) string {
+	if err == nil {
+		return "ota_failed"
+	}
+	message := err.Error()
+	if strings.Contains(message, "executable file not found") || strings.Contains(message, "not found") {
+		return "expo_missing"
+	}
+	if strings.Contains(message, "command timed out") {
+		return "ota_timeout"
+	}
+	if strings.Contains(message, "ota-store") || strings.Contains(message, "PREFLIGHT_OTA_STORE") {
+		return "ota_store_unavailable"
+	}
+	return "ota_failed"
+}
+
+func otaStoreRoot() string {
+	if v := strings.TrimSpace(os.Getenv("PREFLIGHT_OTA_STORE")); v != "" {
+		return v
+	}
+	if _, err := os.Stat("/Volumes/PreflightBuild"); err == nil {
+		return "/Volumes/PreflightBuild/ota-store"
+	}
+	return filepath.Join(os.TempDir(), "preflight-ota-store")
+}
+
+func findOtaPublishScript(options runnerOnceOptions) (string, error) {
+	if v := strings.TrimSpace(os.Getenv("PREFLIGHT_OTA_PUBLISH_SCRIPT")); v != "" {
+		if _, err := os.Stat(v); err == nil {
+			return v, nil
+		}
+	}
+	candidates := []string{
+		filepath.Join(options.workspaceRoot, "packages/ota/scripts/publish-local.mjs"),
+		filepath.Join(options.workspaceRoot, "preflight-app/packages/ota/scripts/publish-local.mjs"),
+		"/Volumes/dev/preflight-app/packages/ota/scripts/publish-local.mjs",
+	}
+	// Walk up from workspace root a few levels.
+	dir := options.workspaceRoot
+	for i := 0; i < 4 && dir != "" && dir != "/"; i++ {
+		candidates = append(candidates, filepath.Join(dir, "packages/ota/scripts/publish-local.mjs"))
+		dir = filepath.Dir(dir)
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("publish-local.mjs not found (set PREFLIGHT_OTA_PUBLISH_SCRIPT)")
+}
+
+func runOtaExport(appDir, platform, exportDir, channel, runtimeVersion string, cancelled func() (bool, error)) ([]byte, error) {
+	if err := os.MkdirAll(filepath.Dir(exportDir), 0o755); err != nil {
+		return nil, err
+	}
+	appVariant := "development"
+	switch channel {
+	case "preview":
+		appVariant = "preview"
+	case "production":
+		appVariant = "production"
+	}
+	// Relative output for expo when under appDir.
+	outArg := exportDir
+	if rel, err := filepath.Rel(appDir, exportDir); err == nil && !strings.HasPrefix(rel, "..") {
+		outArg = rel
+	}
+	args := []string{"expo", "export", "--platform", platform, "--output-dir", outArg, "--clear"}
+	cmd := exec.Command("npx", args...)
+	cmd.Dir = appDir
+	cmd.Env = append(os.Environ(),
+		"APP_VARIANT="+appVariant,
+		"PREFLIGHT_OTA_RUNTIME_VERSION="+runtimeVersion,
+		"EXPO_NO_TELEMETRY=1",
+		"EXPO_NO_DOTENV=1",
+	)
+	return runCommandCollectOutput(cmd, 20*time.Minute, cancelled)
+}
+
+func runOtaPublish(options runnerOnceOptions, appDir, exportDir, appSlug, channel, platform, runtimeVersion, message string, cancelled func() (bool, error)) (string, []byte, error) {
+	script, err := findOtaPublishScript(options)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := os.Stat(exportDir); err != nil {
+		return "", nil, fmt.Errorf("export dir missing for ota.publish: %s: %w", exportDir, err)
+	}
+	args := []string{
+		"--experimental-strip-types", script,
+		"--slug", appSlug,
+		"--app-dir", appDir,
+		"--export-dir", exportDir,
+		"--channel", channel,
+		"--platform", platform,
+		"--runtime-version", runtimeVersion,
+		"--message", message,
+		"--skip-export",
+	}
+	cmd := exec.Command("node", args...)
+	cmd.Dir = filepath.Dir(script)
+	cmd.Env = append(os.Environ(),
+		"PREFLIGHT_OTA_STORE="+otaStoreRoot(),
+		"PREFLIGHT_OTA_RUNTIME_VERSION="+runtimeVersion,
+		"EXPO_NO_TELEMETRY=1",
+	)
+	out, err := runCommandCollectOutput(cmd, 15*time.Minute, cancelled)
+	updateID := ""
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "PREFLIGHT_OTA_UPDATE_ID=") {
+			updateID = strings.TrimPrefix(line, "PREFLIGHT_OTA_UPDATE_ID=")
+			break
+		}
+	}
+	return updateID, out, err
+}
+
+func runOtaFingerprint(appDir, platform string, cancelled func() (bool, error)) (string, []byte, error) {
+	args := []string{"expo-updates", "fingerprint:generate", "--platform", platform}
+	cmd := exec.Command("npx", args...)
+	cmd.Dir = appDir
+	cmd.Env = append(os.Environ(), "EXPO_NO_TELEMETRY=1")
+	out, err := runCommandCollectOutput(cmd, 10*time.Minute, cancelled)
+	hash := ""
+	// Best-effort: last non-empty line or JSON hash field.
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) > 0 {
+		hash = strings.TrimSpace(lines[len(lines)-1])
+	}
+	var parsed map[string]any
+	if json.Unmarshal(out, &parsed) == nil {
+		if h, ok := parsed["hash"].(string); ok && h != "" {
+			hash = h
+		}
+	}
+	return hash, out, err
+}
+
+func runCommandCollectOutput(cmd *exec.Cmd, timeout time.Duration, cancelled func() (bool, error)) ([]byte, error) {
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return buf.Bytes(), err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return buf.Bytes(), err
+		case <-timer.C:
+			_ = cmd.Process.Kill()
+			return buf.Bytes(), fmt.Errorf("command timed out after %s", timeout)
+		case <-ticker.C:
+			if cancelled != nil {
+				isCancelled, cerr := cancelled()
+				if cerr != nil {
+					// Treat probe errors as non-fatal; keep running.
+					continue
+				}
+				if isCancelled {
+					_ = cmd.Process.Kill()
+					return buf.Bytes(), errCommandCancelled
+				}
+			}
+		}
+	}
+}
+
 // handleFastlaneJob executes fastlane (produce/metadata/screenshots) for the
 // claimed job. v1 uses the runner host's fastlane environment (FASTLANE_SESSION,
 // FASTLANE_USER/PRODUCE_USERNAME, FASTLANE_TEAM_ID, and the ASC API key under
@@ -6557,6 +7413,155 @@ func handleFastlaneJob(client *http.Client, options runnerOnceOptions, registrat
 	}
 	fmt.Fprintf(stdout, "completed fastlane job %s (%s)\n", job.ID, job.Kind)
 	return nil
+}
+
+// handleEASSubmitJob runs the one-click distribute: `eas build:submit --id
+// <easBuildId>` against an already-FINISHED EAS build. The submit profile in
+// the app's eas.json resolves ASC credentials via EXPO_ASC_* env placeholders,
+// which this handler materializes from the runner's PREFLIGHT_ASC_* env.
+// NOTE: eas-cli's own error/success message is unreliable for submits — the
+// server-side ASC reconciler is the source of truth for the final state; this
+// handler reports transport-level success/failure only.
+func handleEASSubmitJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	defer startJobHeartbeat(client, options, registration, job)()
+
+	easBuildID := strings.TrimSpace(job.Payload.EASBuildID)
+	if easBuildID == "" {
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status":  "failed",
+			"failure": map[string]any{"code": "eas_submit_payload_invalid", "message": "eas.submit requires easBuildId"},
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "failed eas.submit job %s missing easBuildId\n", job.ID)
+		return nil
+	}
+
+	appDir := appDirectoryForJob(options, job)
+	easEnv, err := easSecretEnvForJob(client, options, registration, job)
+	if err != nil {
+		return err
+	}
+
+	// Headless ASC auth: write the API key JSON next to the app and expose the
+	// EXPO_ASC_* env the fleet's eas.json submit profiles reference. Missing
+	// ASC env is not fatal here — the submit profile may embed credentials.
+	if ascKeyPath, keyErr := writeASCApiKeyFile(appDir); keyErr != nil {
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status":  "failed",
+			"failure": map[string]any{"code": "asc_auth_failed", "message": keyErr.Error()},
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "failed eas.submit job %s %s\n", job.ID, keyErr.Error())
+		return nil
+	} else if ascKeyPath != "" {
+		easEnv["EXPO_ASC_API_KEY_PATH"] = ascKeyPath
+		if keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID")); keyID != "" {
+			easEnv["EXPO_ASC_KEY_ID"] = keyID
+		}
+		if issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID")); issuerID != "" {
+			easEnv["EXPO_ASC_ISSUER_ID"] = issuerID
+		}
+	}
+
+	args := []string{
+		"build:submit",
+		"--platform", jobPlatformForEAS(job),
+		"--id", easBuildID,
+		"--non-interactive",
+		"--wait",
+	}
+	if profile := strings.TrimSpace(job.Payload.Profile); profile != "" {
+		args = append(args, "--profile", profile)
+	}
+
+	output, err := runEASCommandWithTimeoutAndCancellation(
+		appDir,
+		easSubmitTimeout(),
+		runnerJobCancellationCheck(client, options, registration, job),
+		easEnv,
+		args...,
+	)
+	if err != nil {
+		if errors.Is(err, errCommandCancelled) {
+			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+				"status": "cancelled",
+			}); completeErr != nil {
+				return completeErr
+			}
+			fmt.Fprintf(stdout, "cancelled eas.submit job %s\n", job.ID)
+			return nil
+		}
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status": "failed",
+			"failure": map[string]any{
+				"code":    easSubmitFailureCode(err),
+				"message": err.Error(),
+			},
+			"output": truncateRunnerOutput(string(output)),
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "failed eas.submit job %s %s\n", job.ID, err.Error())
+		return nil
+	}
+
+	result := map[string]any{
+		"status":       "ok",
+		"submissionId": job.Payload.SubmissionID,
+		"easBuildId":   easBuildID,
+		"output":       truncateRunnerOutput(string(output)),
+	}
+	if ascSubmissionID := parseEASSubmitSubmissionID(string(output)); ascSubmissionID != "" {
+		result["ascSubmissionId"] = ascSubmissionID
+	}
+	if completeErr := completeRunnerJob(client, options, registration, job, result); completeErr != nil {
+		return completeErr
+	}
+	fmt.Fprintf(stdout, "completed eas.submit job %s (build %s)\n", job.ID, easBuildID)
+	return nil
+}
+
+func easSubmitTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("PREFLIGHT_EAS_SUBMIT_TIMEOUT")); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 30 * time.Minute
+}
+
+func easSubmitFailureCode(err error) string {
+	if err == nil {
+		return "eas_submit_failed"
+	}
+	message := err.Error()
+	if strings.Contains(message, "executable file not found") {
+		return "eas_cli_missing"
+	}
+	if strings.Contains(message, "command timed out") {
+		return "eas_submit_timeout"
+	}
+	if strings.Contains(message, "Invalid username and password") ||
+		strings.Contains(message, "authentication") ||
+		strings.Contains(message, "401") {
+		return "asc_auth_failed"
+	}
+	return "eas_submit_failed"
+}
+
+// parseEASSubmitSubmissionID pulls the EAS submission id out of eas-cli's
+// output (the /accounts/<acct>/projects/<proj>/submissions/<uuid> URL it
+// prints, or a bare "Submission ID" line). Best-effort: empty when absent.
+func parseEASSubmitSubmissionID(output string) string {
+	if match := regexp.MustCompile(`/submissions/([0-9a-fA-F-]{36})`).FindStringSubmatch(output); len(match) == 2 {
+		return match[1]
+	}
+	if match := regexp.MustCompile(`(?i)submission(?:\s+id)?[:\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`).FindStringSubmatch(output); len(match) == 2 {
+		return match[1]
+	}
+	return ""
 }
 
 func fastlaneFailureCode(err error) string {
@@ -9020,10 +10025,10 @@ func resolveStartedAdvertisedDevServerURL(options runnerOnceOptions, job apiRunn
 		logPath = process.logPath
 		logOffset = process.logOffset
 	}
-	return waitForExpoTunnelDevServerURL(logPath, logOffset, expoDevSessionStartTimeout(), runnerPollInterval())
+	return waitForExpoTunnelDevServerURL(logPath, logOffset, options.metroPort, expoDevSessionStartTimeout(), runnerPollInterval())
 }
 
-func waitForExpoTunnelDevServerURL(logPath string, logOffset int64, timeout time.Duration, pollInterval time.Duration) (string, error) {
+func waitForExpoTunnelDevServerURL(logPath string, logOffset int64, metroPort int, timeout time.Duration, pollInterval time.Duration) (string, error) {
 	if pollInterval <= 0 {
 		pollInterval = defaultRunnerPollInterval
 	}
@@ -9035,6 +10040,12 @@ func waitForExpoTunnelDevServerURL(logPath string, logOffset int64, timeout time
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
+		// Expo CLI does not print the tunnel URL to a non-TTY log, so the
+		// authoritative source is the local Metro manifest's hostUri. The log
+		// scrape stays as a fallback for older CLI versions that did print it.
+		if tunnelURL, ok := expoTunnelDevServerURLFromManifest(metroPort); ok {
+			return tunnelURL, nil
+		}
 		if tunnelURL, ok := expoTunnelDevServerURLFromLog(logPath, logOffset); ok {
 			return tunnelURL, nil
 		}
@@ -9044,6 +10055,56 @@ func waitForExpoTunnelDevServerURL(logPath string, logOffset int64, timeout time
 		case <-ticker.C:
 		}
 	}
+}
+
+func expoTunnelDevServerURLFromManifest(metroPort int) (string, bool) {
+	if metroPort <= 0 {
+		return "", false
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d", metroPort), nil)
+	if err != nil {
+		return "", false
+	}
+	request.Header.Set("expo-platform", "ios")
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return "", false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", false
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return "", false
+	}
+	var manifest struct {
+		HostURI     string `json:"hostUri"`
+		LaunchAsset struct {
+			URL string `json:"url"`
+		} `json:"launchAsset"`
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return "", false
+	}
+	for _, candidate := range []string{manifest.HostURI, manifest.LaunchAsset.URL} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if !strings.Contains(candidate, "://") {
+			candidate = "exp://" + candidate
+		}
+		if parsed, err := url.Parse(candidate); err == nil && parsed.Host != "" {
+			trimmed := (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
+			if isRemoteExpoDevServerURL(trimmed) {
+				return trimmed, true
+			}
+		}
+	}
+	return "", false
 }
 
 var expoDevelopmentClientURLRegexp = regexp.MustCompile(`expo-development-client/\?url=([^\s"'<>]+)`)
@@ -9100,6 +10161,11 @@ func isRemoteExpoDevServerURL(value string) bool {
 		return false
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	// ngrok failure output includes "https://status.ngrok.com/" — never a dev
+	// server. Matching it produced sessions advertising the ngrok status page.
+	if strings.EqualFold(host, "status.ngrok.com") {
 		return false
 	}
 	return true
@@ -14060,4 +15126,491 @@ func readMapString(record map[string]any, key string) string {
 	}
 	value, _ := record[key].(string)
 	return value
+}
+
+// --- apps / status: App Store release-program visibility ---
+//
+// Thin client over the server's release-status envelope
+// (GET /api/preflight/v1/release-status + /apps/{id}/release-status). The web
+// Overview page reads the same envelope — CLI and web can't disagree.
+
+const releaseStatusSchemaVersion = 1
+
+type cliReleaseStageResult struct {
+	Key           string            `json:"key"`
+	Status        string            `json:"status"`
+	BlockerReason string            `json:"blockerReason"`
+	Owner         string            `json:"owner"`
+	Evidence      map[string]string `json:"evidence"`
+}
+
+type cliFleetReleaseRow struct {
+	AppID                 string `json:"appId"`
+	Slug                  string `json:"slug"`
+	Name                  string `json:"name"`
+	Platform              string `json:"platform"`
+	CurrentStage          string `json:"currentStage"`
+	NextStage             string `json:"nextStage"`
+	NextOwner             string `json:"nextOwner"`
+	BlockerReason         string `json:"blockerReason"`
+	TestflightState       string `json:"testflightState"`
+	StoreSubmissionStatus string `json:"storeSubmissionStatus"`
+	LatestStoreBuildID    string `json:"latestStoreBuildId"`
+	LastAscSyncAt         string `json:"lastAscSyncAt"`
+}
+
+type cliAppReleaseStatus struct {
+	SchemaVersion int `json:"schemaVersion"`
+	App           struct {
+		ID            string `json:"id"`
+		Slug          string `json:"slug"`
+		Name          string `json:"name"`
+		BundleID      string `json:"bundleId"`
+		AscAppID      string `json:"ascAppId"`
+		EASProjectID  string `json:"easProjectId"`
+		LastAscSyncAt string `json:"lastAscSyncAt"`
+	} `json:"app"`
+	Platform string `json:"platform"`
+	Stage    struct {
+		Current string `json:"current"`
+		Next    *struct {
+			Key           string `json:"key"`
+			BlockerReason string `json:"blockerReason"`
+			Owner         string `json:"owner"`
+		} `json:"next"`
+	} `json:"stage"`
+	Ladder       []cliReleaseStageResult `json:"ladder"`
+	LatestBuilds []struct {
+		ID          string `json:"id"`
+		Platform    string `json:"platform"`
+		Profile     string `json:"profile"`
+		Status      string `json:"status"`
+		Version     string `json:"version"`
+		BuildNumber string `json:"buildNumber"`
+		CompletedAt string `json:"completedAt"`
+	} `json:"latestBuilds"`
+	Submissions []struct {
+		ID            string `json:"id"`
+		Destination   string `json:"destination"`
+		Status        string `json:"status"`
+		Version       string `json:"version"`
+		AscBuildState string `json:"ascBuildState"`
+		SubmittedAt   string `json:"submittedAt"`
+	} `json:"submissions"`
+	StoreListing struct {
+		Complete bool     `json:"complete"`
+		Missing  []string `json:"missing"`
+	} `json:"storeListing"`
+	Checklist []struct {
+		Key    string `json:"key"`
+		Status string `json:"status"`
+		Note   string `json:"note"`
+	} `json:"checklist"`
+	Links struct {
+		Asc string `json:"asc"`
+		Eas string `json:"eas"`
+	} `json:"links"`
+}
+
+type releaseStatusCLIOptions struct {
+	apiURL   string
+	token    string
+	platform string
+	jsonOut  bool
+	rest     []string
+}
+
+func parseReleaseStatusCLIOptions(args []string, stderr io.Writer) (releaseStatusCLIOptions, bool) {
+	config, _ := loadPreflightCLIConfig()
+	options := releaseStatusCLIOptions{
+		apiURL:   firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL, defaultPreflightAPIURL),
+		token:    firstNonEmpty(os.Getenv("PREFLIGHT_TOKEN"), config.Token),
+		platform: "ios",
+	}
+	for index := 0; index < len(args); index += 1 {
+		switch args[index] {
+		case "--api-url":
+			value, ok := nextFlagValue(args, &index)
+			if !ok {
+				fmt.Fprintln(stderr, "--api-url requires a value")
+				return options, false
+			}
+			options.apiURL = value
+		case "--platform":
+			value, ok := nextFlagValue(args, &index)
+			if !ok || (value != "ios" && value != "android") {
+				fmt.Fprintln(stderr, "--platform requires ios or android")
+				return options, false
+			}
+			options.platform = value
+		case "--json":
+			options.jsonOut = true
+		default:
+			options.rest = append(options.rest, args[index])
+		}
+	}
+	if options.token == "" {
+		fmt.Fprintln(stderr, "not signed in; run `preflight login` or set PREFLIGHT_TOKEN")
+		return options, false
+	}
+	return options, true
+}
+
+func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		printAppsHelp(stdout)
+		if len(args) == 0 {
+			return 2
+		}
+		return 0
+	}
+	switch args[0] {
+	case "list":
+		return runAppsList(args[1:], stdout, stderr, client)
+	case "status":
+		return runAppsStatus(args[1:], stdout, stderr, client)
+	case "checklist":
+		return runAppsChecklist(args[1:], stdout, stderr, client)
+	default:
+		fmt.Fprintf(stderr, "unknown apps subcommand %q\n", args[0])
+		printAppsHelp(stderr)
+		return 2
+	}
+}
+
+func printAppsHelp(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  preflight apps list [--platform ios|android] [--json]")
+	fmt.Fprintln(w, "  preflight apps status <app-id|slug|name> [--platform ...] [--json]")
+	fmt.Fprintln(w, "  preflight apps checklist set <app-id|slug> --key <key> --status <pending|done|blocked|not_applicable> [--note <text>] [--platform ...]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Release-program status: where each app sits on the ladder")
+	fmt.Fprintln(w, "identity -> compliance -> asc_record -> store_build -> testflight -> metadata -> submitted -> released.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "`apps status` exits 2 when the next action is user-owned (portal/agreement work).")
+}
+
+func fetchFleetReleaseRows(client *http.Client, options releaseStatusCLIOptions) ([]cliFleetReleaseRow, error) {
+	endpoint := strings.TrimRight(options.apiURL, "/") + "/api/preflight/v1/release-status?platform=" + url.QueryEscape(options.platform)
+	data, err := getPreflightJSON(client, endpoint, options.token)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Apps []cliFleetReleaseRow `json:"apps"`
+	}
+	if err := decodeEnvelopeData(data, &payload); err != nil {
+		return nil, fmt.Errorf("decode release-status response: %w", err)
+	}
+	return payload.Apps, nil
+}
+
+func runAppsList(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	options, ok := parseReleaseStatusCLIOptions(args, stderr)
+	if !ok {
+		return 2
+	}
+	rows, err := fetchFleetReleaseRows(client, options)
+	if err != nil {
+		fmt.Fprintf(stderr, "fetch release status failed: %v\n", err)
+		return 1
+	}
+	if options.jsonOut {
+		content, err := json.MarshalIndent(rows, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "encode release status failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, string(content))
+		return 0
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "APP\tSTAGE\tNEXT\tOWNER\tTESTFLIGHT\tREVIEW\tBLOCKER")
+	for _, row := range rows {
+		name := row.Name
+		if name == "" {
+			name = row.AppID
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			name,
+			emptyDash(row.CurrentStage),
+			emptyDash(row.NextStage),
+			emptyDash(row.NextOwner),
+			emptyDash(row.TestflightState),
+			emptyDash(row.StoreSubmissionStatus),
+			truncateForTable(row.BlockerReason, 72),
+		)
+	}
+	writer.Flush()
+	return 0
+}
+
+// resolveReleaseAppID turns an app reference (pf_app id, slug, or name) into
+// the registry id via the fleet endpoint.
+func resolveReleaseAppID(client *http.Client, options releaseStatusCLIOptions, ref string) (string, error) {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" {
+		return "", fmt.Errorf("app reference is required")
+	}
+	rows, err := fetchFleetReleaseRows(client, options)
+	if err != nil {
+		return "", err
+	}
+	lowered := strings.ToLower(trimmed)
+	var matches []cliFleetReleaseRow
+	for _, row := range rows {
+		if row.AppID == trimmed {
+			return row.AppID, nil
+		}
+		if strings.ToLower(row.Slug) == lowered || strings.ToLower(row.Name) == lowered {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0].AppID, nil
+	}
+	if len(matches) > 1 {
+		ids := make([]string, 0, len(matches))
+		for _, match := range matches {
+			ids = append(ids, match.AppID)
+		}
+		return "", fmt.Errorf("app reference %q is ambiguous: %s", ref, strings.Join(ids, ", "))
+	}
+	return "", fmt.Errorf("no app matches %q (try `preflight apps list`)", ref)
+}
+
+func runAppsStatus(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	options, ok := parseReleaseStatusCLIOptions(args, stderr)
+	if !ok {
+		return 2
+	}
+	if len(options.rest) != 1 {
+		fmt.Fprintln(stderr, "Usage: preflight apps status <app-id|slug|name> [--platform ios|android] [--json]")
+		return 2
+	}
+	appID, err := resolveReleaseAppID(client, options, options.rest[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
+		return 1
+	}
+	endpoint := strings.TrimRight(options.apiURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) +
+		"/release-status?platform=" + url.QueryEscape(options.platform)
+	data, err := getPreflightJSON(client, endpoint, options.token)
+	if err != nil {
+		fmt.Fprintf(stderr, "fetch release status failed: %v\n", err)
+		return 1
+	}
+	var payload struct {
+		ReleaseStatus cliAppReleaseStatus `json:"releaseStatus"`
+	}
+	if err := decodeEnvelopeData(data, &payload); err != nil {
+		fmt.Fprintf(stderr, "decode release status failed: %v\n", err)
+		return 1
+	}
+	status := payload.ReleaseStatus
+	if status.SchemaVersion > releaseStatusSchemaVersion {
+		fmt.Fprintf(stderr, "warning: server envelope schema v%d is newer than this CLI (v%d) — upgrade preflight\n",
+			status.SchemaVersion, releaseStatusSchemaVersion)
+	}
+	if options.jsonOut {
+		content, err := json.MarshalIndent(status, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "encode release status failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, string(content))
+	} else {
+		printAppReleaseStatus(stdout, status)
+	}
+	// Scripts detect "human action needed" without parsing output.
+	if status.Stage.Next != nil && status.Stage.Next.Owner == "user" {
+		return 2
+	}
+	return 0
+}
+
+func printAppReleaseStatus(stdout io.Writer, status cliAppReleaseStatus) {
+	title := status.App.Name
+	if title == "" {
+		title = status.App.ID
+	}
+	fmt.Fprintf(stdout, "%s (%s, %s)\n", title, status.App.BundleID, status.Platform)
+	if status.App.AscAppID != "" {
+		fmt.Fprintf(stdout, "ASC: %s", status.App.AscAppID)
+		if status.App.LastAscSyncAt != "" {
+			fmt.Fprintf(stdout, " (synced %s)", status.App.LastAscSyncAt)
+		}
+		fmt.Fprintln(stdout)
+	}
+	fmt.Fprintln(stdout)
+	for _, stage := range status.Ladder {
+		marker := " "
+		switch stage.Status {
+		case "done":
+			marker = "✓"
+		case "blocked":
+			marker = "✗"
+		case "not_applicable":
+			marker = "-"
+		default:
+			marker = "…"
+		}
+		line := fmt.Sprintf("%s %-12s %s", marker, stage.Key, stage.Status)
+		if stage.Owner != "" && stage.Status != "done" && stage.Status != "not_applicable" {
+			line += " [" + stage.Owner + "]"
+		}
+		fmt.Fprintln(stdout, line)
+		if stage.BlockerReason != "" {
+			fmt.Fprintf(stdout, "    %s\n", stage.BlockerReason)
+		}
+	}
+	if next := status.Stage.Next; next != nil {
+		fmt.Fprintf(stdout, "\nNext: %s (owner: %s)\n", next.Key, next.Owner)
+		if next.BlockerReason != "" {
+			fmt.Fprintf(stdout, "  %s\n", next.BlockerReason)
+		}
+	} else {
+		fmt.Fprintln(stdout, "\nReleased — ladder complete.")
+	}
+	if len(status.LatestBuilds) > 0 {
+		fmt.Fprintln(stdout, "\nLatest builds:")
+		for _, build := range status.LatestBuilds {
+			fmt.Fprintf(stdout, "  %s/%s %s (%s) %s\n", build.Platform, build.Profile, build.Version, emptyDash(build.BuildNumber), build.Status)
+		}
+	}
+	if len(status.Submissions) > 0 {
+		fmt.Fprintln(stdout, "\nSubmissions:")
+		for _, submission := range status.Submissions {
+			fmt.Fprintf(stdout, "  %s %s %s (asc: %s)\n", submission.Destination, submission.Version, submission.Status, emptyDash(submission.AscBuildState))
+		}
+	}
+	if !status.StoreListing.Complete {
+		fmt.Fprintf(stdout, "\nStore listing missing: %s\n", strings.Join(status.StoreListing.Missing, ", "))
+	}
+	if status.Links.Asc != "" {
+		fmt.Fprintf(stdout, "\n%s\n", status.Links.Asc)
+	}
+}
+
+func runAppsChecklist(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) == 0 || args[0] != "set" {
+		fmt.Fprintln(stderr, "Usage: preflight apps checklist set <app-id|slug> --key <key> --status <status> [--note <text>] [--platform ios|android]")
+		return 2
+	}
+	var key, statusValue, note string
+	filtered := make([]string, 0, len(args[1:]))
+	rest := args[1:]
+	for index := 0; index < len(rest); index += 1 {
+		switch rest[index] {
+		case "--key":
+			value, ok := nextFlagValue(rest, &index)
+			if !ok {
+				fmt.Fprintln(stderr, "--key requires a value")
+				return 2
+			}
+			key = value
+		case "--status":
+			value, ok := nextFlagValue(rest, &index)
+			if !ok {
+				fmt.Fprintln(stderr, "--status requires a value")
+				return 2
+			}
+			statusValue = value
+		case "--note":
+			value, ok := nextFlagValue(rest, &index)
+			if !ok {
+				fmt.Fprintln(stderr, "--note requires a value")
+				return 2
+			}
+			note = value
+		default:
+			filtered = append(filtered, rest[index])
+		}
+	}
+	options, ok := parseReleaseStatusCLIOptions(filtered, stderr)
+	if !ok {
+		return 2
+	}
+	if len(options.rest) != 1 || key == "" || statusValue == "" {
+		fmt.Fprintln(stderr, "Usage: preflight apps checklist set <app-id|slug> --key <key> --status <status> [--note <text>] [--platform ios|android]")
+		return 2
+	}
+	appID, err := resolveReleaseAppID(client, options, options.rest[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
+		return 1
+	}
+	endpoint := strings.TrimRight(options.apiURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/release-checklist"
+	payload := map[string]any{
+		"key":      key,
+		"status":   statusValue,
+		"platform": options.platform,
+	}
+	if note != "" {
+		payload["note"] = note
+	}
+	data, err := putPreflightJSON(client, endpoint, options.token, payload)
+	if err != nil {
+		fmt.Fprintf(stderr, "update checklist failed: %v\n", err)
+		return 1
+	}
+	var response struct {
+		Item struct {
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"item"`
+	}
+	if err := decodeEnvelopeData(data, &response); err != nil {
+		fmt.Fprintf(stderr, "decode checklist response: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s %s = %s\n", appID, response.Item.Key, response.Item.Status)
+	return 0
+}
+
+// runStatusAlias: `preflight status [<app>]` — sugar for apps status / apps list.
+func runStatusAlias(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	positional := []string{}
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) > 0 {
+		return runAppsStatus(args, stdout, stderr, client)
+	}
+	return runAppsList(args, stdout, stderr, client)
+}
+
+func putPreflightJSON(client *http.Client, endpoint string, token string, payload any) (json.RawMessage, error) {
+	requestBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode Preflight request: %w", err)
+	}
+	request, err := http.NewRequest(http.MethodPut, endpoint, bytes.NewReader(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("build Preflight request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	return doPreflightJSON(client, request)
+}
+
+func emptyDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
+}
+
+func truncateForTable(value string, max int) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\n", " ")
+	if len(value) <= max {
+		return value
+	}
+	return value[:max-1] + "…"
 }

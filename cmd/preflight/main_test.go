@@ -17,10 +17,12 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -3550,7 +3552,7 @@ func TestCredentialFlowsCreateUsesProviderAccountScopedAPI(t *testing.T) {
 }
 
 func TestDefaultRunnerCapabilitiesAdvertiseExecutableMobileTooling(t *testing.T) {
-	capabilities := defaultRunnerCapabilities()
+	capabilities := defaultRunnerCapabilities("lan")
 	localTools, ok := capabilities["localTools"].([]string)
 	if !ok {
 		t.Fatalf("expected localTools capability list, got %#v", capabilities["localTools"])
@@ -10459,6 +10461,170 @@ exit 0
 	}
 }
 
+func TestRunnerOnceRunsUnityAndroidBuildPlayer(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifactRoot := filepath.Join(workspaceRoot, ".preflight", "unity-builds", "pfjob_unity")
+	outputDir := filepath.Join(artifactRoot, "android")
+	logPath := filepath.Join(artifactRoot, "unity-build.log")
+	unityCommandLog := filepath.Join(t.TempDir(), "unity-command.log")
+	unityPath := writeFakeExecutable(t, "Unity", `#!/usr/bin/env sh
+printf '%s :: %s\n' "$PWD" "$*" >> "$UNITY_COMMAND_LOG"
+output_dir=""
+log_path=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -lfBuildOutput)
+      output_dir="$2"
+      shift 2
+      ;;
+    -logFile)
+      log_path="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+mkdir -p "$output_dir"
+printf 'apk bytes\n' > "$output_dir/Game.apk"
+if [ -n "$log_path" ]; then
+  mkdir -p "$(dirname "$log_path")"
+  printf 'unity build log\n' >> "$log_path"
+fi
+exit 0
+`)
+	t.Setenv("PREFLIGHT_UNITY_COMMAND", unityPath)
+	t.Setenv("UNITY_COMMAND_LOG", unityCommandLog)
+
+	var calls []string
+	var artifactBodies []map[string]any
+	var completeResult map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case "/api/preflight/v1/runners/register":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode register body: %v", err)
+			}
+			capabilities := body["capabilities"].(map[string]any)
+			if !containsAny(capabilities["localTools"].([]any), "unity") {
+				t.Fatalf("expected Unity local tool capability, got %#v", capabilities)
+			}
+			if !containsAny(capabilities["adapters"].([]any), "unity.android.build_support") {
+				t.Fatalf("expected Unity Android adapter capability, got %#v", capabilities)
+			}
+			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"vanuc","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["android"],"localTools":["unity"],"adapters":["unity.editor","unity.android.build_support"],"runnerArtifactUpload":true,"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/heartbeat":
+			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","status":"online"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_heartbeat"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
+			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
+			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_unity","workspaceId":"ws_cli","appId":"pfapp_levelforge","workflowId":"pfw_unity","kind":"unity.build.player","status":"running","runnerId":"pfrun_cli","payload":{"platform":"android","lane":"development","buildProvider":"local_runner","sourceBinding":{"workspaceRoot":%q,"packagePath":"."},"unityProject":{"projectPath":%q,"buildTarget":"Android"},"commandPlan":{"tool":"unity","command":"batchmode","workingDirectory":%q,"executable":{"env":"UNITY_EDITOR","candidates":["/opt/unity/Editor/Unity"]},"args":["-batchmode","-nographics","-quit","-projectPath",%q,"-executeMethod","LevelForge.Editor.LevelForgeBuild.RunHeadlessBuild","-lfBuildTarget","Android","-lfBuildOutput",%q,"-logFile",%q,"-lfDevelopmentBuild","-lfUploadOnSuccess","-lfRunnerUrl","http://127.0.0.1:7600"],"output":{"buildTarget":"Android","artifactKind":"android_apk","buildOutputDirectory":%q,"logPath":%q},"levelForge":{"registerArtifactProcedure":"unityPod.registerBuildArtifact","projectId":"lfproject_1","unityProjectId":"lfunity_1","unityPodId":"lfpod_vanuc"}}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_unity"}}`,
+				workspaceRoot,
+				workspaceRoot,
+				workspaceRoot,
+				workspaceRoot,
+				outputDir,
+				logPath,
+				outputDir,
+				logPath,
+			)
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_unity/artifacts":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode Unity artifact body: %v", err)
+			}
+			artifactBodies = append(artifactBodies, body)
+			_, _ = fmt.Fprintf(w, `{"data":{"artifact":{"id":"pfartifact_%d","kind":%q,"uri":%q}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_artifact"}}`, len(artifactBodies), body["kind"], body["uri"])
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_unity/complete":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode Unity complete body: %v", err)
+			}
+			completeResult = body["result"].(map[string]any)
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_unity","kind":"unity.build.player","status":"succeeded","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_unity"}}`))
+		default:
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run(
+		[]string{
+			"runner",
+			"once",
+			"--api-url",
+			server.URL,
+			"--workspace-id",
+			"ws_cli",
+			"--workspace-root",
+			workspaceRoot,
+			"--host-identity",
+			"vanuc",
+			"--name",
+			"CLI Runner",
+		},
+		&stdout,
+		&stderr,
+		server.Client(),
+	)
+
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "completed Unity build pfjob_unity Android") {
+		t.Fatalf("expected Unity completion output, got %q", stdout.String())
+	}
+	commandOutput, err := os.ReadFile(unityCommandLog)
+	if err != nil {
+		t.Fatalf("read Unity command log: %v", err)
+	}
+	if !strings.Contains(string(commandOutput), "-executeMethod LevelForge.Editor.LevelForgeBuild.RunHeadlessBuild") ||
+		!strings.Contains(string(commandOutput), "-lfBuildOutput "+outputDir) {
+		t.Fatalf("expected Unity batchmode args, got %q", string(commandOutput))
+	}
+	if len(artifactBodies) != 2 {
+		t.Fatalf("expected APK and Unity log artifact uploads, got %#v", artifactBodies)
+	}
+	if artifactBodies[0]["kind"] != "android_apk" ||
+		artifactBodies[0]["uri"] != filepath.Join(outputDir, "Game.apk") ||
+		artifactBodies[0]["retentionClass"] != "release" {
+		t.Fatalf("unexpected Unity APK artifact upload %#v", artifactBodies[0])
+	}
+	if artifactBodies[1]["kind"] != "unity_build_log" ||
+		artifactBodies[1]["uri"] != logPath ||
+		artifactBodies[1]["retentionClass"] != "debug" {
+		t.Fatalf("unexpected Unity log artifact upload %#v", artifactBodies[1])
+	}
+	if completeResult["status"] != "ok" {
+		t.Fatalf("expected Unity completion status ok, got %#v", completeResult)
+	}
+	unityBuild := completeResult["unityBuild"].(map[string]any)
+	if unityBuild["target"] != "Android" ||
+		unityBuild["artifactKind"] != "android_apk" ||
+		unityBuild["outputPath"] != outputDir ||
+		unityBuild["logPath"] != logPath ||
+		unityBuild["primaryArtifactPath"] != filepath.Join(outputDir, "Game.apk") {
+		t.Fatalf("unexpected Unity build result %#v", unityBuild)
+	}
+	resultArtifacts := completeResult["artifacts"].([]any)
+	if len(resultArtifacts) != 1 || resultArtifacts[0].(map[string]any)["kind"] != "android_apk" {
+		t.Fatalf("unexpected Unity result artifacts %#v", resultArtifacts)
+	}
+	if countCalls(calls, "POST /api/preflight/v1/runners/pfrun_cli/jobs/claim") != 1 {
+		t.Fatalf("expected one Unity claim, got %v", calls)
+	}
+}
+
 func TestResetAndroidAutolinkingOutputsRemovesOnlyGeneratedAutolinkingCaches(t *testing.T) {
 	appDir := t.TempDir()
 	androidDir := filepath.Join(appDir, "android")
@@ -12288,4 +12454,100 @@ func runGitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func TestParseEASSubmitSubmissionID(t *testing.T) {
+	fromURL := parseEASSubmitSubmissionID(
+		"See logs: https://expo.dev/accounts/gmackie/projects/crucible/submissions/567d0211-ab12-4cd3-9ef4-0123456789ab",
+	)
+	if fromURL != "567d0211-ab12-4cd3-9ef4-0123456789ab" {
+		t.Fatalf("expected submission id from URL, got %q", fromURL)
+	}
+	fromLine := parseEASSubmitSubmissionID("Submission ID: 567d0211-ab12-4cd3-9ef4-0123456789ab")
+	if fromLine != "567d0211-ab12-4cd3-9ef4-0123456789ab" {
+		t.Fatalf("expected submission id from line, got %q", fromLine)
+	}
+	if got := parseEASSubmitSubmissionID("no ids here"); got != "" {
+		t.Fatalf("expected empty for no match, got %q", got)
+	}
+}
+
+func TestEASSubmitFailureCode(t *testing.T) {
+	cases := map[string]string{
+		"exec: \"eas\": executable file not found in $PATH": "eas_cli_missing",
+		"command timed out after 30m":                       "eas_submit_timeout",
+		"request failed 401":                                "asc_auth_failed",
+		"Something went wrong":                              "eas_submit_failed",
+	}
+	for message, expected := range cases {
+		if got := easSubmitFailureCode(errors.New(message)); got != expected {
+			t.Fatalf("easSubmitFailureCode(%q) = %q, expected %q", message, got, expected)
+		}
+	}
+}
+
+func TestDefaultRunnerCapabilitiesAdvertiseTunnelDevServer(t *testing.T) {
+	lan := defaultRunnerCapabilities("lan")
+	if adapters, _ := lan["adapters"].([]string); slices.Contains(adapters, "expo.dev_server.tunnel") {
+		t.Fatalf("lan runner must not advertise expo.dev_server.tunnel")
+	}
+	tunnel := defaultRunnerCapabilities("tunnel")
+	adapters, _ := tunnel["adapters"].([]string)
+	if !slices.Contains(adapters, "expo.dev_server.tunnel") {
+		t.Fatalf("tunnel runner must advertise expo.dev_server.tunnel, got %v", adapters)
+	}
+}
+
+func TestExpoTunnelDevServerURLFromLogContentRejectsNgrokStatusPage(t *testing.T) {
+	content := "CommandError: failed to start tunnel\n\nremote gone away\n\nCheck the Ngrok status page for outages: https://status.ngrok.com/\n"
+	if url, ok := expoTunnelDevServerURLFromLogContent(content); ok {
+		t.Fatalf("ngrok status page must not be treated as a dev server URL, got %q", url)
+	}
+	content = "Tunnel ready.\nMetro waiting on exp://abc-anonymous-8400.exp.direct\n"
+	url, ok := expoTunnelDevServerURLFromLogContent(content)
+	if !ok || url != "exp://abc-anonymous-8400.exp.direct" {
+		t.Fatalf("expected exp.direct URL, got %q ok=%v", url, ok)
+	}
+}
+
+func TestExpoTunnelDevServerURLFromManifestReadsHostURI(t *testing.T) {
+	manifestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("expo-platform") != "ios" {
+			t.Errorf("expected expo-platform header, got %q", r.Header.Get("expo-platform"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hostUri":"abc-anonymous-8400.exp.direct","launchAsset":{"url":"http://abc-anonymous-8400.exp.direct/node_modules/expo/AppEntry.bundle"}}`))
+	}))
+	defer manifestServer.Close()
+	parsed, err := url.Parse(manifestServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := expoTunnelDevServerURLFromManifest(port)
+	if !ok || got != "exp://abc-anonymous-8400.exp.direct" {
+		t.Fatalf("expected exp.direct URL from manifest hostUri, got %q ok=%v", got, ok)
+	}
+}
+
+func TestExpoTunnelDevServerURLFromManifestIgnoresLocalHostURI(t *testing.T) {
+	manifestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hostUri":"127.0.0.1:8400"}`))
+	}))
+	defer manifestServer.Close()
+	parsed, err := url.Parse(manifestServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := expoTunnelDevServerURLFromManifest(port); ok {
+		t.Fatalf("loopback hostUri must be rejected, got %q", got)
+	}
 }
