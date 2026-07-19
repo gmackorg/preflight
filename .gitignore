@@ -2,3 +2,4 @@
 /preflight
 /dist/
 *.test
+preflight.bak*

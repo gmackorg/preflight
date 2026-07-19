@@ -5327,6 +5327,7 @@ type runnerJobPayload struct {
 	TargetClass              string                             `json:"targetClass"`
 	SourceBinding            runnerJobSourceBinding             `json:"sourceBinding"`
 	DevSession               runnerJobDevSession                `json:"devSession"`
+	NetworkPolicy            runnerJobNetworkPolicy             `json:"networkPolicy"`
 	DevBuild                 map[string]any                     `json:"devBuild"`
 	Readiness                map[string]any                     `json:"readiness"`
 	UnityProject             map[string]any                     `json:"unityProject"`
@@ -5427,6 +5428,12 @@ type runnerJobSourceBinding struct {
 	GitCommitSHA      string    `json:"gitCommitSha"`
 	DirtyWorkspace    *bool     `json:"dirtyWorkspace"`
 	ChangedSetupFiles *[]string `json:"changedSetupFiles"`
+}
+
+type runnerJobNetworkPolicy struct {
+	TunnelRequired bool   `json:"tunnelRequired"`
+	LocalOnly      bool   `json:"localOnly"`
+	Reason         string `json:"reason"`
 }
 
 type runnerJobDevSession struct {
@@ -5698,6 +5705,16 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 			return false, completeErr
 		}
 		return false, nil
+	}
+
+	// A tunnel-mode runner may claim jobs that don't need the tunnel (simulator
+	// lane). Serving those through ngrok adds a fragile external dependency for
+	// no benefit — and ngrok allows one agent session, so it also contends with
+	// genuine tunnel sessions. Downgrade to LAN unless the job requires tunnel.
+	if options.hostMode == "tunnel" &&
+		!job.Payload.NetworkPolicy.TunnelRequired &&
+		!isDevelopmentDevSessionJob(job) {
+		options.hostMode = "lan"
 	}
 
 	developmentSession := isDevelopmentDevSessionJob(job)
