@@ -7495,6 +7495,16 @@ func handleEASSubmitJob(client *http.Client, options runnerOnceOptions, registra
 		}
 	}
 
+	// eas-cli reads the App Store Connect API key ONLY from eas.json's submit
+	// profile — not from env vars (the EXPO_ASC_* above) and not from CLI flags
+	// (build:submit has none). So a non-interactive submit fails with "App Store
+	// Connect API Keys cannot be set up in --non-interactive mode" unless the
+	// key is present in eas.json. Inject it from the runner's PREFLIGHT_ASC_*
+	// env into the checkout's eas.json before submitting.
+	if err := ensureEASSubmitASCKey(appDir, strings.TrimSpace(job.Payload.Profile)); err != nil {
+		fmt.Fprintf(stdout, "warning: eas.submit job %s could not inject ASC key into eas.json: %v\n", job.ID, err)
+	}
+
 	args := []string{
 		"build:submit",
 		"--platform", jobPlatformForEAS(job),
@@ -7876,6 +7886,61 @@ func writeASCApiKeyFile(appDir string) (string, error) {
 		return "", err
 	}
 	return out, nil
+}
+
+// ensureEASSubmitASCKey injects App Store Connect API key credentials into the
+// checkout's eas.json submit profile so `eas build:submit --non-interactive`
+// can authenticate. eas-cli reads the ASC key ONLY from eas.json (not env, not
+// flags), so the fleet's runner-provided PREFLIGHT_ASC_* env is otherwise
+// unusable for submit. No-op when the env is incomplete, there is no eas.json,
+// or the profile already declares its own ascApiKeyPath.
+func ensureEASSubmitASCKey(appDir, profile string) error {
+	keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID"))
+	issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID"))
+	keyPath := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_PATH"))
+	if keyID == "" || issuerID == "" || keyPath == "" {
+		return nil
+	}
+	if strings.HasPrefix(keyPath, "~/") {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			keyPath = filepath.Join(home, keyPath[2:])
+		}
+	}
+	if profile == "" {
+		profile = "production"
+	}
+	easJSONPath := filepath.Join(appDir, "eas.json")
+	raw, err := os.ReadFile(easJSONPath)
+	if err != nil {
+		return nil // no eas.json here — let eas-cli surface its own error
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	nestedMap := func(parent map[string]any, key string) map[string]any {
+		if existing, ok := parent[key].(map[string]any); ok {
+			return existing
+		}
+		created := map[string]any{}
+		parent[key] = created
+		return created
+	}
+	ios := nestedMap(nestedMap(nestedMap(doc, "submit"), profile), "ios")
+	if _, ok := ios["ascApiKeyPath"]; ok {
+		return nil // app declares its own ASC key — respect it
+	}
+	ios["ascApiKeyPath"] = keyPath
+	ios["ascApiKeyId"] = keyID
+	ios["ascApiKeyIssuerId"] = issuerID
+	// An appleId in the submit profile forces Apple-ID (app-specific-password)
+	// auth, which cannot be set up non-interactively and shadows the API key.
+	delete(ios, "appleId")
+	patched, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(easJSONPath, append(patched, '\n'), 0o644)
 }
 
 func runFastlaneCommand(appDir string, cancellationCheck func() (bool, error), args ...string) ([]byte, error) {
