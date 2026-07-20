@@ -94,6 +94,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runApps(args[1:], stdout, stderr, client)
 	case "status":
 		return runStatusAlias(args[1:], stdout, stderr, client)
+	case "testflight":
+		return runTestFlight(args[1:], stdout, stderr, client)
 	case "capabilities":
 		return runCapabilities(args[1:], stdout, stderr, client)
 	case "targets":
@@ -126,6 +128,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  login         Authenticate with the Preflight API")
 	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist)")
 	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
+	fmt.Fprintln(w, "  testflight    Manage TestFlight tester enrollment")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
 	fmt.Fprintln(w, "  capabilities  Probe /api/preflight/v1/capabilities")
 	fmt.Fprintln(w, "  targets       Register and list local simulator/device inventory")
@@ -5344,6 +5347,7 @@ type runnerJobPayload struct {
 	Action          string            `json:"action"`
 	Metadata        map[string]string `json:"metadata"`
 	Locales         []string          `json:"locales"`
+	Screenshots     []runnerJobScreenshotRef `json:"screenshots"`
 	// eas.submit (one-click distribute) fields:
 	SubmissionID string `json:"submissionId"`
 	EASBuildID   string `json:"easBuildId"`
@@ -5409,6 +5413,15 @@ type runnerJobSecretRevealData struct {
 	SecretReference runnerJobSecretReference `json:"secretReference"`
 	Value           string                   `json:"value"`
 	ExpiresAt       string                   `json:"expiresAt"`
+}
+
+// runnerJobScreenshotRef is one store screenshot to materialize before a
+// fastlane.screenshots run: fetched from URL into
+// fastlane/screenshots/<locale>/<filename> under the app directory.
+type runnerJobScreenshotRef struct {
+	URL      string `json:"url"`
+	Locale   string `json:"locale"`
+	Filename string `json:"filename"`
 }
 
 type runnerJobSourceBinding struct {
@@ -7673,6 +7686,10 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 			"deliver",
 			"--app_identifier", p.AppIdentifier,
 			"--skip_binary_upload", "--skip_screenshots", "--force",
+			// Precheck can't run with API-key auth (IAP check aborts the
+			// whole run after the upload already succeeded) and adds nothing
+			// to a metadata/asset push — skip it entirely.
+			"--run_precheck_before_submit", "false",
 			"--metadata_path", metadataDir,
 		}, apiKeyArgs...), nil
 	case "fastlane.screenshots":
@@ -7680,6 +7697,9 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 			return nil, fmt.Errorf("fastlane.screenshots requires appIdentifier")
 		}
 		screenshotsDir := filepath.Join(appDir, "fastlane", "screenshots")
+		if err := materializeScreenshots(screenshotsDir, p.Screenshots); err != nil {
+			return nil, err
+		}
 		if p.Platform == "android" {
 			return []string{
 				"supply",
@@ -7692,11 +7712,71 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 			"deliver",
 			"--app_identifier", p.AppIdentifier,
 			"--skip_binary_upload", "--skip_metadata", "--force",
+			// The Preflight listing is the source of truth: replace whatever
+			// screenshot set ASC has (also avoids "Screenshot Set Already
+			// Exists" collisions from earlier partial runs).
+			"--overwrite_screenshots",
+			// Precheck can't run with API-key auth (IAP check aborts the
+			// whole run after the upload already succeeded) and adds nothing
+			// to a metadata/asset push — skip it entirely.
+			"--run_precheck_before_submit", "false",
 			"--screenshots_path", screenshotsDir,
 		}, apiKeyArgs...), nil
 	default:
 		return nil, fmt.Errorf("unsupported fastlane job kind %q", job.Kind)
 	}
+}
+
+// materializeScreenshots downloads the payload's screenshot refs into
+// screenshotsDir/<locale>/<filename> so `deliver --screenshots_path` /
+// `supply --screenshots_path` can upload them. The refs point at Preflight's
+// public R2-serve route (unguessable keys), so a plain GET suffices. A run
+// with refs but zero materialized files is an error — deliver would silently
+// upload nothing.
+func materializeScreenshots(screenshotsDir string, refs []runnerJobScreenshotRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	written := 0
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.URL) == "" {
+			continue
+		}
+		locale := strings.TrimSpace(ref.Locale)
+		if locale == "" {
+			locale = "en-US"
+		}
+		filename := filepath.Base(strings.TrimSpace(ref.Filename))
+		if filename == "" || filename == "." {
+			filename = filepath.Base(ref.URL)
+		}
+		dir := filepath.Join(screenshotsDir, locale)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		resp, err := client.Get(ref.URL)
+		if err != nil {
+			return fmt.Errorf("download screenshot %s: %w", filename, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return fmt.Errorf("download screenshot %s: HTTP %d", filename, resp.StatusCode)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("download screenshot %s: %w", filename, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filename), data, 0o644); err != nil {
+			return err
+		}
+		written++
+	}
+	if written == 0 {
+		return fmt.Errorf("no screenshots could be materialized from %d refs", len(refs))
+	}
+	return nil
 }
 
 // writeAppleMetadataFiles writes the en-US text files `fastlane deliver` reads.
@@ -9140,10 +9220,13 @@ func ensureCiDependencies(repoRoot string, headSha string, packagePath string) e
 }
 
 // runCmd runs an arbitrary command in dir, folding combined output into the
-// error for diagnosability in job logs.
+// error for diagnosability in job logs. CI=1 is set so package managers act
+// non-interactively: without it, pnpm aborts destructive-but-required steps
+// like modules-dir rebuilds with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
 func runCmd(dir string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "CI=1")
 	output, err := cmd.CombinedOutput()
 	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
