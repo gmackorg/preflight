@@ -7468,6 +7468,28 @@ func handleEASSubmitJob(client *http.Client, options runnerOnceOptions, registra
 	}
 
 	appDir := appDirectoryForJob(options, job)
+
+	// A server-initiated distribute points at a Preflight CI checkout that may be
+	// absent or stale (cleaned under disk pressure — the dir can exist without a
+	// .git or eas.json). Make it match the source binding's commit before we
+	// read eas.json. Clone/reset only, no dependency install: submit reads
+	// eas.json/app.config and needs no node_modules, and a frozen install here
+	// would fail on any lockfile drift.
+	checkoutRoot := strings.TrimSpace(job.Payload.SourceBinding.WorkspaceRoot)
+	if checkoutRoot == "" {
+		checkoutRoot = options.workspaceRoot
+	}
+	if checkoutErr := ensureEASSubmitCheckout(checkoutRoot, job.Payload.SourceBinding); checkoutErr != nil {
+		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status":  "failed",
+			"failure": map[string]any{"code": "eas_submit_checkout_failed", "message": checkoutErr.Error()},
+		}); completeErr != nil {
+			return completeErr
+		}
+		fmt.Fprintf(stdout, "failed eas.submit job %s checkout: %s\n", job.ID, checkoutErr.Error())
+		return nil
+	}
+
 	easEnv, err := easSecretEnvForJob(client, options, registration, job)
 	if err != nil {
 		return err
@@ -9217,6 +9239,70 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
 	if err := ensureCiDependencies(abs, resolved, binding.PackagePath); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ensureEASSubmitCheckout makes a Preflight-owned CI checkout match the source
+// binding's commit before `eas build:submit` runs. Distribute is
+// server-initiated, so unlike a build/dev job there is no live developer CWD —
+// the derived checkout may be missing or stale (the dir can survive a cleanup
+// without its .git or eas.json). It clones/resets to the commit and installs JS
+// dependencies via ensureCiDependencies: `eas build:submit` evaluates the
+// app's Expo config (app.config.ts), which imports packages, so node_modules
+// must be present. ensureCiDependencies is drift-tolerant (frozen install, then
+// a non-frozen fallback), so a checkout whose committed lockfile has drifted
+// still resolves. No-op for developer checkouts (non-.preflight-ci roots) and
+// when there is no git ref to sync to.
+func ensureEASSubmitCheckout(workspaceRoot string, binding runnerJobSourceBinding) error {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return nil
+	}
+	if !pathHasSegment(abs, ciCheckoutRootSegment) {
+		return nil // developer checkout — never touch it
+	}
+	remote := strings.TrimSpace(binding.GitRemoteURL)
+	sha := strings.TrimSpace(binding.GitCommitSHA)
+	branch := strings.TrimSpace(binding.GitBranch)
+	if remote == "" || (sha == "" && branch == "") {
+		return nil
+	}
+	if _, statErr := os.Stat(filepath.Join(abs, ".git")); statErr != nil {
+		// The dir can survive a cleanup as a stale, non-git checkout (files but
+		// no .git). `git clone` refuses a non-empty target, so clear it first —
+		// safe because this only runs on a Preflight-owned .preflight-ci root.
+		if _, dirErr := os.Stat(abs); dirErr == nil {
+			if rmErr := os.RemoveAll(abs); rmErr != nil {
+				return fmt.Errorf("clear stale checkout %s: %w", abs, rmErr)
+			}
+		}
+		if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
+			return fmt.Errorf("create parent: %w", mkErr)
+		}
+		if _, cloneErr := gitRun("", "clone", remote, abs); cloneErr != nil {
+			return fmt.Errorf("clone %s: %w", remote, cloneErr)
+		}
+	}
+	if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
+		return fmt.Errorf("fetch: %w", fetchErr)
+	}
+	// A stored "HEAD" placeholder is not a resolvable ref — fall back to branch.
+	ref := sha
+	if ref == "" || strings.EqualFold(ref, "HEAD") {
+		ref = "origin/" + branch
+	}
+	if _, resetErr := gitRun(abs, "reset", "--hard", ref); resetErr != nil {
+		return fmt.Errorf("reset %s: %w", ref, resetErr)
+	}
+	// eas build:submit reads app.config.ts, which imports packages — install
+	// deps so the config evaluates. Drift-tolerant (frozen → non-frozen).
+	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
+	if depErr := ensureCiDependencies(abs, resolved, binding.PackagePath); depErr != nil {
+		return depErr
 	}
 	return nil
 }
