@@ -4748,7 +4748,7 @@ func printRunnerHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --adb-path <path>        adb executable path")
 	fmt.Fprintln(w, "  --metro-port <port>      Expo/Metro port")
 	fmt.Fprintln(w, "  --metro-status-url <url> Override Metro status probe URL")
-	fmt.Fprintln(w, "  --host-mode <mode>       Expo host mode: lan, localhost, or tunnel")
+	fmt.Fprintln(w, "  --host-mode <mode>       Expo host mode: lan, localhost, tunnel, or tailscale")
 }
 
 func runRunnerOnce(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -5135,10 +5135,13 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 		localTools = append(localTools, "unity")
 		adapters = append(adapters, "unity.editor", "unity.android", "unity.android.build_support")
 	}
-	// Physical-device development sessions must run behind an Expo tunnel; the
-	// control plane routes tunnel-required dev_session jobs to runners that
-	// advertise this instead of letting a lan runner claim-and-refuse them.
-	if strings.TrimSpace(hostMode) == "tunnel" {
+	// Physical-device development sessions need a dev server the phone can
+	// reach; the control plane routes tunnel-required dev_session jobs to
+	// runners that advertise this instead of letting a lan runner
+	// claim-and-refuse them. Tailscale mode satisfies the same reachability
+	// contract (the phone is on the tailnet), so it advertises the same
+	// adapter and claim routing is unchanged.
+	if mode := strings.TrimSpace(hostMode); mode == "tunnel" || mode == "tailscale" {
 		adapters = append(adapters, "expo.dev_server.tunnel")
 	}
 	return map[string]any{
@@ -9847,7 +9850,7 @@ func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJ
 		return nil, fmt.Errorf("open Expo dev session log: %w", err)
 	}
 
-	command := exec.Command("npx", "expo", "start", "--dev-client", "--host", options.hostMode, "--port", strconv.Itoa(options.metroPort))
+	command := exec.Command("npx", "expo", "start", "--dev-client", "--host", expoHostArg(options.hostMode), "--port", strconv.Itoa(options.metroPort))
 	command.Dir = appDir
 	command.Env = expoCommandEnv(job)
 	command.Stdout = logFile
@@ -11248,6 +11251,9 @@ func devSessionResultPayload(input devSessionResultInput) map[string]any {
 	if input.hostMode == "tunnel" {
 		payload["tunnelProvider"] = "expo-cli-ngrok"
 	}
+	if input.hostMode == "tailscale" {
+		payload["tunnelProvider"] = "tailscale"
+	}
 	if input.targetID != "" {
 		payload["targetId"] = input.targetID
 	}
@@ -11305,6 +11311,16 @@ func isDevelopmentDevSessionJob(job apiRunnerJob) bool {
 func advertisedDevServerURL(options runnerOnceOptions, job apiRunnerJob) (string, error) {
 	if isDevelopmentDevSessionJob(job) && options.hostMode == "lan" {
 		host, err := lanHost()
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("http://%s:%d", host, options.metroPort), nil
+	}
+	// Tailscale mode: Metro runs exactly like lan, but the advertised URL is
+	// the runner's tailnet address so a phone on the tailnet reaches it
+	// directly — no ngrok, no manifest scrape.
+	if isDevelopmentDevSessionJob(job) && options.hostMode == "tailscale" {
+		host, err := tailscaleHost()
 		if err != nil {
 			return "", err
 		}
@@ -11374,6 +11390,50 @@ func lanHost() (string, error) {
 		return ip.String(), nil
 	}
 	return "", fmt.Errorf("could not determine a LAN host address; set PREFLIGHT_LAN_HOST or use --host-mode tunnel")
+}
+
+// expoHostArg maps the runner host mode to the value passed to
+// `expo start --host`. Expo only understands lan/localhost/tunnel; tailscale
+// mode starts Metro exactly like lan and differs only in the advertised URL.
+func expoHostArg(hostMode string) string {
+	if hostMode == "tailscale" {
+		return "lan"
+	}
+	return hostMode
+}
+
+func tailscaleHost() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("PREFLIGHT_TAILSCALE_HOST")); override != "" {
+		return override, nil
+	}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", fmt.Errorf("discover Tailscale host address: %w", err)
+	}
+	if host, ok := tailscaleHostFromAddrs(addresses); ok {
+		return host, nil
+	}
+	return "", fmt.Errorf("no Tailscale (100.64.0.0/10) interface address found; is Tailscale up? Set PREFLIGHT_TAILSCALE_HOST to override")
+}
+
+// Tailscale assigns every node an IPv4 address in the CGNAT range
+// 100.64.0.0/10, so the tailnet address is discoverable from interfaces
+// without shelling out to the tailscale CLI.
+var tailscaleCGNAT = net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+func tailscaleHostFromAddrs(addresses []net.Addr) (string, bool) {
+	for _, address := range addresses {
+		ipNet, ok := address.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil || !tailscaleCGNAT.Contains(ip) {
+			continue
+		}
+		return ip.String(), true
+	}
+	return "", false
 }
 
 func developmentDeepLinkURL(sourceBinding runnerJobSourceBinding, advertisedURL string) string {

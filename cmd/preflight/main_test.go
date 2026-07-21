@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12495,6 +12496,72 @@ func TestDefaultRunnerCapabilitiesAdvertiseTunnelDevServer(t *testing.T) {
 	adapters, _ := tunnel["adapters"].([]string)
 	if !slices.Contains(adapters, "expo.dev_server.tunnel") {
 		t.Fatalf("tunnel runner must advertise expo.dev_server.tunnel, got %v", adapters)
+	}
+	// Tailscale mode satisfies the same phone-reachability contract, so it
+	// must advertise the same adapter for claim routing to stay unchanged.
+	tailscale := defaultRunnerCapabilities("tailscale")
+	adapters, _ = tailscale["adapters"].([]string)
+	if !slices.Contains(adapters, "expo.dev_server.tunnel") {
+		t.Fatalf("tailscale runner must advertise expo.dev_server.tunnel, got %v", adapters)
+	}
+}
+
+func TestExpoHostArgMapsTailscaleToLan(t *testing.T) {
+	if got := expoHostArg("tailscale"); got != "lan" {
+		t.Fatalf("expected tailscale host mode to start expo with lan, got %q", got)
+	}
+	for _, mode := range []string{"lan", "localhost", "tunnel"} {
+		if got := expoHostArg(mode); got != mode {
+			t.Fatalf("expected %q to pass through, got %q", mode, got)
+		}
+	}
+}
+
+func TestAdvertisedDevServerURLUsesTailscaleHostForDevelopment(t *testing.T) {
+	t.Setenv("PREFLIGHT_TAILSCALE_HOST", "100.101.102.103")
+	url, err := advertisedDevServerURL(
+		runnerOnceOptions{
+			hostMode:  "tailscale",
+			metroPort: 8400,
+		},
+		apiRunnerJob{
+			Payload: runnerJobPayload{
+				Platform: "ios",
+				Lane:     "development",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("advertised dev server URL failed: %v", err)
+	}
+	if url != "http://100.101.102.103:8400" {
+		t.Fatalf("expected tailscale dev server URL, got %q", url)
+	}
+}
+
+func TestTailscaleHostFromAddrsMatchesCGNATRangeOnly(t *testing.T) {
+	mustParse := func(cidr string) net.Addr {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ipNet
+	}
+	host, ok := tailscaleHostFromAddrs([]net.Addr{
+		mustParse("127.0.0.1/8"),
+		mustParse("192.168.4.10/24"),
+		mustParse("100.76.132.28/32"),
+	})
+	if !ok || host != "100.76.132.28" {
+		t.Fatalf("expected the 100.64.0.0/10 address, got %q ok=%v", host, ok)
+	}
+	// 100.63.x and 100.128.x sit just outside the CGNAT range.
+	if host, ok := tailscaleHostFromAddrs([]net.Addr{
+		mustParse("100.63.255.254/32"),
+		mustParse("100.128.0.1/32"),
+		mustParse("10.1.2.3/8"),
+	}); ok {
+		t.Fatalf("expected no tailscale address, got %q", host)
 	}
 }
 

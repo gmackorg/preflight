@@ -651,10 +651,16 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 		}
 		if appID == "" && len(byRepo) > 0 {
 			// Durable identity for checkouts whose slug/projectId drifted from
-			// the fleet record: the git remote. Cheap (one git call) + reliable,
-			// so try it before the expensive expo-config resolve.
-			if norm := normalizeGitRemote(checkoutGitRemote(ad)); norm != "" {
-				appID = byRepo[norm]
+			// the fleet record: the git remote. Cheap + reliable, so try it
+			// before the expensive expo-config resolve. A checkout can have
+			// several remotes (origin + forge/gitea mirrors) — the fleet record
+			// may match any of them, so check them all.
+			for _, remote := range checkoutGitRemotes(ad) {
+				if norm := normalizeGitRemote(remote); norm != "" {
+					if appID = byRepo[norm]; appID != "" {
+						break
+					}
+				}
 			}
 		}
 		if appID == "" && len(byProject) > 0 {

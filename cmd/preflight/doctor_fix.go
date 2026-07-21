@@ -293,34 +293,28 @@ func resolveAppIdentityViaExpo(appDir string) (projectID, slug string) {
 	return "", ""
 }
 
-// checkoutGitRemote returns the URL of a checkout's primary git remote (origin
-// if present, else the first one — some checkouts name it "forge"/"gitea").
-// "" when the dir isn't a git repo or has no remotes.
-func checkoutGitRemote(appDir string) string {
+// checkoutGitRemotes returns the URLs of every git remote on a checkout. A
+// checkout often has several (origin plus forge/gitea/forgejo mirrors) that
+// point at differently-named repos, and the fleet record may match any one of
+// them — so the caller tries them all rather than betting on origin.
+func checkoutGitRemotes(appDir string) []string {
 	root := findUp(appDir, ".git")
 	if root == "" {
-		return ""
+		return nil
 	}
 	out, err := gitOutput(root, "remote")
 	if err != nil {
-		return ""
+		return nil
 	}
-	remotes := strings.Fields(out)
-	if len(remotes) == 0 {
-		return ""
-	}
-	pick := remotes[0]
-	for _, r := range remotes {
-		if r == "origin" {
-			pick = "origin"
-			break
+	var urls []string
+	for _, name := range strings.Fields(out) {
+		if url, e := gitOutput(root, "remote", "get-url", name); e == nil {
+			if u := strings.TrimSpace(url); u != "" {
+				urls = append(urls, u)
+			}
 		}
 	}
-	url, err := gitOutput(root, "remote", "get-url", pick)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(url)
+	return urls
 }
 
 // normalizeGitRemote reduces a git remote URL to a comparable host/path key,
