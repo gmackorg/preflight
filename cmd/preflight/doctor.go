@@ -23,6 +23,12 @@ import (
 // the rest of the config is dynamic — enough to map a checkout to a fleet app.
 var expoSlugRe = regexp.MustCompile(`["']?slug["']?\s*:\s*["']([a-zA-Z0-9._-]+)["']`)
 
+// The EAS project id is a static UUID literal — the canonical app identity,
+// more reliable than slug for mapping a checkout to a fleet app.
+var expoProjectIDRe = regexp.MustCompile(
+	`["']?projectId["']?\s*:\s*["']([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})["']`,
+)
+
 type doctorSeverity string
 
 const (
@@ -349,8 +355,11 @@ func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
 func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	path, root, appID := "", "", ""
 	all, asJSON, doFix, doReport, expoDoctor := false, false, false, false, false
+	doCommit := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--commit":
+			doCommit = true
 		case "--expo-doctor":
 			expoDoctor = true
 		case "--path":
@@ -380,7 +389,7 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			fmt.Fprintln(stdout, "Usage:")
 			fmt.Fprintln(stdout, "  preflight apps doctor [--path <app-dir>] [--fix] [--json]   one app (default: cwd)")
 			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]        fleet drift matrix")
-			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry) to the working tree — never commits.")
+			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry); add --commit to land them on a preflight/doctor-fix branch.")
 			fmt.Fprintln(stdout, "  --report --app <app-id> posts the result to Preflight (surfaces on the fleet board).")
 			fmt.Fprintln(stdout, "  --expo-doctor also runs `npx expo-doctor` (slower; single-app only).")
 			return 0
@@ -413,8 +422,8 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 
 	if doFix {
 		pre := runDoctorChecks(abs)
-		fmt.Fprintln(stdout, "Applying safe fixes (working tree only — review + commit)...")
-		applied := 0
+		fmt.Fprintln(stdout, "Applying safe fixes...")
+		var fixed []string
 		for _, c := range doctorChecks() {
 			if c.fix == nil {
 				continue
@@ -432,11 +441,21 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 				fmt.Fprintf(stdout, "  [fix] %-14s FAILED: %v\n", c.id, ferr)
 			} else {
 				fmt.Fprintf(stdout, "  [fix] %-14s %s\n", c.id, msg)
-				applied++
+				fixed = append(fixed, c.id)
 			}
 		}
-		if applied == 0 {
+		if len(fixed) == 0 {
 			fmt.Fprintln(stdout, "  nothing to auto-fix")
+		} else if doCommit {
+			if branch, cerr := commitDoctorFixes(abs, fixed); cerr != nil {
+				fmt.Fprintf(stderr, "  commit failed: %v\n", cerr)
+			} else if branch == "" {
+				fmt.Fprintln(stdout, "  (fixes were already committed / no change)")
+			} else {
+				fmt.Fprintf(stdout, "  committed on branch %s — push + open a PR\n", branch)
+			}
+		} else {
+			fmt.Fprintln(stdout, "  (working tree — review + commit, or re-run with --commit)")
 		}
 		fmt.Fprintln(stdout)
 	}
@@ -549,6 +568,19 @@ func extractExpoSlug(appDir string) string {
 	return ""
 }
 
+func extractEASProjectID(appDir string) string {
+	for _, name := range []string{"app.config.ts", "app.config.js", "app.json"} {
+		raw, err := os.ReadFile(filepath.Join(appDir, name))
+		if err != nil {
+			continue
+		}
+		if m := expoProjectIDRe.FindSubmatch(raw); len(m) == 2 {
+			return strings.ToLower(string(m[1]))
+		}
+	}
+	return ""
+}
+
 func repoNameUnderRoot(root, appDir string) string {
 	rel, err := filepath.Rel(root, appDir)
 	if err != nil {
@@ -577,9 +609,13 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "fetch fleet failed: %v\n", err)
 		return 1
 	}
+	byProject := map[string]string{}
 	bySlug := map[string]string{}
 	byName := map[string]string{}
 	for _, r := range rows {
+		if r.EASProjectID != "" {
+			byProject[strings.ToLower(r.EASProjectID)] = r.AppID
+		}
 		if r.Slug != "" {
 			bySlug[strings.ToLower(r.Slug)] = r.AppID
 		}
@@ -597,12 +633,26 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 			rel = ad
 		}
 		appID := ""
-		if slug := extractExpoSlug(ad); slug != "" {
-			appID = bySlug[strings.ToLower(slug)]
+		if pid := extractEASProjectID(ad); pid != "" {
+			appID = byProject[pid] // canonical EAS identity — most reliable
+		}
+		if appID == "" {
+			if slug := extractExpoSlug(ad); slug != "" {
+				appID = bySlug[strings.ToLower(slug)]
+			}
 		}
 		if appID == "" {
 			repo := strings.ToLower(repoNameUnderRoot(root, ad))
 			appID = firstNonEmpty(bySlug[repo], byName[repo])
+		}
+		if appID == "" && len(byProject) > 0 {
+			// Last resort for dynamic app.config (no static slug/projectId to
+			// regex): resolve the config with expo itself. Slow, so it only
+			// runs for the handful that survive every cheap heuristic.
+			fmt.Fprintf(stdout, "  %-4s  %-42s → resolving via expo config…\n", "····", rel)
+			if pid, slug := resolveAppIdentityViaExpo(ad); pid != "" || slug != "" {
+				appID = firstNonEmpty(byProject[pid], bySlug[slug])
+			}
 		}
 		if appID == "" {
 			unmatched = append(unmatched, rel)
@@ -619,7 +669,7 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 	}
 	fmt.Fprintf(stdout, "\nreported %d apps; %d unmatched\n", reported, len(unmatched))
 	if len(unmatched) > 0 {
-		fmt.Fprintf(stdout, "unmatched (no fleet app by slug/name): %s\n",
+		fmt.Fprintf(stdout, "unmatched (no fleet app by projectId/slug/name — template, clone, or unregistered checkout): %s\n",
 			strings.Join(unmatched, ", "))
 	}
 	return 0

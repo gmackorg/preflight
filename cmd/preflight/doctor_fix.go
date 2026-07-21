@@ -264,3 +264,78 @@ func fixSentryUpload(appDir string) (string, error) {
 	}
 	return fmt.Sprintf("added SENTRY_DISABLE_AUTO_UPLOAD to %d eas.json profile(s) — review and commit", fixed), nil
 }
+
+// resolveAppIdentityViaExpo asks `expo config --json` for the RESOLVED EAS
+// project id + slug — the reliable fallback when app.config is dynamic (no
+// static literal to regex). Bounded + best-effort; both return "" on any error.
+// projectId is empty when the checkout links its EAS project server-side rather
+// than embedding extra.eas.projectId (older `eas init` checkouts).
+func resolveAppIdentityViaExpo(appDir string) (projectID, slug string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "npx", "--no-install", "expo", "config", "--json")
+	cmd.Dir = appDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", ""
+	}
+	var cfg struct {
+		Slug  string `json:"slug"`
+		Extra struct {
+			Eas struct {
+				ProjectID string `json:"projectId"`
+			} `json:"eas"`
+		} `json:"extra"`
+	}
+	if json.Unmarshal(out, &cfg) == nil {
+		return strings.ToLower(cfg.Extra.Eas.ProjectID), strings.ToLower(cfg.Slug)
+	}
+	return "", ""
+}
+
+// commitDoctorFixes lands the just-applied fixes on a `preflight/doctor-fix`
+// branch (created/reset at the current HEAD, so it never disturbs other WIP)
+// and commits ONLY the files the fixes touch. Leaves the repo on that branch
+// for the operator to push + open a PR. Returns "" when nothing changed.
+func commitDoctorFixes(appDir string, fixedChecks []string) (string, error) {
+	repoRoot := findUp(appDir, ".git")
+	if repoRoot == "" {
+		return "", fmt.Errorf("not a git repo")
+	}
+	var files []string
+	for _, c := range fixedChecks {
+		switch c {
+		case "sentry-upload":
+			files = append(files, filepath.Join(appDir, "eas.json"))
+		case "lockfile-drift":
+			if lr := findUp(appDir, "pnpm-lock.yaml"); lr != "" {
+				files = append(files, filepath.Join(lr, "pnpm-lock.yaml"))
+			}
+		}
+	}
+	var dirty []string
+	for _, f := range files {
+		rel, err := filepath.Rel(repoRoot, f)
+		if err != nil {
+			continue
+		}
+		if out, _ := gitOutput(repoRoot, "status", "--porcelain", rel); strings.TrimSpace(out) != "" {
+			dirty = append(dirty, rel)
+		}
+	}
+	if len(dirty) == 0 {
+		return "", nil
+	}
+	const branch = "preflight/doctor-fix"
+	if _, err := gitRun(repoRoot, "checkout", "-B", branch); err != nil {
+		return "", fmt.Errorf("create branch: %w", err)
+	}
+	if _, err := gitRun(repoRoot, append([]string{"add"}, dirty...)...); err != nil {
+		return "", fmt.Errorf("git add: %w", err)
+	}
+	msg := "fix: pre-build doctor auto-repair (" + strings.Join(fixedChecks, ", ") + ")"
+	if _, err := gitRun(repoRoot, "commit", "-m", msg); err != nil {
+		return "", fmt.Errorf("git commit: %w", err)
+	}
+	return branch, nil
+}
