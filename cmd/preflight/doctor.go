@@ -434,9 +434,11 @@ func doctorSweepFix(root string, commit, push bool, stdout, stderr io.Writer) in
 func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	path, root, appID := "", "", ""
 	all, asJSON, doFix, doReport, expoDoctor := false, false, false, false, false
-	doCommit, doPush := false, false
+	doCommit, doPush, resolveConfig := false, false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--resolve-config":
+			resolveConfig = true
 		case "--commit":
 			doCommit = true
 		case "--push":
@@ -492,7 +494,7 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			return doctorSweepFix(absRoot, doCommit, doPush, stdout, stderr)
 		}
 		if doReport {
-			return doctorSweepReport(client, absRoot, stdout, stderr)
+			return doctorSweepReport(client, absRoot, resolveConfig, stdout, stderr)
 		}
 		return doctorSweep(absRoot, asJSON, stdout)
 	}
@@ -650,7 +652,7 @@ func repoNameUnderRoot(root, appDir string) string {
 // doctorSweepReport runs the fast checks over every app under root and posts
 // each verdict to Preflight, mapping a checkout to a fleet app by its expo slug
 // (falling back to the repo dir name).
-func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Writer) int {
+func doctorSweepReport(client *http.Client, root string, resolveConfig bool, stdout, stderr io.Writer) int {
 	apiURL, token := preflightAPIConfig()
 	if apiURL == "" || token == "" {
 		fmt.Fprintln(stderr, "--report needs a Preflight API url/token (run `preflight config`)")
@@ -717,10 +719,12 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 				}
 			}
 		}
-		if appID == "" && len(byProject) > 0 {
-			// Last resort for dynamic app.config (no static slug/projectId to
-			// regex): resolve the config with expo itself. Slow, so it only
-			// runs for the handful that survive every cheap heuristic.
+		if appID == "" && resolveConfig && len(byProject) > 0 {
+			// Opt-in last resort for dynamic app.config (no static slug/projectId
+			// to regex): resolve the config with expo itself. Off by default —
+			// it shells out per unmatched app (slow), and the git-remote pass
+			// already catches every registered checkout. Enable with
+			// --resolve-config for a one-off deep match.
 			fmt.Fprintf(stdout, "  %-4s  %-42s → resolving via expo config…\n", "····", rel)
 			if pid, slug := resolveAppIdentityViaExpo(ad); pid != "" || slug != "" {
 				appID = firstNonEmpty(byProject[pid], bySlug[slug])
