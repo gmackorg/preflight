@@ -4,13 +4,63 @@ package main
 // implementations for the fixable checks. See docs/plans pre-build-doctor.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// checkExpoDoctor wraps `npx expo-doctor` for the official SDK-consistency
+// checks. Opt-in (via --expo-doctor) since it shells out and can be slow;
+// bounded + graceful — a timeout or a tool that isn't installed is a soft
+// signal, never a crash.
+func checkExpoDoctor(appDir string) []doctorFinding {
+	if !fileExists(filepath.Join(appDir, "package.json")) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "npx", "--no-install", "expo-doctor")
+	cmd.Dir = appDir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return []doctorFinding{{
+			Check: "expo-doctor", Severity: doctorWarn,
+			Message: "expo-doctor timed out (120s)",
+		}}
+	}
+	text := string(out)
+	// Distinguish "expo-doctor ran and found issues" from "it isn't installed".
+	if !strings.Contains(text, "check") && !strings.Contains(text, "issue") {
+		return nil // couldn't run here — skip rather than false-warn
+	}
+	if err == nil {
+		return []doctorFinding{{
+			Check: "expo-doctor", Severity: doctorOK,
+			Message: "expo-doctor: no issues detected",
+		}}
+	}
+	var failed []string
+	for _, line := range strings.Split(text, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "✖") {
+			failed = append(failed, strings.TrimSpace(strings.TrimPrefix(l, "✖")))
+		}
+	}
+	detail := strings.Join(failed, "; ")
+	if detail == "" {
+		detail = "run `npx expo-doctor` for details"
+	}
+	return []doctorFinding{{
+		Check: "expo-doctor", Severity: doctorWarn,
+		Message: "expo-doctor found issues", Detail: detail,
+	}}
+}
 
 // sentryUploadDisabled reports whether a build profile (or one it `extends`)
 // disables Sentry sourcemap auto-upload or supplies a token. Shared by the

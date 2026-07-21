@@ -348,9 +348,11 @@ func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
 // runAppsDoctor is the `preflight apps doctor` CLI handler (local, no API).
 func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	path, root, appID := "", "", ""
-	all, asJSON, doFix, doReport := false, false, false, false
+	all, asJSON, doFix, doReport, expoDoctor := false, false, false, false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--expo-doctor":
+			expoDoctor = true
 		case "--path":
 			if i+1 < len(args) {
 				path = args[i+1]
@@ -380,6 +382,7 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]        fleet drift matrix")
 			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry) to the working tree — never commits.")
 			fmt.Fprintln(stdout, "  --report --app <app-id> posts the result to Preflight (surfaces on the fleet board).")
+			fmt.Fprintln(stdout, "  --expo-doctor also runs `npx expo-doctor` (slower; single-app only).")
 			return 0
 		}
 	}
@@ -439,6 +442,9 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 	}
 
 	findings := runDoctorChecks(abs)
+	if expoDoctor {
+		findings = append(findings, checkExpoDoctor(abs)...)
+	}
 	worst := doctorWorstSeverity(findings)
 	if asJSON {
 		out, _ := json.MarshalIndent(map[string]any{
