@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -219,10 +221,142 @@ func doctorWorstSeverity(findings []doctorFinding) doctorSeverity {
 	return worst
 }
 
+func runDoctorChecks(appDir string) []doctorFinding {
+	var findings []doctorFinding
+	for _, c := range doctorChecks() {
+		findings = append(findings, c.run(appDir)...)
+	}
+	return findings
+}
+
+// findEASAppDirs walks root and returns each dir holding an eas.json (an
+// EAS-buildable app), pruning heavy/irrelevant dirs and not descending into a
+// found app.
+func findEASAppDirs(root string) []string {
+	// Apps live shallow: <root>/<repo>/eas.json or <root>/<repo>/apps/<app>/
+	// eas.json. Bound the walk so it never descends into deep source trees.
+	const maxDepth = 5
+	rootClean := filepath.Clean(root)
+	rootDepth := strings.Count(rootClean, string(os.PathSeparator))
+	var apps []string
+	skip := map[string]bool{
+		"node_modules": true, ".git": true, ".expo": true, "ios": true,
+		"android": true, ".next": true, ".vinext": true, ".turbo": true,
+		".preflight": true, ".preflight-ci": true, "Pods": true,
+	}
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if skip[d.Name()] {
+			return filepath.SkipDir
+		}
+		if strings.Count(filepath.Clean(path), string(os.PathSeparator))-rootDepth > maxDepth {
+			return filepath.SkipDir
+		}
+		if fileExists(filepath.Join(path, "eas.json")) {
+			apps = append(apps, path)
+			return filepath.SkipDir // an app won't contain another app
+		}
+		return nil
+	})
+	sort.Strings(apps)
+	return apps
+}
+
+// doctorFastChecks runs only the cheap, side-effect-free checks — used by the
+// fleet sweep so it stays fast and never shells out to pnpm across every app.
+// The full lockfile probe (which regenerates the lockfile) is deep-mode only,
+// reachable per app via `apps doctor --path`.
+func doctorFastChecks(appDir string) []doctorFinding {
+	f := checkEASJson(appDir)
+	f = append(f, checkSentryUpload(appDir)...)
+	if root := findUp(appDir, "pnpm-lock.yaml"); root != "" {
+		if out, _ := gitOutput(root, "status", "--porcelain", "pnpm-lock.yaml"); strings.TrimSpace(out) != "" {
+			f = append(f, doctorFinding{
+				Check: "lockfile-dirty", Severity: doctorWarn,
+				Message: "pnpm-lock.yaml has uncommitted changes — commit it; CI/EAS builds the committed state",
+			})
+		}
+	}
+	return f
+}
+
+func doctorLabel(s doctorSeverity) string {
+	switch s {
+	case doctorBroken:
+		return "FAIL"
+	case doctorWarn:
+		return "WARN"
+	default:
+		return "OK"
+	}
+}
+
+// doctorSweep runs the checks over every eas.json app under root and prints a
+// fleet drift matrix.
+func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
+	appDirs := findEASAppDirs(root)
+	type appReport struct {
+		Path     string          `json:"path"`
+		Health   doctorSeverity  `json:"health"`
+		Findings []doctorFinding `json:"findings"`
+	}
+	var reports []appReport
+	var broken, warn, ok int
+	for _, ad := range appDirs {
+		f := doctorFastChecks(ad)
+		h := doctorWorstSeverity(f)
+		switch h {
+		case doctorBroken:
+			broken++
+		case doctorWarn:
+			warn++
+		default:
+			ok++
+		}
+		reports = append(reports, appReport{Path: ad, Health: h, Findings: f})
+	}
+	if asJSON {
+		out, _ := json.MarshalIndent(map[string]any{
+			"root": root, "apps": reports,
+			"summary": map[string]int{"broken": broken, "warn": warn, "ok": ok, "total": len(reports)},
+		}, "", "  ")
+		fmt.Fprintln(stdout, string(out))
+		if broken > 0 {
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "Fleet build health — %s\n\n", root)
+	if len(reports) == 0 {
+		fmt.Fprintln(stdout, "  no eas.json apps found under root")
+		return 0
+	}
+	for _, r := range reports {
+		var issues []string
+		for _, f := range r.Findings {
+			if f.Severity != doctorOK {
+				issues = append(issues, f.Check)
+			}
+		}
+		rel, relErr := filepath.Rel(root, r.Path)
+		if relErr != nil || strings.HasPrefix(rel, "..") {
+			rel = r.Path
+		}
+		fmt.Fprintf(stdout, "  %-4s  %-44s %s\n", doctorLabel(r.Health), rel, strings.Join(issues, ", "))
+	}
+	fmt.Fprintf(stdout, "\n  %d broken · %d warn · %d ok  (%d apps)\n", broken, warn, ok, len(reports))
+	if broken > 0 {
+		return 1
+	}
+	return 0
+}
+
 // runAppsDoctor is the `preflight apps doctor` CLI handler (local, no API).
 func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
-	path := ""
-	asJSON := false
+	path, root := "", ""
+	all, asJSON := false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--path":
@@ -230,14 +364,35 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 				path = args[i+1]
 				i++
 			}
+		case "--root":
+			if i+1 < len(args) {
+				root = args[i+1]
+				i++
+			}
+		case "--all":
+			all = true
 		case "--json":
 			asJSON = true
 		case "--help", "-h":
-			fmt.Fprintln(stdout, "Usage: preflight apps doctor [--path <app-dir>] [--json]")
-			fmt.Fprintln(stdout, "Runs build-health checks against an Expo app checkout (default: cwd).")
+			fmt.Fprintln(stdout, "Usage:")
+			fmt.Fprintln(stdout, "  preflight apps doctor [--path <app-dir>] [--json]      one app (default: cwd)")
+			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]    every eas.json app under root")
 			return 0
 		}
 	}
+
+	if all {
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			fmt.Fprintf(stderr, "invalid --root: %v\n", err)
+			return 2
+		}
+		return doctorSweep(absRoot, asJSON, stdout)
+	}
+
 	if path == "" {
 		path, _ = os.Getwd()
 	}
@@ -246,13 +401,8 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "invalid --path: %v\n", err)
 		return 2
 	}
-
-	var findings []doctorFinding
-	for _, c := range doctorChecks() {
-		findings = append(findings, c.run(abs)...)
-	}
+	findings := runDoctorChecks(abs)
 	worst := doctorWorstSeverity(findings)
-
 	if asJSON {
 		out, _ := json.MarshalIndent(map[string]any{
 			"path": abs, "health": worst, "findings": findings,
