@@ -14,9 +14,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// The expo slug is a static string literal in app.config.* / app.json even when
+// the rest of the config is dynamic — enough to map a checkout to a fleet app.
+var expoSlugRe = regexp.MustCompile(`["']?slug["']?\s*:\s*["']([a-zA-Z0-9._-]+)["']`)
 
 type doctorSeverity string
 
@@ -388,6 +393,9 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			fmt.Fprintf(stderr, "invalid --root: %v\n", err)
 			return 2
 		}
+		if doReport {
+			return doctorSweepReport(client, absRoot, stdout, stderr)
+		}
 		return doctorSweep(absRoot, asJSON, stdout)
 	}
 
@@ -520,4 +528,93 @@ func reportBuildHealth(client *http.Client, appID string, findings []doctorFindi
 		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/build-health"
 	_, err := postPreflightJSON(client, endpoint, token, payload)
 	return err
+}
+
+func extractExpoSlug(appDir string) string {
+	for _, name := range []string{"app.config.ts", "app.config.js", "app.json"} {
+		raw, err := os.ReadFile(filepath.Join(appDir, name))
+		if err != nil {
+			continue
+		}
+		if m := expoSlugRe.FindSubmatch(raw); len(m) == 2 {
+			return string(m[1])
+		}
+	}
+	return ""
+}
+
+func repoNameUnderRoot(root, appDir string) string {
+	rel, err := filepath.Rel(root, appDir)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	return ""
+}
+
+// doctorSweepReport runs the fast checks over every app under root and posts
+// each verdict to Preflight, mapping a checkout to a fleet app by its expo slug
+// (falling back to the repo dir name).
+func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Writer) int {
+	apiURL, token := preflightAPIConfig()
+	if apiURL == "" || token == "" {
+		fmt.Fprintln(stderr, "--report needs a Preflight API url/token (run `preflight config`)")
+		return 2
+	}
+	rows, err := fetchFleetReleaseRows(client, releaseStatusCLIOptions{
+		apiURL: apiURL, token: token, platform: "ios",
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "fetch fleet failed: %v\n", err)
+		return 1
+	}
+	bySlug := map[string]string{}
+	byName := map[string]string{}
+	for _, r := range rows {
+		if r.Slug != "" {
+			bySlug[strings.ToLower(r.Slug)] = r.AppID
+		}
+		if r.Name != "" {
+			byName[strings.ToLower(r.Name)] = r.AppID
+		}
+	}
+
+	reported := 0
+	var unmatched []string
+	fmt.Fprintf(stdout, "Reporting build health — %s\n\n", root)
+	for _, ad := range findEASAppDirs(root) {
+		rel, relErr := filepath.Rel(root, ad)
+		if relErr != nil {
+			rel = ad
+		}
+		appID := ""
+		if slug := extractExpoSlug(ad); slug != "" {
+			appID = bySlug[strings.ToLower(slug)]
+		}
+		if appID == "" {
+			repo := strings.ToLower(repoNameUnderRoot(root, ad))
+			appID = firstNonEmpty(bySlug[repo], byName[repo])
+		}
+		if appID == "" {
+			unmatched = append(unmatched, rel)
+			continue
+		}
+		findings := doctorFastChecks(ad)
+		if repErr := reportBuildHealth(client, appID, findings); repErr != nil {
+			fmt.Fprintf(stderr, "  %-42s report failed: %v\n", rel, repErr)
+			continue
+		}
+		reported++
+		fmt.Fprintf(stdout, "  %-4s  %-42s → %s\n",
+			doctorLabel(doctorWorstSeverity(findings)), rel, appID)
+	}
+	fmt.Fprintf(stdout, "\nreported %d apps; %d unmatched\n", reported, len(unmatched))
+	if len(unmatched) > 0 {
+		fmt.Fprintf(stdout, "unmatched (no fleet app by slug/name): %s\n",
+			strings.Join(unmatched, ", "))
+	}
+	return 0
 }
