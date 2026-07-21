@@ -15530,6 +15530,8 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		return runAppsStatus(args[1:], stdout, stderr, client)
 	case "checklist":
 		return runAppsChecklist(args[1:], stdout, stderr, client)
+	case "doctor":
+		return runAppsDoctor(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown apps subcommand %q\n", args[0])
 		printAppsHelp(stderr)
@@ -15542,6 +15544,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps list [--platform ios|android] [--json]")
 	fmt.Fprintln(w, "  preflight apps status <app-id|slug|name> [--platform ...] [--json]")
 	fmt.Fprintln(w, "  preflight apps checklist set <app-id|slug> --key <key> --status <pending|done|blocked|not_applicable> [--note <text>] [--platform ...]")
+	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Release-program status: where each app sits on the ladder")
 	fmt.Fprintln(w, "identity -> compliance -> asc_record -> store_build -> testflight -> metadata -> submitted -> released.")
