@@ -130,3 +130,26 @@ func TestFixSentryUpload_AddsFlagFollowingExtends(t *testing.T) {
 		t.Fatalf("production should stay untouched (inherits via extends)")
 	}
 }
+
+func TestNormalizeGitRemote_BridgesSSHAndHTTPS(t *testing.T) {
+	// ssh and https clone URLs of the same repo must normalize identically,
+	// and a checkout must match its fleet record across protocols.
+	cases := []struct{ in, want string }{
+		{"git@github.com:gmackie/palantir-for-family-trips.git", "github.com/gmackie/palantir-for-family-trips"},
+		{"https://github.com/gmackie/palantir-for-family-trips.git", "github.com/gmackie/palantir-for-family-trips"},
+		{"https://github.com/gmackie/palantir-for-family-trips", "github.com/gmackie/palantir-for-family-trips"},
+		{"git@git.forgegraf.com:gmackie/habitplay.git", "git.forgegraf.com/gmackie/habitplay"},
+		{"ssh://git@git.forgegraf.com/gmackie/habitplay.git", "git.forgegraf.com/gmackie/habitplay"},
+		{"", ""},
+		{"not-a-remote", ""},
+	}
+	for _, c := range cases {
+		if got := normalizeGitRemote(c.in); got != c.want {
+			t.Errorf("normalizeGitRemote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// The whole point: differing protocols still collide on one key.
+	if normalizeGitRemote("git@github.com:gmackie/habit.git") == normalizeGitRemote("git@git.forgegraf.com:gmackie/habitplay.git") {
+		t.Error("distinct repos must not normalize equal")
+	}
+}

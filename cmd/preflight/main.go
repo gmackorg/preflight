@@ -15417,6 +15417,7 @@ type cliFleetReleaseRow struct {
 	LatestStoreBuildID    string `json:"latestStoreBuildId"`
 	LastAscSyncAt         string `json:"lastAscSyncAt"`
 	EASProjectID          string `json:"easProjectId"`
+	GithubRepoURL         string `json:"githubRepoUrl"`
 }
 
 type cliAppReleaseStatus struct {

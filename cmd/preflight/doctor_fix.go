@@ -293,6 +293,60 @@ func resolveAppIdentityViaExpo(appDir string) (projectID, slug string) {
 	return "", ""
 }
 
+// checkoutGitRemote returns the URL of a checkout's primary git remote (origin
+// if present, else the first one — some checkouts name it "forge"/"gitea").
+// "" when the dir isn't a git repo or has no remotes.
+func checkoutGitRemote(appDir string) string {
+	root := findUp(appDir, ".git")
+	if root == "" {
+		return ""
+	}
+	out, err := gitOutput(root, "remote")
+	if err != nil {
+		return ""
+	}
+	remotes := strings.Fields(out)
+	if len(remotes) == 0 {
+		return ""
+	}
+	pick := remotes[0]
+	for _, r := range remotes {
+		if r == "origin" {
+			pick = "origin"
+			break
+		}
+	}
+	url, err := gitOutput(root, "remote", "get-url", pick)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(url)
+}
+
+// normalizeGitRemote reduces a git remote URL to a comparable host/path key,
+// bridging the ssh (git@host:path.git) and https (https://host/path.git) forms
+// so a checkout and its fleet record match regardless of clone protocol.
+// "" when the input isn't a recognizable host/repo remote.
+func normalizeGitRemote(raw string) string {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:] // strip scheme
+	}
+	if i := strings.Index(s, "@"); i >= 0 {
+		s = s[i+1:] // strip user@ (ssh)
+	}
+	s = strings.Replace(s, ":", "/", 1) // scp-form host:path → host/path
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.Trim(s, "/")
+	if !strings.Contains(s, "/") {
+		return "" // need at least host/repo
+	}
+	return s
+}
+
 // commitDoctorFixes lands the just-applied fixes on a `preflight/doctor-fix`
 // branch (created/reset at the current HEAD, so it never disturbs other WIP)
 // and commits ONLY the files the fixes touch. Leaves the repo on that branch

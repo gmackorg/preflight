@@ -612,6 +612,7 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 	byProject := map[string]string{}
 	bySlug := map[string]string{}
 	byName := map[string]string{}
+	byRepo := map[string]string{}
 	for _, r := range rows {
 		if r.EASProjectID != "" {
 			byProject[strings.ToLower(r.EASProjectID)] = r.AppID
@@ -621,6 +622,9 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 		}
 		if r.Name != "" {
 			byName[strings.ToLower(r.Name)] = r.AppID
+		}
+		if norm := normalizeGitRemote(r.GithubRepoURL); norm != "" {
+			byRepo[norm] = r.AppID
 		}
 	}
 
@@ -644,6 +648,14 @@ func doctorSweepReport(client *http.Client, root string, stdout, stderr io.Write
 		if appID == "" {
 			repo := strings.ToLower(repoNameUnderRoot(root, ad))
 			appID = firstNonEmpty(bySlug[repo], byName[repo])
+		}
+		if appID == "" && len(byRepo) > 0 {
+			// Durable identity for checkouts whose slug/projectId drifted from
+			// the fleet record: the git remote. Cheap (one git call) + reliable,
+			// so try it before the expensive expo-config resolve.
+			if norm := normalizeGitRemote(checkoutGitRemote(ad)); norm != "" {
+				appID = byRepo[norm]
+			}
 		}
 		if appID == "" && len(byProject) > 0 {
 			// Last resort for dynamic app.config (no static slug/projectId to
