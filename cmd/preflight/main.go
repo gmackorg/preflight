@@ -15478,6 +15478,8 @@ type cliFleetReleaseRow struct {
 	LastAscSyncAt         string `json:"lastAscSyncAt"`
 	EASProjectID          string `json:"easProjectId"`
 	GithubRepoURL         string `json:"githubRepoUrl"`
+	Submittable           bool   `json:"submittable"`
+	SubmitBlockerReason   string `json:"submitBlockerReason"`
 }
 
 type cliAppReleaseStatus struct {
@@ -15765,8 +15767,29 @@ func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, c
 	if !ok {
 		return 2
 	}
+	// --all / --fire arrive in rest (unknown flags); split them from the app arg.
+	all, fire := false, false
+	var positional []string
+	for _, r := range options.rest {
+		switch r {
+		case "--all":
+			all = true
+		case "--fire", "--confirm":
+			fire = true
+		default:
+			positional = append(positional, r)
+		}
+	}
+	options.rest = positional
+
+	if all {
+		return runFleetSubmitForReview(options, fire, stdout, stderr, client)
+	}
+
 	if len(options.rest) != 1 {
-		fmt.Fprintln(stderr, "Usage: preflight apps submit-for-review <app-id|slug|name> [--platform ios] [--json]")
+		fmt.Fprintln(stderr, "Usage:")
+		fmt.Fprintln(stderr, "  preflight apps submit-for-review <app-id|slug|name>   submit one app")
+		fmt.Fprintln(stderr, "  preflight apps submit-for-review --all [--fire]       submit every R5-ready app (dry-run without --fire)")
 		return 2
 	}
 	appID, err := resolveReleaseAppID(client, options, options.rest[0])
@@ -15806,6 +15829,69 @@ func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, c
 	fmt.Fprintf(stdout, "  review submission: %s\n", payload.Review.ReviewSubmissionID)
 	fmt.Fprintf(stdout, "  app store version: %s\n", payload.Review.AppStoreVersionID)
 	fmt.Fprintf(stdout, "  status: %s — the reconciler advances it (in_review → approved → released)\n", payload.Submission.Status)
+	return 0
+}
+
+// runFleetSubmitForReview enumerates the fleet, shows which apps are R5-ready to
+// submit (and why the rest aren't), and — only with --fire — submits each ready
+// app through the same gated route (which re-checks readiness server-side, so a
+// stale fleet snapshot can never push a half-baked app to Apple).
+func runFleetSubmitForReview(options releaseStatusCLIOptions, fire bool, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	rows, err := fetchFleetReleaseRows(client, options)
+	if err != nil {
+		fmt.Fprintf(stderr, "fetch fleet failed: %v\n", err)
+		return 1
+	}
+	var ready, blocked []cliFleetReleaseRow
+	for _, r := range rows {
+		if r.Submittable {
+			ready = append(ready, r)
+		} else {
+			blocked = append(blocked, r)
+		}
+	}
+	fmt.Fprintf(stdout, "Fleet submit-for-review — %d ready, %d not ready\n\n", len(ready), len(blocked))
+
+	if len(ready) == 0 {
+		fmt.Fprintln(stdout, "No apps are ready to submit — all gated on earlier ladder rungs:")
+		shown := 0
+		for _, r := range blocked {
+			if r.SubmitBlockerReason == "" {
+				continue
+			}
+			fmt.Fprintf(stdout, "  %-30s %s\n", firstNonEmpty(r.Name, r.AppID), r.SubmitBlockerReason)
+			if shown++; shown >= 15 {
+				break
+			}
+		}
+		return 0
+	}
+
+	fmt.Fprintln(stdout, "Ready to submit:")
+	for _, r := range ready {
+		fmt.Fprintf(stdout, "  %s (%s)\n", firstNonEmpty(r.Name, r.AppID), r.AppID)
+	}
+	if !fire {
+		fmt.Fprintf(stdout, "\nDry-run. Re-run with --fire to submit these %d app(s) for App Review.\n", len(ready))
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "\nSubmitting %d app(s) for App Review...\n", len(ready))
+	failures := 0
+	for _, r := range ready {
+		endpoint := strings.TrimRight(options.apiURL, "/") +
+			"/api/preflight/v1/apps/" + url.PathEscape(r.AppID) + "/submit-for-review"
+		if _, err := postPreflightJSON(client, endpoint, options.token, map[string]any{"requestedBy": "cli-fleet"}); err != nil {
+			fmt.Fprintf(stderr, "  x %-30s %v\n", firstNonEmpty(r.Name, r.AppID), err)
+			failures++
+			continue
+		}
+		fmt.Fprintf(stdout, "  ok %-30s submitted for App Review\n", firstNonEmpty(r.Name, r.AppID))
+	}
+	fmt.Fprintf(stdout, "\nSubmitted %d/%d (%d failed)\n", len(ready)-failures, len(ready), failures)
+	if failures > 0 {
+		return 1
+	}
 	return 0
 }
 
