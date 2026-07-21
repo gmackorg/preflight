@@ -15594,6 +15594,8 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		return runAppsChecklist(args[1:], stdout, stderr, client)
 	case "doctor":
 		return runAppsDoctor(args[1:], stdout, stderr, client)
+	case "submit-for-review":
+		return runAppsSubmitForReview(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown apps subcommand %q\n", args[0])
 		printAppsHelp(stderr)
@@ -15607,6 +15609,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps status <app-id|slug|name> [--platform ...] [--json]")
 	fmt.Fprintln(w, "  preflight apps checklist set <app-id|slug> --key <key> --status <pending|done|blocked|not_applicable> [--note <text>] [--platform ...]")
 	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
+	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Release-program status: where each app sits on the ladder")
 	fmt.Fprintln(w, "identity -> compliance -> asc_record -> store_build -> testflight -> metadata -> submitted -> released.")
@@ -15751,6 +15754,58 @@ func runAppsStatus(args []string, stdout io.Writer, stderr io.Writer, client *ht
 	if status.Stage.Next != nil && status.Stage.Next.Owner == "user" {
 		return 2
 	}
+	return 0
+}
+
+// runAppsSubmitForReview fires the explicit R6 action: submit an app's uploaded
+// build to App Review. The server gates it on the ladder preconditions, so a
+// non-ready app comes back as a clear error rather than a botched submission.
+func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	options, ok := parseReleaseStatusCLIOptions(args, stderr)
+	if !ok {
+		return 2
+	}
+	if len(options.rest) != 1 {
+		fmt.Fprintln(stderr, "Usage: preflight apps submit-for-review <app-id|slug|name> [--platform ios] [--json]")
+		return 2
+	}
+	appID, err := resolveReleaseAppID(client, options, options.rest[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
+		return 1
+	}
+	endpoint := strings.TrimRight(options.apiURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/submit-for-review"
+	data, err := postPreflightJSON(client, endpoint, options.token, map[string]any{
+		"requestedBy": "cli",
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "submit-for-review failed: %v\n", err)
+		return 1
+	}
+	if options.jsonOut {
+		fmt.Fprintln(stdout, string(data))
+		return 0
+	}
+	var payload struct {
+		Submission struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Version string `json:"version"`
+		} `json:"submission"`
+		Review struct {
+			ReviewSubmissionID string `json:"reviewSubmissionId"`
+			AppStoreVersionID  string `json:"appStoreVersionId"`
+		} `json:"review"`
+	}
+	if err := decodeEnvelopeData(data, &payload); err != nil {
+		fmt.Fprintf(stderr, "decode response failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Submitted %s v%s for App Review\n", appID, payload.Submission.Version)
+	fmt.Fprintf(stdout, "  review submission: %s\n", payload.Review.ReviewSubmissionID)
+	fmt.Fprintf(stdout, "  app store version: %s\n", payload.Review.AppStoreVersionID)
+	fmt.Fprintf(stdout, "  status: %s — the reconciler advances it (in_review → approved → released)\n", payload.Submission.Status)
 	return 0
 }
 
