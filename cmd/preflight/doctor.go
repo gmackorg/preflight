@@ -35,13 +35,19 @@ type doctorFinding struct {
 type doctorCheck struct {
 	id  string
 	run func(appDir string) []doctorFinding
+	// fix, when non-nil, applies a safe repair to the working tree (never
+	// commits) and returns a human summary. Invoked by `--fix` only for checks
+	// whose finding is marked Fixable.
+	fix func(appDir string) (string, error)
 }
 
 func doctorChecks() []doctorCheck {
 	return []doctorCheck{
 		{id: "eas-json", run: checkEASJson},
-		{id: "sentry-upload", run: checkSentryUpload},
-		{id: "lockfile-drift", run: checkLockfileDrift},
+		{id: "sentry-upload", run: checkSentryUpload, fix: fixSentryUpload},
+		{id: "react-pin", run: checkReactPin},
+		{id: "dirty-tree", run: checkDirtyTree},
+		{id: "lockfile-drift", run: checkLockfileDrift, fix: fixLockfileDrift},
 	}
 }
 
@@ -122,37 +128,16 @@ func checkSentryUpload(appDir string) []doctorFinding {
 		}}
 	}
 	build, _ := doc["build"].(map[string]any)
-	// A profile is safe if it (or a profile it `extends`) disables auto-upload
-	// or supplies a token. Follow the extends chain so inherited config counts.
-	disablesUpload := func(name string) bool {
-		seen := map[string]bool{}
-		for name != "" && !seen[name] {
-			seen[name] = true
-			prof, _ := build[name].(map[string]any)
-			if prof == nil {
-				break
-			}
-			if env, _ := prof["env"].(map[string]any); env != nil {
-				if v, ok := env["SENTRY_DISABLE_AUTO_UPLOAD"]; ok && fmt.Sprint(v) == "true" {
-					return true
-				}
-				if _, ok := env["SENTRY_AUTH_TOKEN"]; ok {
-					return true
-				}
-			}
-			name, _ = prof["extends"].(string)
-		}
-		return false
-	}
 	var offenders []string
 	for name := range build {
 		if name == "base" {
 			continue // conventional shared base — not built directly
 		}
-		if !disablesUpload(name) {
+		if !sentryUploadDisabled(build, name) {
 			offenders = append(offenders, name)
 		}
 	}
+	sort.Strings(offenders)
 	if len(offenders) == 0 {
 		return []doctorFinding{{
 			Check: "sentry-upload", Severity: doctorOK,
@@ -356,7 +341,7 @@ func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
 // runAppsDoctor is the `preflight apps doctor` CLI handler (local, no API).
 func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 	path, root := "", ""
-	all, asJSON := false, false
+	all, asJSON, doFix := false, false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--path":
@@ -373,10 +358,13 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 			all = true
 		case "--json":
 			asJSON = true
+		case "--fix":
+			doFix = true
 		case "--help", "-h":
 			fmt.Fprintln(stdout, "Usage:")
-			fmt.Fprintln(stdout, "  preflight apps doctor [--path <app-dir>] [--json]      one app (default: cwd)")
-			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]    every eas.json app under root")
+			fmt.Fprintln(stdout, "  preflight apps doctor [--path <app-dir>] [--fix] [--json]   one app (default: cwd)")
+			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]        fleet drift matrix")
+			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry) to the working tree — never commits.")
 			return 0
 		}
 	}
@@ -401,6 +389,37 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "invalid --path: %v\n", err)
 		return 2
 	}
+
+	if doFix {
+		pre := runDoctorChecks(abs)
+		fmt.Fprintln(stdout, "Applying safe fixes (working tree only — review + commit)...")
+		applied := 0
+		for _, c := range doctorChecks() {
+			if c.fix == nil {
+				continue
+			}
+			fixable := false
+			for _, f := range pre {
+				if f.Check == c.id && f.Fixable {
+					fixable = true
+				}
+			}
+			if !fixable {
+				continue
+			}
+			if msg, ferr := c.fix(abs); ferr != nil {
+				fmt.Fprintf(stdout, "  [fix] %-14s FAILED: %v\n", c.id, ferr)
+			} else {
+				fmt.Fprintf(stdout, "  [fix] %-14s %s\n", c.id, msg)
+				applied++
+			}
+		}
+		if applied == 0 {
+			fmt.Fprintln(stdout, "  nothing to auto-fix")
+		}
+		fmt.Fprintln(stdout)
+	}
+
 	findings := runDoctorChecks(abs)
 	worst := doctorWorstSeverity(findings)
 	if asJSON {
