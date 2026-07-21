@@ -15531,7 +15531,7 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 	case "checklist":
 		return runAppsChecklist(args[1:], stdout, stderr, client)
 	case "doctor":
-		return runAppsDoctor(args[1:], stdout, stderr)
+		return runAppsDoctor(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown apps subcommand %q\n", args[0])
 		printAppsHelp(stderr)

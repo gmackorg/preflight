@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -339,9 +341,9 @@ func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
 }
 
 // runAppsDoctor is the `preflight apps doctor` CLI handler (local, no API).
-func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
-	path, root := "", ""
-	all, asJSON, doFix := false, false, false
+func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	path, root, appID := "", "", ""
+	all, asJSON, doFix, doReport := false, false, false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--path":
@@ -354,17 +356,25 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 				root = args[i+1]
 				i++
 			}
+		case "--app":
+			if i+1 < len(args) {
+				appID = args[i+1]
+				i++
+			}
 		case "--all":
 			all = true
 		case "--json":
 			asJSON = true
 		case "--fix":
 			doFix = true
+		case "--report":
+			doReport = true
 		case "--help", "-h":
 			fmt.Fprintln(stdout, "Usage:")
 			fmt.Fprintln(stdout, "  preflight apps doctor [--path <app-dir>] [--fix] [--json]   one app (default: cwd)")
 			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]        fleet drift matrix")
 			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry) to the working tree — never commits.")
+			fmt.Fprintln(stdout, "  --report --app <app-id> posts the result to Preflight (surfaces on the fleet board).")
 			return 0
 		}
 	}
@@ -447,8 +457,67 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer) int {
 			}
 		}
 	}
+
+	if doReport {
+		if appID == "" {
+			fmt.Fprintln(stderr, "--report requires --app <app-id>")
+		} else if err := reportBuildHealth(client, appID, findings); err != nil {
+			fmt.Fprintf(stderr, "report failed: %v\n", err)
+		} else {
+			fmt.Fprintf(stdout, "\nreported build health for %s (%s)\n", appID, worst)
+		}
+	}
+
 	if worst == doctorBroken {
 		return 1
 	}
 	return 0
+}
+
+// preflightAPIConfig resolves the Preflight API url + token from env or the CLI
+// config file (~/.config/preflight/config.json).
+func preflightAPIConfig() (apiURL, token string) {
+	apiURL = strings.TrimSpace(os.Getenv("PREFLIGHT_API_URL"))
+	token = strings.TrimSpace(os.Getenv("PREFLIGHT_TOKEN"))
+	if apiURL != "" && token != "" {
+		return apiURL, token
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return apiURL, token
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".config", "preflight", "config.json"))
+	if err != nil {
+		return apiURL, token
+	}
+	var cfg struct {
+		APIURL string `json:"apiUrl"`
+		Token  string `json:"token"`
+	}
+	if json.Unmarshal(raw, &cfg) == nil {
+		if apiURL == "" {
+			apiURL = strings.TrimSpace(cfg.APIURL)
+		}
+		if token == "" {
+			token = strings.TrimSpace(cfg.Token)
+		}
+	}
+	return apiURL, token
+}
+
+// reportBuildHealth POSTs the doctor verdict to the app's build-health route so
+// it surfaces on the release ladder + fleet board.
+func reportBuildHealth(client *http.Client, appID string, findings []doctorFinding) error {
+	apiURL, token := preflightAPIConfig()
+	if apiURL == "" || token == "" {
+		return fmt.Errorf("no Preflight API url/token (set PREFLIGHT_API_URL/PREFLIGHT_TOKEN or run `preflight config`)")
+	}
+	payload := map[string]any{
+		"status":   string(doctorWorstSeverity(findings)),
+		"findings": findings,
+	}
+	endpoint := strings.TrimRight(apiURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/build-health"
+	_, err := postPreflightJSON(client, endpoint, token, payload)
+	return err
 }
