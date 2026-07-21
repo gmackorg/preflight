@@ -153,3 +153,16 @@ func TestNormalizeGitRemote_BridgesSSHAndHTTPS(t *testing.T) {
 		t.Error("distinct repos must not normalize equal")
 	}
 }
+
+func TestPRCompareURL_GithubAndForgejo(t *testing.T) {
+	cases := []struct{ url, want string }{
+		{"git@github.com:gmackie/habit.git", "https://github.com/gmackie/habit/compare/preflight/doctor-fix?expand=1"},
+		{"https://github.com/gmackie/habit.git", "https://github.com/gmackie/habit/compare/preflight/doctor-fix?expand=1"},
+		{"git@git.forgegraf.com:gmackie/habitplay.git", "https://git.forgegraf.com/gmackie/habitplay/compare/main...preflight/doctor-fix"},
+	}
+	for _, c := range cases {
+		if got := prCompareURL(c.url, "preflight/doctor-fix"); got != c.want {
+			t.Errorf("prCompareURL(%q) = %q, want %q", c.url, got, c.want)
+		}
+	}
+}

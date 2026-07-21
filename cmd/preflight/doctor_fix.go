@@ -341,6 +341,53 @@ func normalizeGitRemote(raw string) string {
 	return s
 }
 
+// pushDoctorBranch pushes the doctor-fix branch to the checkout's primary remote
+// (origin if present, else the first) and returns a URL for opening a PR. The
+// branch is doctor-exclusive, so a --force keeps re-runs idempotent.
+func pushDoctorBranch(appDir, branch string) (string, error) {
+	root := findUp(appDir, ".git")
+	if root == "" {
+		return "", fmt.Errorf("not a git repo")
+	}
+	out, err := gitOutput(root, "remote")
+	if err != nil {
+		return "", err
+	}
+	remotes := strings.Fields(out)
+	if len(remotes) == 0 {
+		return "", fmt.Errorf("no git remote to push to")
+	}
+	remote := remotes[0]
+	for _, r := range remotes {
+		if r == "origin" {
+			remote = "origin"
+			break
+		}
+	}
+	if _, err := gitRun(root, "push", "--force", remote, branch); err != nil {
+		return "", err
+	}
+	url, _ := gitOutput(root, "remote", "get-url", remote)
+	return prCompareURL(strings.TrimSpace(url), branch), nil
+}
+
+// prCompareURL turns a git remote URL + branch into the forge's new-PR page.
+// GitHub and Forgejo/Gitea both serve a /compare route (with different head
+// syntax). "" inputs fall back to a plain hint.
+func prCompareURL(remoteURL, branch string) string {
+	np := normalizeGitRemote(remoteURL) // host/owner/repo
+	i := strings.Index(np, "/")
+	if np == "" || i < 0 {
+		return "(pushed — open a PR in your forge)"
+	}
+	host, path := np[:i], np[i+1:]
+	if host == "github.com" {
+		return fmt.Sprintf("https://%s/%s/compare/%s?expand=1", host, path, branch)
+	}
+	// Forgejo/Gitea (git.forgegraf.com et al.): base...head.
+	return fmt.Sprintf("https://%s/%s/compare/main...%s", host, path, branch)
+}
+
 // commitDoctorFixes lands the just-applied fixes on a `preflight/doctor-fix`
 // branch (created/reset at the current HEAD, so it never disturbs other WIP)
 // and commits ONLY the files the fixes touch. Leaves the repo on that branch

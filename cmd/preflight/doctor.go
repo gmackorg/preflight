@@ -6,6 +6,7 @@ package main
 // Worker with no filesystem, so checks cannot live there.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -352,14 +353,95 @@ func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
 }
 
 // runAppsDoctor is the `preflight apps doctor` CLI handler (local, no API).
+// applyDoctorFixesAt runs the fixable checks over one app dir and applies each
+// repair, writing a line per fix. Returns the check ids fixed. With commit, lands
+// them on a preflight/doctor-fix branch; with push, also pushes that branch and
+// prints a URL for opening the PR.
+func applyDoctorFixesAt(abs string, commit, push bool, stdout, stderr io.Writer) []string {
+	pre := runDoctorChecks(abs)
+	var fixed []string
+	for _, c := range doctorChecks() {
+		if c.fix == nil {
+			continue
+		}
+		fixable := false
+		for _, f := range pre {
+			if f.Check == c.id && f.Fixable {
+				fixable = true
+			}
+		}
+		if !fixable {
+			continue
+		}
+		if msg, ferr := c.fix(abs); ferr != nil {
+			fmt.Fprintf(stdout, "  [fix] %-14s FAILED: %v\n", c.id, ferr)
+		} else {
+			fmt.Fprintf(stdout, "  [fix] %-14s %s\n", c.id, msg)
+			fixed = append(fixed, c.id)
+		}
+	}
+	if len(fixed) == 0 {
+		return nil
+	}
+	if !commit {
+		fmt.Fprintln(stdout, "  (working tree — review + commit, or re-run with --commit)")
+		return fixed
+	}
+	branch, cerr := commitDoctorFixes(abs, fixed)
+	if cerr != nil {
+		fmt.Fprintf(stderr, "  commit failed: %v\n", cerr)
+		return fixed
+	}
+	if branch == "" {
+		fmt.Fprintln(stdout, "  (fixes were already committed / no change)")
+		return fixed
+	}
+	if !push {
+		fmt.Fprintf(stdout, "  committed on branch %s — push + open a PR\n", branch)
+		return fixed
+	}
+	if prURL, perr := pushDoctorBranch(abs, branch); perr != nil {
+		fmt.Fprintf(stderr, "  push failed: %v\n", perr)
+	} else {
+		fmt.Fprintf(stdout, "  pushed %s → open a PR: %s\n", branch, prURL)
+	}
+	return fixed
+}
+
+// doctorSweepFix applies safe fixes across every app under root. Each app's
+// output is buffered and printed only when something was actually fixed, so a
+// mostly-clean fleet stays quiet; a final line tallies the run.
+func doctorSweepFix(root string, commit, push bool, stdout, stderr io.Writer) int {
+	fmt.Fprintf(stdout, "Applying safe fixes across the fleet — %s\n\n", root)
+	fixedApps, scanned := 0, 0
+	for _, ad := range findEASAppDirs(root) {
+		scanned++
+		rel, err := filepath.Rel(root, ad)
+		if err != nil {
+			rel = ad
+		}
+		var buf bytes.Buffer
+		if len(applyDoctorFixesAt(ad, commit, push, &buf, stderr)) == 0 {
+			continue
+		}
+		fixedApps++
+		fmt.Fprintf(stdout, "%s\n%s\n", rel, strings.TrimRight(buf.String(), "\n"))
+	}
+	fmt.Fprintf(stdout, "\nfixed %d app(s) of %d scanned\n", fixedApps, scanned)
+	return 0
+}
+
 func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	path, root, appID := "", "", ""
 	all, asJSON, doFix, doReport, expoDoctor := false, false, false, false, false
-	doCommit := false
+	doCommit, doPush := false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--commit":
 			doCommit = true
+		case "--push":
+			doCommit = true // pushing implies committing
+			doPush = true
 		case "--expo-doctor":
 			expoDoctor = true
 		case "--path":
@@ -389,7 +471,8 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			fmt.Fprintln(stdout, "Usage:")
 			fmt.Fprintln(stdout, "  preflight apps doctor [--path <app-dir>] [--fix] [--json]   one app (default: cwd)")
 			fmt.Fprintln(stdout, "  preflight apps doctor --all [--root <dir>] [--json]        fleet drift matrix")
-			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry); add --commit to land them on a preflight/doctor-fix branch.")
+			fmt.Fprintln(stdout, "  preflight apps doctor --all --fix --push [--root <dir>]    fix every drifted app + open a PR each")
+			fmt.Fprintln(stdout, "  --fix applies safe repairs (lockfile, sentry); --commit lands them on a preflight/doctor-fix branch; --push pushes it + prints the PR URL.")
 			fmt.Fprintln(stdout, "  --report --app <app-id> posts the result to Preflight (surfaces on the fleet board).")
 			fmt.Fprintln(stdout, "  --expo-doctor also runs `npx expo-doctor` (slower; single-app only).")
 			return 0
@@ -404,6 +487,9 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 		if err != nil {
 			fmt.Fprintf(stderr, "invalid --root: %v\n", err)
 			return 2
+		}
+		if doFix {
+			return doctorSweepFix(absRoot, doCommit, doPush, stdout, stderr)
 		}
 		if doReport {
 			return doctorSweepReport(client, absRoot, stdout, stderr)
@@ -421,41 +507,9 @@ func runAppsDoctor(args []string, stdout io.Writer, stderr io.Writer, client *ht
 	}
 
 	if doFix {
-		pre := runDoctorChecks(abs)
 		fmt.Fprintln(stdout, "Applying safe fixes...")
-		var fixed []string
-		for _, c := range doctorChecks() {
-			if c.fix == nil {
-				continue
-			}
-			fixable := false
-			for _, f := range pre {
-				if f.Check == c.id && f.Fixable {
-					fixable = true
-				}
-			}
-			if !fixable {
-				continue
-			}
-			if msg, ferr := c.fix(abs); ferr != nil {
-				fmt.Fprintf(stdout, "  [fix] %-14s FAILED: %v\n", c.id, ferr)
-			} else {
-				fmt.Fprintf(stdout, "  [fix] %-14s %s\n", c.id, msg)
-				fixed = append(fixed, c.id)
-			}
-		}
-		if len(fixed) == 0 {
+		if len(applyDoctorFixesAt(abs, doCommit, doPush, stdout, stderr)) == 0 {
 			fmt.Fprintln(stdout, "  nothing to auto-fix")
-		} else if doCommit {
-			if branch, cerr := commitDoctorFixes(abs, fixed); cerr != nil {
-				fmt.Fprintf(stderr, "  commit failed: %v\n", cerr)
-			} else if branch == "" {
-				fmt.Fprintln(stdout, "  (fixes were already committed / no change)")
-			} else {
-				fmt.Fprintf(stdout, "  committed on branch %s — push + open a PR\n", branch)
-			}
-		} else {
-			fmt.Fprintln(stdout, "  (working tree — review + commit, or re-run with --commit)")
 		}
 		fmt.Fprintln(stdout)
 	}
