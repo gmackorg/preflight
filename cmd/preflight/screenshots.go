@@ -44,6 +44,7 @@ type screenshotPlanInput struct {
 	AuthWorkspaceID string
 	XcrunPath       string // default "xcrun"
 	MaestroPath     string // default "maestro"
+	SkipBuild       bool   // reuse an existing .app (re-capture without rebuilding)
 }
 
 // buildScreenshotCapturePlan encodes the proven recipe as an ordered command
@@ -71,8 +72,9 @@ func buildScreenshotCapturePlan(in screenshotPlanInput) ([]screenshotStep, error
 		buildEnv["EXPO_PUBLIC_WORKSPACE_ID"] = in.AuthWorkspaceID
 	}
 
-	steps := []screenshotStep{
-		{
+	var steps []screenshotStep
+	if !in.SkipBuild {
+		steps = append(steps, screenshotStep{
 			label: "build",
 			name:  xcrun,
 			args: []string{
@@ -87,13 +89,13 @@ func buildScreenshotCapturePlan(in screenshotPlanInput) ([]screenshotStep, error
 				"CODE_SIGNING_ALLOWED=NO",
 			},
 			env: buildEnv,
-		},
-		{
-			label: "boot",
-			name:  xcrun,
-			args:  []string{"simctl", "bootstatus", in.SimUDID, "-b"},
-		},
+		})
 	}
+	steps = append(steps, screenshotStep{
+		label: "boot",
+		name:  xcrun,
+		args:  []string{"simctl", "bootstatus", in.SimUDID, "-b"},
+	})
 
 	if in.StatusBarTime != "" {
 		steps = append(steps, screenshotStep{
@@ -303,6 +305,12 @@ func runAppsScreenshots(args []string, stdout io.Writer, stderr io.Writer, clien
 			if !set(&in.AuthWorkspaceID, args, &i) {
 				return 2
 			}
+		case "--maestro-path":
+			if !set(&in.MaestroPath, args, &i) {
+				return 2
+			}
+		case "--skip-build":
+			in.SkipBuild = true
 		case "--dry-run":
 			dryRun = true
 		case "--upload":
