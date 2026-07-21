@@ -92,6 +92,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runRunner(args[1:], stdout, stderr, client)
 	case "apps":
 		return runApps(args[1:], stdout, stderr, client)
+	case "fleet":
+		return runFleet(args[1:], stdout, stderr, client)
 	case "status":
 		return runStatusAlias(args[1:], stdout, stderr, client)
 	case "testflight":
@@ -126,7 +128,8 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  version       Print CLI and contract version")
 	fmt.Fprintln(w, "  login         Authenticate with the Preflight API")
-	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist)")
+	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist/doctor/screenshots/submit-for-review)")
+	fmt.Fprintln(w, "  fleet         Fleet cockpit: `fleet next` = per-app next action + owner")
 	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
 	fmt.Fprintln(w, "  testflight    Manage TestFlight tester enrollment")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
