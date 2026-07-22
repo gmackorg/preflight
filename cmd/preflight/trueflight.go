@@ -314,13 +314,36 @@ func accountForRole(accounts []reviewAccount, role string) (reviewAccount, bool)
 	return reviewAccount{}, false
 }
 
-// runAppsReview dispatches the review-workflow commands. Slice 1 ships `compile`:
-// annotated flow → executable Maestro flow + Markdown reviewer guide (no device
-// run yet — that's slice 2).
-func runAppsReview(args []string, stdout io.Writer, stderr io.Writer, _ *http.Client) int {
+// renderReviewerNotesText builds the concise plain-text note for ASC's "App
+// Review Information → Notes" (≈4000 char cap) from the workflows — the demo
+// account goes in the structured fields, this is the how-to-test summary.
+func renderReviewerNotesText(workflows []reviewWorkflow) string {
+	var b strings.Builder
+	b.WriteString("Thanks for reviewing. Sign in with the demo account in App Review Information. Key flows to try:\n\n")
+	for i, wf := range workflows {
+		fmt.Fprintf(&b, "%d. %s", i+1, firstNonEmptyStr(wf.Title, wf.ID))
+		if wf.Account != "" {
+			fmt.Fprintf(&b, " (as the %s account)", wf.Account)
+		}
+		b.WriteByte('\n')
+		for _, v := range wf.Verify {
+			fmt.Fprintf(&b, "   - Expect: %s\n", v)
+		}
+	}
+	s := b.String()
+	if len(s) > 3900 {
+		s = s[:3900] + "…"
+	}
+	return s
+}
+
+// runAppsReview dispatches the review-workflow commands.
+func runAppsReview(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, "Usage: preflight apps review compile <flow.review.yaml> [--out-dir <dir>]")
-		fmt.Fprintln(stdout, "  compile   annotated Maestro flow → executable flow + REVIEW.md (no device run)")
+		fmt.Fprintln(stdout, "Usage:")
+		fmt.Fprintln(stdout, "  preflight apps review compile <flow.review.yaml> [--out-dir <dir>]   → executable flow + REVIEW.md")
+		fmt.Fprintln(stdout, "  preflight apps review run --flow <f> --scheme <s> --sim <udid>       → run + evidence bundle + guide")
+		fmt.Fprintln(stdout, "  preflight apps review notes --app <id> --review-dir <dir>            → push notes+demo account to ASC (R6)")
 		if len(args) == 0 {
 			return 2
 		}
@@ -331,10 +354,120 @@ func runAppsReview(args []string, stdout io.Writer, stderr io.Writer, _ *http.Cl
 		return runReviewCompile(args[1:], stdout, stderr)
 	case "run":
 		return runReviewRun(args[1:], stdout, stderr)
+	case "notes":
+		return runReviewNotes(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown review subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+// runReviewNotes reads an app's review flows, builds the reviewer note + demo
+// account, and pushes them into ASC "App Review Information" via the gated
+// route (which also ticks the R6 reviewer_notes gate).
+func runReviewNotes(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	config, _ := loadPreflightCLIConfig()
+	apiURL := firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL, defaultPreflightAPIURL)
+	token := firstNonEmpty(os.Getenv("PREFLIGHT_TOKEN"), config.Token)
+	appID, reviewDir, demoRole, contactEmail := "", "", "", ""
+	dryRun := false
+	secrets := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		next := func(dst *string) {
+			if i+1 < len(args) {
+				*dst = args[i+1]
+				i++
+			}
+		}
+		switch args[i] {
+		case "--app":
+			next(&appID)
+		case "--review-dir":
+			next(&reviewDir)
+		case "--demo-role":
+			next(&demoRole)
+		case "--contact-email":
+			next(&contactEmail)
+		case "--secret":
+			var kv string
+			next(&kv)
+			if eq := strings.IndexByte(kv, '='); eq > 0 {
+				secrets[kv[:eq]] = kv[eq+1:]
+			}
+		case "--dry-run":
+			dryRun = true
+		}
+	}
+	if appID == "" || reviewDir == "" {
+		fmt.Fprintln(stderr, "Usage: preflight apps review notes --app <id> --review-dir <dir> [--demo-role <role>] [--secret ref=pw] [--dry-run]")
+		return 2
+	}
+
+	entries, err := os.ReadDir(reviewDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "read review dir: %v\n", err)
+		return 1
+	}
+	var workflows []reviewWorkflow
+	var accounts []reviewAccount
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".review.yaml") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(reviewDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		wf, err := parseReviewFlow(string(content))
+		if err != nil {
+			fmt.Fprintf(stderr, "skip %s: %v\n", e.Name(), err)
+			continue
+		}
+		workflows = append(workflows, wf)
+		accounts = append(accounts, wf.Accounts...)
+	}
+	if len(workflows) == 0 {
+		fmt.Fprintf(stderr, "no *.review.yaml flows in %s\n", reviewDir)
+		return 1
+	}
+
+	// Pick the demo account: the named role, else the first account found.
+	var demo reviewAccount
+	if demoRole != "" {
+		if a, ok := accountForRole(accounts, demoRole); ok {
+			demo = a
+		}
+	} else if len(accounts) > 0 {
+		demo = accounts[0]
+	}
+	notes := renderReviewerNotesText(workflows)
+
+	if dryRun {
+		fmt.Fprintf(stdout, "Reviewer notes for %s (%d workflows):\n\n%s\n", appID, len(workflows), notes)
+		if demo.Email != "" {
+			fmt.Fprintf(stdout, "Demo account: %s (%s)\n", demo.Email, demo.Role)
+		}
+		return 0
+	}
+
+	payload := map[string]any{"notes": notes}
+	if demo.Email != "" {
+		payload["demoAccountName"] = demo.Email
+		if pw := secrets[demo.SecretRef]; pw != "" {
+			payload["demoAccountPassword"] = pw
+		}
+	}
+	if contactEmail != "" {
+		payload["contactEmail"] = contactEmail
+	}
+	endpoint := strings.TrimRight(apiURL, "/") +
+		"/api/preflight/v1/apps/" + appID + "/review-notes"
+	if _, err := postPreflightJSON(client, endpoint, token, payload); err != nil {
+		fmt.Fprintf(stderr, "set review notes failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Set ASC review notes for %s (%d workflows) + ticked reviewer_notes.\n", appID, len(workflows))
+	return 0
 }
 
 // runReviewRun compiles a review flow, runs it on a simulator (reusing the

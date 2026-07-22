@@ -123,3 +123,20 @@ func TestReviewAccounts_ParseAndTable(t *testing.T) {
 		t.Errorf("expected resolved password, got:\n%s", resolved)
 	}
 }
+
+func TestRenderReviewerNotesText(t *testing.T) {
+	wf, _ := parseReviewFlow(sampleReviewFlow)
+	notes := renderReviewerNotesText([]reviewWorkflow{wf})
+	for _, want := range []string{
+		"demo account",
+		"1. Sign in and start a fast (as the premium account)",
+		"Expect: The active-fast timer is counting down.",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("notes missing %q in:\n%s", want, notes)
+		}
+	}
+	if len(notes) > 4000 {
+		t.Errorf("notes %d chars exceeds ASC ~4000 cap", len(notes))
+	}
+}
