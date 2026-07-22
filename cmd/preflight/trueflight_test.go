@@ -1,0 +1,95 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+const sampleReviewFlow = `# tf:workflow id=sign-in title="Sign in and start a fast" account=premium
+# tf:verify "The active-fast timer is counting down."
+appId: com.gmacko.crucible
+---
+# tf:step "Launch the app — you land on the welcome screen." capture=screenshot
+- launchApp
+# tf:step "Tap Sign In, enter the demo account." capture=screenshot
+- tapOn: "Sign In"
+- inputText: "${TF_ACCOUNT_EMAIL}"
+# tf:step "Grant HealthKit, then start a 16:8 fast." capture=video
+- tapOn: "Allow"
+- tapOn: "Start Fast"
+`
+
+func TestParseReviewFlow(t *testing.T) {
+	wf, err := parseReviewFlow(sampleReviewFlow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wf.ID != "sign-in" || wf.Title != "Sign in and start a fast" || wf.Account != "premium" {
+		t.Errorf("header parsed wrong: %+v", wf)
+	}
+	if wf.AppID != "com.gmacko.crucible" {
+		t.Errorf("appId = %q", wf.AppID)
+	}
+	if len(wf.Steps) != 3 {
+		t.Fatalf("got %d steps, want 3", len(wf.Steps))
+	}
+	if wf.Steps[0].Capture != captureScreenshot || len(wf.Steps[0].Maestro) != 1 {
+		t.Errorf("step 0 = %+v", wf.Steps[0])
+	}
+	if wf.Steps[2].Capture != captureVideo || len(wf.Steps[2].Maestro) != 2 {
+		t.Errorf("step 2 = %+v", wf.Steps[2])
+	}
+	if len(wf.Verify) != 1 || !strings.Contains(wf.Verify[0], "timer") {
+		t.Errorf("verify = %v", wf.Verify)
+	}
+}
+
+func TestCompileExecutableFlow_InjectsCaptures(t *testing.T) {
+	wf, _ := parseReviewFlow(sampleReviewFlow)
+	out := compileExecutableFlow(wf)
+
+	// appId header preserved.
+	if !strings.Contains(out, "appId: com.gmacko.crucible") {
+		t.Error("missing appId header")
+	}
+	// screenshot injected right after the launch step.
+	if !strings.Contains(out, "- launchApp\n- takeScreenshot: sign-in-01") {
+		t.Errorf("screenshot not injected after launch:\n%s", out)
+	}
+	// video wrapped with start/stop recording around the last step.
+	if !strings.Contains(out, "- startRecording: sign-in-03\n- tapOn: \"Allow\"") {
+		t.Errorf("startRecording not before video step:\n%s", out)
+	}
+	if !strings.Contains(out, "- tapOn: \"Start Fast\"\n- stopRecording") {
+		t.Errorf("stopRecording not after video step:\n%s", out)
+	}
+	// The original commands survive.
+	if !strings.Contains(out, `- inputText: "${TF_ACCOUNT_EMAIL}"`) {
+		t.Error("original command dropped")
+	}
+}
+
+func TestRenderReviewMarkdown(t *testing.T) {
+	wf, _ := parseReviewFlow(sampleReviewFlow)
+	md := renderReviewMarkdown(wf)
+
+	for _, want := range []string{
+		"## Sign in and start a fast",
+		"**premium**",
+		"1. Launch the app",
+		"![sign-in-01](evidence/sign-in-01.png)",
+		"[▶ recording](evidence/sign-in-03.mp4)",
+		"**Expected result:**",
+		"- The active-fast timer is counting down.",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q in:\n%s", want, md)
+		}
+	}
+}
+
+func TestParseReviewFlow_RejectsMissingHeader(t *testing.T) {
+	if _, err := parseReviewFlow("appId: x\n---\n- launchApp\n"); err == nil {
+		t.Error("expected error for a flow with no tf:workflow annotation")
+	}
+}

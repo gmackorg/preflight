@@ -15603,6 +15603,8 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		return runAppsSubmitForReview(args[1:], stdout, stderr, client)
 	case "screenshots":
 		return runAppsScreenshots(args[1:], stdout, stderr, client)
+	case "review":
+		return runAppsReview(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown apps subcommand %q\n", args[0])
 		printAppsHelp(stderr)
@@ -15618,6 +15620,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
 	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")
 	fmt.Fprintln(w, "  preflight apps screenshots --scheme <s> --sim <udid> [--flow f.yaml] [--app <id> --upload]  capture App Store screenshots (R5)")
+	fmt.Fprintln(w, "  preflight apps review compile <flow.review.yaml>     compile a TrueFlight review workflow → Maestro flow + reviewer guide")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Release-program status: where each app sits on the ladder")
 	fmt.Fprintln(w, "identity -> compliance -> asc_record -> store_build -> testflight -> metadata -> submitted -> released.")
