@@ -6,6 +6,8 @@ import (
 )
 
 const sampleReviewFlow = `# tf:workflow id=sign-in title="Sign in and start a fast" account=premium
+# tf:account role=free email="reviewer+free@crucible.app" secretRef=crucible/free_pw permissions=basic notes="Free tier"
+# tf:account role=premium email="reviewer+premium@crucible.app" secretRef=crucible/prem_pw permissions=basic,health_read notes="Premium tier"
 # tf:verify "The active-fast timer is counting down."
 appId: com.gmacko.crucible
 ---
@@ -91,5 +93,33 @@ func TestRenderReviewMarkdown(t *testing.T) {
 func TestParseReviewFlow_RejectsMissingHeader(t *testing.T) {
 	if _, err := parseReviewFlow("appId: x\n---\n- launchApp\n"); err == nil {
 		t.Error("expected error for a flow with no tf:workflow annotation")
+	}
+}
+
+func TestReviewAccounts_ParseAndTable(t *testing.T) {
+	wf, err := parseReviewFlow(sampleReviewFlow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wf.Accounts) != 2 {
+		t.Fatalf("got %d accounts, want 2", len(wf.Accounts))
+	}
+	prem, ok := accountForRole(wf.Accounts, "premium")
+	if !ok || prem.Email != "reviewer+premium@crucible.app" {
+		t.Errorf("premium account = %+v", prem)
+	}
+	if len(prem.Permissions) != 2 || prem.Permissions[1] != "health_read" {
+		t.Errorf("premium permissions = %v", prem.Permissions)
+	}
+
+	// Without resolved creds the secretRef shows (no password leak from compile).
+	table := renderAccountsTable(wf.Accounts, nil)
+	if !strings.Contains(table, "crucible/prem_pw") {
+		t.Errorf("expected secretRef placeholder in:\n%s", table)
+	}
+	// With resolved creds the real password shows (private guide).
+	resolved := renderAccountsTable(wf.Accounts, map[string]string{"crucible/prem_pw": "s3cret"})
+	if !strings.Contains(resolved, "s3cret") || strings.Contains(resolved, "crucible/prem_pw") {
+		t.Errorf("expected resolved password, got:\n%s", resolved)
 	}
 }
