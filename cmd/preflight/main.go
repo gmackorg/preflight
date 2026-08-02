@@ -92,6 +92,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runRunner(args[1:], stdout, stderr, client)
 	case "apps":
 		return runApps(args[1:], stdout, stderr, client)
+	case "cleanup":
+		return runCleanup(args[1:], stdout, stderr)
 	case "fleet":
 		return runFleet(args[1:], stdout, stderr, client)
 	case "status":
@@ -4917,6 +4919,7 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 		}
 		options.workspaceRoot = absoluteRoot
 	}
+	options.workspaceRoot = canonicalWorkspaceRoot(options.workspaceRoot)
 	if strings.TrimSpace(options.hostIdentity) == "" {
 		options.hostIdentity = "unknown-host"
 	}
@@ -5001,6 +5004,28 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 
 	if err := reconcileRunnerStartup(client, options, registration); err != nil {
 		return err
+	}
+
+	// Disk gate: builds that run out of space fail mid-lipo/codegen in
+	// confusing ways (the volume hit 100% twice in one fleet-capture day).
+	// Under pressure, sweep regenerable caches; if still low, decline to
+	// claim — the reason is visible via the heartbeat's freeDiskGb.
+	if free, err := freeBytesForPath(options.workspaceRoot); err == nil {
+		minFree := runnerMinFreeDiskBytes()
+		if minFree > 0 && free <= minFree {
+			swept, _ := cleanupBuildStorageUnderPressure(
+				options.workspaceRoot, 24*time.Hour, minFree, nil,
+			)
+			if after, err := freeBytesForPath(options.workspaceRoot); err == nil && after <= minFree {
+				fmt.Fprintf(stdout,
+					"low disk: %.1f GiB free (< %.0f GiB) after sweeping %d cache entries — declining claims\n",
+					float64(after)/float64(bytesPerGiB),
+					float64(minFree)/float64(bytesPerGiB),
+					swept.Removed,
+				)
+				return nil
+			}
+		}
 	}
 
 	claim, err := claimRunnerJob(client, options, registration)
@@ -5345,14 +5370,14 @@ type runnerJobPayload struct {
 	RequiredSecretReferences []runnerJobRequiredSecretReference `json:"requiredSecretReferences"`
 	SecretReferences         []runnerJobSecretReference         `json:"secretReferences"`
 	// Fastlane (produce/metadata/screenshots) fields:
-	AppIdentifier   string            `json:"appIdentifier"`
-	AppName         string            `json:"appName"`
-	Sku             string            `json:"sku"`
-	PrimaryLanguage string            `json:"primaryLanguage"`
-	CompanyName     string            `json:"companyName"`
-	Action          string            `json:"action"`
-	Metadata        map[string]string `json:"metadata"`
-	Locales         []string          `json:"locales"`
+	AppIdentifier   string                   `json:"appIdentifier"`
+	AppName         string                   `json:"appName"`
+	Sku             string                   `json:"sku"`
+	PrimaryLanguage string                   `json:"primaryLanguage"`
+	CompanyName     string                   `json:"companyName"`
+	Action          string                   `json:"action"`
+	Metadata        map[string]string        `json:"metadata"`
+	Locales         []string                 `json:"locales"`
 	Screenshots     []runnerJobScreenshotRef `json:"screenshots"`
 	// eas.submit (one-click distribute) fields:
 	SubmissionID string `json:"submissionId"`
@@ -5517,14 +5542,18 @@ func registerRunner(client *http.Client, options runnerOnceOptions, capabilities
 }
 
 func heartbeatRunner(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, capabilities map[string]any) error {
+	payload := map[string]any{
+		"status":       "online",
+		"capabilities": capabilities,
+	}
+	if free, err := freeBytesForPath(options.workspaceRoot); err == nil {
+		payload["freeDiskGb"] = float64(free) / float64(bytesPerGiB)
+	}
 	_, err := postPreflightJSON(
 		client,
 		runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/heartbeat", registration.Runner.ID)),
 		registration.Token,
-		map[string]any{
-			"status":       "online",
-			"capabilities": capabilities,
-		},
+		payload,
 	)
 	return err
 }
@@ -7738,6 +7767,12 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 		if err := materializeScreenshots(screenshotsDir, p.Screenshots); err != nil {
 			return nil, err
 		}
+		// Without any deliver config in cwd, deliver prompts "Do you want to
+		// setup deliver?" and crashes in non-interactive mode. An empty
+		// Deliverfile satisfies it; all real config comes from CLI flags.
+		if err := ensureEmptyDeliverfile(filepath.Join(appDir, "fastlane")); err != nil {
+			return nil, err
+		}
 		if p.Platform == "android" {
 			return []string{
 				"supply",
@@ -7765,6 +7800,20 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 	}
 }
 
+// ensureEmptyDeliverfile creates fastlane/Deliverfile if absent so `deliver`
+// never falls into its interactive "setup deliver?" prompt (which crashes
+// under non-interactive runners). Config is passed via CLI flags instead.
+func ensureEmptyDeliverfile(fastlaneDir string) error {
+	if err := os.MkdirAll(fastlaneDir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(fastlaneDir, "Deliverfile")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	return os.WriteFile(path, []byte("# generated by preflight runner: config comes from CLI flags\n"), 0o644)
+}
+
 // materializeScreenshots downloads the payload's screenshot refs into
 // screenshotsDir/<locale>/<filename> so `deliver --screenshots_path` /
 // `supply --screenshots_path` can upload them. The refs point at Preflight's
@@ -7774,6 +7823,11 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 func materializeScreenshots(screenshotsDir string, refs []runnerJobScreenshotRef) error {
 	if len(refs) == 0 {
 		return nil
+	}
+	// The dir persists across jobs; stale PNGs from earlier publishes would be
+	// swept up by deliver (the listing is the source of truth), so start clean.
+	if err := os.RemoveAll(screenshotsDir); err != nil {
+		return fmt.Errorf("clean screenshots dir: %w", err)
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	written := 0
@@ -8310,6 +8364,18 @@ func devSessionArtifactFailureCode(err error) string {
 
 func completeRunnerJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, result map[string]any) error {
 	_, err := completeRunnerJobWithResponse(client, options, registration, job, result)
+	// Post-job hygiene (P6): when the volume is under pressure, sweep stale
+	// regenerable caches now instead of failing the NEXT build mid-lipo.
+	// Pressure-gated so healthy runners pay nothing.
+	if minFree := runnerMinFreeDiskBytes(); minFree > 0 {
+		if swept, sweepErr := cleanupBuildStorageUnderPressure(
+			options.workspaceRoot, 24*time.Hour, minFree, nil,
+		); sweepErr == nil && swept.Removed > 0 {
+			fmt.Printf("post-job cache sweep: removed %d stale entries (%.1f GiB free)\n",
+				swept.Removed, float64(swept.FreeBytes)/float64(bytesPerGiB))
+		}
+	}
+
 	return err
 }
 
@@ -15603,6 +15669,8 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		return runAppsSubmitForReview(args[1:], stdout, stderr, client)
 	case "screenshots":
 		return runAppsScreenshots(args[1:], stdout, stderr, client)
+	case "scan-bundle":
+		return runAppsScanBundle(args[1:], stdout, stderr)
 	case "review":
 		return runAppsReview(args[1:], stdout, stderr, client)
 	default:
@@ -15618,6 +15686,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps status <app-id|slug|name> [--platform ...] [--json]")
 	fmt.Fprintln(w, "  preflight apps checklist set <app-id|slug> --key <key> --status <pending|done|blocked|not_applicable> [--note <text>] [--platform ...]")
 	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
+	fmt.Fprintln(w, "  preflight apps scan-bundle <bundle|.app|.ipa>       scan a built artifact for store poison (localhost/E2E)")
 	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")
 	fmt.Fprintln(w, "  preflight apps screenshots --scheme <s> --sim <udid> [--flow f.yaml] [--app <id> --upload]  capture App Store screenshots (R5)")
 	fmt.Fprintln(w, "  preflight apps review compile <flow.review.yaml>     compile a TrueFlight review workflow → Maestro flow + reviewer guide")
@@ -16087,4 +16156,28 @@ func truncateForTable(value string, max int) string {
 		return value
 	}
 	return value[:max-1] + "…"
+}
+
+// canonicalWorkspaceRoot resolves symlinks in a runner's workspace root.
+//
+// Job eligibility compares workspace roots as STRINGS (the server's
+// runnerCanAccessJobWorkspaceRoot -> pathIsWithin does a prefix match), so a
+// runner registering a symlinked root is structurally ineligible for every job
+// even though the directory is identical on disk.
+//
+// Observed 2026-08-02: gmacko-mini registered `$HOME/dev`, a symlink to
+// `/Volumes/dev`. Jobs bind `/Volumes/dev/...`, the prefixes never matched, and
+// three healthy runners idled at "no runner jobs available" for hours while the
+// queue backed up on another host. Resolving here makes a symlinked root behave
+// exactly like the real one.
+//
+// Falls back to the input when the path cannot be resolved (e.g. the volume is
+// not mounted yet) — a best-effort normalization must never stop a runner from
+// starting.
+func canonicalWorkspaceRoot(root string) string {
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return root
+	}
+	return resolved
 }
