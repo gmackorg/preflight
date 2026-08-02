@@ -5172,10 +5172,21 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 	if mode := strings.TrimSpace(hostMode); mode == "tunnel" || mode == "tailscale" {
 		adapters = append(adapters, "expo.dev_server.tunnel")
 	}
+	// Several agents routinely share one machine (they need distinct
+	// --host-identity values to register as separate runners). Report the actual
+	// machine so the control plane can cap native builds per physical host
+	// rather than per agent — otherwise N agents on one Mac each get their own
+	// build slot and thrash the shared module cache.
+	machineID, err := os.Hostname()
+	if err != nil || strings.TrimSpace(machineID) == "" {
+		machineID = "unknown-machine"
+	}
+
 	return map[string]any{
 		"platforms":             []string{"ios", "android"},
 		"localTools":            localTools,
 		"adapters":              adapters,
+		"machineId":             machineID,
 		"runnerContractVersion": contractVersion,
 		"runnerJobStream":       true,
 		"runnerJobHeartbeat":    true,
