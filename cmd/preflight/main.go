@@ -4973,6 +4973,7 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	defer stopShutdownHandler()
 
 	capabilities := defaultRunnerCapabilities(options.hostMode)
+	capabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
 	registration, err := registerRunner(client, options, capabilities)
 	if err != nil {
 		return err
@@ -6102,7 +6103,9 @@ func handleDevSessionOpenJob(client *http.Client, options runnerOnceOptions, reg
 		}
 		fmt.Fprintf(stdout, "opened Android development build %s %s\n", job.ID, providerIdentity)
 		if completed.WorkflowProjection.Phase == "maestro_queued" {
-			if err := heartbeatRunner(client, options, registration, defaultRunnerCapabilities(options.hostMode)); err != nil {
+			heartbeatCapabilities := defaultRunnerCapabilities(options.hostMode)
+			heartbeatCapabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
+			if err := heartbeatRunner(client, options, registration, heartbeatCapabilities); err != nil {
 				return err
 			}
 			return claimAndHandleMaestroRun(client, options, registration, stdout)
@@ -6489,7 +6492,9 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		return err
 	}
 	fmt.Fprintf(stdout, "opened simulator app %s\n", job.ID)
-	if err := heartbeatRunner(client, options, registration, defaultRunnerCapabilities(options.hostMode)); err != nil {
+	heartbeatCapabilities := defaultRunnerCapabilities(options.hostMode)
+	heartbeatCapabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
+	if err := heartbeatRunner(client, options, registration, heartbeatCapabilities); err != nil {
 		return err
 	}
 	return claimAndHandleMaestroRun(client, options, registration, stdout)
@@ -16191,4 +16196,75 @@ func canonicalWorkspaceRoot(root string) string {
 		return root
 	}
 	return resolved
+}
+
+// preparedIOSPackages lists the app packages under root that are actually ready
+// to build iOS: they have a generated `ios/` directory with an .xcworkspace and
+// installed Pods.
+//
+// Without this a runner happily claims a native build for a repo it has never
+// prebuilt, fails minutes later, and the job lands back on the queue — while a
+// host that IS prepared sits idle. Reported as a capability so the control plane
+// can route on it. Recomputed each heartbeat, so preparing a repo takes effect
+// without restarting the agent.
+func preparedIOSPackages(root string) []string {
+	prepared := []string{}
+	if strings.TrimSpace(root) == "" {
+		return prepared
+	}
+	repos, err := os.ReadDir(root)
+	if err != nil {
+		return prepared
+	}
+	for _, repo := range repos {
+		if !repo.IsDir() || strings.HasPrefix(repo.Name(), ".") {
+			continue
+		}
+		// <repo>/ios and <repo>/<apps>/<pkg>/ios are both common layouts.
+		candidates := []string{filepath.Join(root, repo.Name())}
+		for _, appsDir := range []string{"apps", "packages"} {
+			entries, err := os.ReadDir(filepath.Join(root, repo.Name(), appsDir))
+			if err != nil {
+				continue
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					candidates = append(candidates, filepath.Join(root, repo.Name(), appsDir, entry.Name()))
+				}
+			}
+		}
+		for _, candidate := range candidates {
+			if iosPackageIsPrepared(candidate) {
+				if rel, err := filepath.Rel(root, candidate); err == nil {
+					prepared = append(prepared, rel)
+				}
+			}
+		}
+	}
+	sort.Strings(prepared)
+	return prepared
+}
+
+func iosPackageIsPrepared(packageDir string) bool {
+	iosDir := filepath.Join(packageDir, "ios")
+	entries, err := os.ReadDir(iosDir)
+	if err != nil {
+		return false
+	}
+	hasWorkspace := false
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".xcworkspace") {
+			hasWorkspace = true
+			break
+		}
+	}
+	if !hasWorkspace {
+		return false
+	}
+	// Pods/Target Support Files is the marker that `pod install` actually
+	// completed — a bare Pods/ directory can exist from a failed run.
+	if _, err := os.Stat(filepath.Join(iosDir, "Pods", "Target Support Files")); err != nil {
+		return false
+	}
+	return true
 }
