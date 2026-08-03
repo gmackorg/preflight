@@ -4974,6 +4974,7 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 
 	capabilities := defaultRunnerCapabilities(options.hostMode)
 	capabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
+	capabilities["ascApiKey"] = hasASCApiKeyCredentials()
 	registration, err := registerRunner(client, options, capabilities)
 	if err != nil {
 		return err
@@ -5188,6 +5189,7 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 		"localTools":            localTools,
 		"adapters":              adapters,
 		"machineId":             machineID,
+		"ascApiKey":             hasASCApiKeyCredentials(),
 		"runnerContractVersion": contractVersion,
 		"runnerJobStream":       true,
 		"runnerJobHeartbeat":    true,
@@ -6105,6 +6107,7 @@ func handleDevSessionOpenJob(client *http.Client, options runnerOnceOptions, reg
 		if completed.WorkflowProjection.Phase == "maestro_queued" {
 			heartbeatCapabilities := defaultRunnerCapabilities(options.hostMode)
 			heartbeatCapabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
+			heartbeatCapabilities["ascApiKey"] = hasASCApiKeyCredentials()
 			if err := heartbeatRunner(client, options, registration, heartbeatCapabilities); err != nil {
 				return err
 			}
@@ -6494,6 +6497,7 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 	fmt.Fprintf(stdout, "opened simulator app %s\n", job.ID)
 	heartbeatCapabilities := defaultRunnerCapabilities(options.hostMode)
 	heartbeatCapabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
+	heartbeatCapabilities["ascApiKey"] = hasASCApiKeyCredentials()
 	if err := heartbeatRunner(client, options, registration, heartbeatCapabilities); err != nil {
 		return err
 	}

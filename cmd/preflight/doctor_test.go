@@ -183,7 +183,8 @@ func TestCheckPodsCodegen_SkipsWhenNotPrebuilt(t *testing.T) {
 
 func TestCheckPodsCodegen_BrokenWhenPodsNeverInstalled(t *testing.T) {
 	dir := t.TempDir()
-	writeDoctorFile(t, dir, "ios/Podfile", "platform :ios")
+	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"expo":"~56.0.0"}}`)
+	writeDoctorFile(t, dir, "ios/Podfile", "use_expo_modules!")
 	f := checkPodsCodegen(dir)
 	if len(f) != 1 || f[0].Severity != doctorBroken || !f[0].Fixable {
 		t.Fatalf("expected fixable broken, got %+v", f)
@@ -198,12 +199,16 @@ func TestCheckPodsCodegen_BrokenWhenCodegenOutputMissing(t *testing.T) {
 	// generated ReactCodegen tree was wiped (clean, branch switch, SSD churn),
 	// so xcodebuild dies on "Build input file cannot be found: …-generated.mm".
 	dir := t.TempDir()
-	writeDoctorFile(t, dir, "ios/Podfile", "platform :ios")
+	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"expo":"~56.0.0"}}`)
+	writeDoctorFile(t, dir, "ios/Podfile", "use_expo_modules!")
 	writeDoctorFile(t, dir, "ios/Podfile.lock", "COCOAPODS: 1.15.2")
 	writeDoctorFile(t, dir, "ios/Pods/Manifest.lock", "COCOAPODS: 1.15.2")
+	// Only a warning: on newer Expo setups codegen runs as an Xcode build
+	// phase, so an absent tree before the first build is normal
+	// (poker-trainer). Calling that "broken" would cry wolf.
 	f := checkPodsCodegen(dir)
-	if len(f) != 1 || f[0].Severity != doctorBroken || !f[0].Fixable {
-		t.Fatalf("expected fixable broken for missing codegen, got %+v", f)
+	if len(f) != 1 || f[0].Severity != doctorWarn || !f[0].Fixable {
+		t.Fatalf("expected fixable warn for missing codegen, got %+v", f)
 	}
 	if !strings.Contains(f[0].Message, "codegen") {
 		t.Fatalf("expected codegen in message, got %q", f[0].Message)
@@ -215,7 +220,8 @@ func TestCheckPodsCodegen_BrokenWhenManifestDivergesFromLock(t *testing.T) {
 	// "sandbox is out of sync" — the build fails in a different, less obvious
 	// place, so catch it here.
 	dir := t.TempDir()
-	writeDoctorFile(t, dir, "ios/Podfile", "platform :ios")
+	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"expo":"~56.0.0"}}`)
+	writeDoctorFile(t, dir, "ios/Podfile", "use_expo_modules!")
 	writeDoctorFile(t, dir, "ios/Podfile.lock", "COCOAPODS: 1.15.2")
 	writeDoctorFile(t, dir, "ios/Pods/Manifest.lock", "COCOAPODS: 1.14.0")
 	writeDoctorFile(t, dir, "ios/build/generated/ios/ReactCodegen/x-generated.mm", "//")
@@ -230,7 +236,8 @@ func TestCheckPodsCodegen_BrokenWhenManifestDivergesFromLock(t *testing.T) {
 
 func TestCheckPodsCodegen_OkWhenInstalledAndGenerated(t *testing.T) {
 	dir := t.TempDir()
-	writeDoctorFile(t, dir, "ios/Podfile", "platform :ios")
+	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"expo":"~56.0.0"}}`)
+	writeDoctorFile(t, dir, "ios/Podfile", "use_expo_modules!")
 	writeDoctorFile(t, dir, "ios/Podfile.lock", "COCOAPODS: 1.15.2")
 	writeDoctorFile(t, dir, "ios/Pods/Manifest.lock", "COCOAPODS: 1.15.2")
 	writeDoctorFile(t, dir, "ios/build/generated/ios/ReactCodegen/safeareacontext/safeareacontext-generated.mm", "//")
@@ -387,5 +394,57 @@ android {
 	}
 	if !strings.Contains(f[0].Message, "unsigned") {
 		t.Fatalf("expected unsigned called out, got %q", f[0].Message)
+	}
+}
+
+func TestCheckPodsCodegen_SkipsNonReactNativeProject(t *testing.T) {
+	// poker-trainer has an ios/Podfile but no React Native — there is no
+	// ReactCodegen tree to be missing, and demanding one is a false positive.
+	dir := t.TempDir()
+	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"swift-thing":"1.0.0"}}`)
+	writeDoctorFile(t, dir, "ios/Podfile", "platform :ios, '16.0'\ntarget 'App' do\nend")
+	if f := checkPodsCodegen(dir); f != nil {
+		t.Fatalf("expected no findings for a non-RN pods project, got %+v", f)
+	}
+}
+
+func TestCheckPodsCodegen_DetectsReactNativeViaPodfile(t *testing.T) {
+	// A bare RN project may not list react-native at the app dir's package.json
+	// (monorepo hoisting); the Podfile's use_react_native! is decisive.
+	dir := t.TempDir()
+	writeDoctorFile(t, dir, "package.json", `{"dependencies":{}}`)
+	writeDoctorFile(t, dir, "ios/Podfile", "require_relative '../node_modules/react-native/scripts/react_native_pods'\nuse_react_native!")
+	f := checkPodsCodegen(dir)
+	if len(f) != 1 || f[0].Severity != doctorBroken {
+		t.Fatalf("expected broken (pods not installed) for an RN project, got %+v", f)
+	}
+}
+
+func TestHasASCApiKeyCredentials(t *testing.T) {
+	// Reported to the control plane so a host without a key cannot claim a
+	// store publish it can only fail.
+	t.Setenv("PREFLIGHT_ASC_KEY_ID", "")
+	t.Setenv("PREFLIGHT_ASC_ISSUER_ID", "")
+	t.Setenv("PREFLIGHT_ASC_KEY_PATH", "")
+	if hasASCApiKeyCredentials() {
+		t.Fatal("expected false with no ASC env")
+	}
+
+	keyPath := filepath.Join(t.TempDir(), "key.p8")
+	if err := os.WriteFile(keyPath, []byte("-----BEGIN PRIVATE KEY-----"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PREFLIGHT_ASC_KEY_ID", "YC75XFUG32")
+	t.Setenv("PREFLIGHT_ASC_ISSUER_ID", "issuer")
+	t.Setenv("PREFLIGHT_ASC_KEY_PATH", keyPath)
+	if !hasASCApiKeyCredentials() {
+		t.Fatal("expected true when key id, issuer and a readable key file are set")
+	}
+
+	// Env set but the key file is gone — the common half-provisioned host.
+	// Claiming on the strength of the variables alone would fail at fastlane.
+	t.Setenv("PREFLIGHT_ASC_KEY_PATH", filepath.Join(t.TempDir(), "missing.p8"))
+	if hasASCApiKeyCredentials() {
+		t.Fatal("expected false when the key file is unreadable")
 	}
 }

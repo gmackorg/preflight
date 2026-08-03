@@ -454,6 +454,11 @@ func checkPodsCodegen(appDir string) []doctorFinding {
 		// Managed workflow — no native project to be stale.
 		return nil
 	}
+	if !isReactNativeProject(appDir, iosDir) {
+		// A plain CocoaPods iOS app has no ReactCodegen tree; demanding one
+		// would fail every non-RN project in the fleet (e.g. poker-trainer).
+		return nil
+	}
 
 	podfileLock := filepath.Join(iosDir, "Podfile.lock")
 	manifestLock := filepath.Join(iosDir, "Pods", "Manifest.lock")
@@ -476,10 +481,18 @@ func checkPodsCodegen(appDir string) []doctorFinding {
 	}
 
 	if !hasReactCodegenOutput(filepath.Join(iosDir, "build", "generated", "ios", "ReactCodegen")) {
+		// Deliberately a warning, not broken. Some repos generate this tree at
+		// `pod install` time (daily-dose, latchflow, sortey — where its absence
+		// really does fail the build); newer Expo setups instead add an
+		// "[Expo Autolinking] Run Codegen" *build phase*, so an absent tree
+		// before the first build is expected (poker-trainer). We cannot tell
+		// which from the filesystem alone, so report it as a likely cause
+		// rather than a certainty.
 		return []doctorFinding{{
-			Check: "pods-codegen", Severity: doctorBroken, Fixable: true,
-			Message: "React Native codegen output is missing — the build will fail on a " +
-				"generated .mm file; run `pod install` in ios/",
+			Check: "pods-codegen", Severity: doctorWarn, Fixable: true,
+			Message: "React Native codegen output is not present — if the build fails on a " +
+				"missing `-generated.mm`, run `pod install` in ios/",
+			Detail: "some setups generate this during the Xcode build instead, in which case this is benign",
 		}}
 	}
 
@@ -487,6 +500,31 @@ func checkPodsCodegen(appDir string) []doctorFinding {
 		Check: "pods-codegen", Severity: doctorOK,
 		Message: "CocoaPods sandbox is in sync and codegen output is present",
 	}}
+}
+
+// isReactNativeProject reports whether this checkout builds React Native, via
+// the manifest or — for hoisted monorepo layouts where the app-level
+// package.json may not list it — the Podfile's react-native integration.
+func isReactNativeProject(appDir, iosDir string) bool {
+	if pkg, err := readJSONMap(filepath.Join(appDir, "package.json")); err == nil {
+		for _, field := range []string{"dependencies", "devDependencies"} {
+			deps, _ := pkg[field].(map[string]any)
+			if _, ok := deps["react-native"]; ok {
+				return true
+			}
+			if _, ok := deps["expo"]; ok {
+				return true
+			}
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(iosDir, "Podfile"))
+	if err != nil {
+		return false
+	}
+	text := string(raw)
+	return strings.Contains(text, "use_react_native!") ||
+		strings.Contains(text, "react_native_pods") ||
+		strings.Contains(text, "use_expo_modules!")
 }
 
 // hasReactCodegenOutput reports whether the codegen tree holds at least one
@@ -766,4 +804,30 @@ func releaseBuildTypeBlock(gradle string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// hasASCApiKeyCredentials reports whether this host can authenticate to App
+// Store Connect, i.e. whether a fastlane publish claimed here could succeed.
+//
+// Reported in the runner's capabilities as `ascApiKey`. Without it the control
+// plane cannot tell a build host from a publish host, and an unkeyed runner
+// claims a publish that dies in fastlane with "No value found for 'username'".
+// Checks the key file is actually readable, not merely that the variables are
+// set — a half-provisioned host is the common case.
+func hasASCApiKeyCredentials() bool {
+	keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID"))
+	issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID"))
+	keyPath := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_PATH"))
+	if keyID == "" || issuerID == "" || keyPath == "" {
+		return false
+	}
+	if strings.HasPrefix(keyPath, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		keyPath = filepath.Join(home, keyPath[2:])
+	}
+	info, err := os.Stat(keyPath)
+	return err == nil && !info.IsDir()
 }
