@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -692,4 +693,77 @@ func fixWorkspaceDist(appDir string) (string, error) {
 		return "", fmt.Errorf("pnpm build failed: %w: %s", err, lastLines(string(out), 5))
 	}
 	return fmt.Sprintf("built workspace package(s): %s", strings.Join(unbuilt, ", ")), nil
+}
+
+// releaseBuildTypeRe isolates the `release { … }` block inside `buildTypes`.
+// Deliberately non-greedy and brace-counted below rather than regex-nested:
+// Gradle blocks nest, and a naive match swallows the whole file.
+var releaseBlockStartRe = regexp.MustCompile(`(?m)^\s*release\s*\{`)
+
+// checkAndroidSigning: a prebuilt Android project must not sign release builds
+// with the debug key.
+//
+// The Expo/RN template ships `release { signingConfig signingConfigs.debug }`
+// together with a comment telling you to replace it, and nothing enforces that
+// you did. Play rejects a debug-signed AAB at upload — after a full build — and
+// the same key cannot be swapped later without losing the app listing's upload
+// identity. Not auto-fixable: generating and storing a keystore is a credential
+// decision, not a repair.
+func checkAndroidSigning(appDir string) []doctorFinding {
+	gradlePath := filepath.Join(appDir, "android", "app", "build.gradle")
+	raw, err := os.ReadFile(gradlePath)
+	if err != nil {
+		// Managed workflow — EAS holds the keystore; nothing local to inspect.
+		return nil
+	}
+	block, ok := releaseBuildTypeBlock(string(raw))
+	if !ok {
+		return []doctorFinding{{
+			Check: "android-signing", Severity: doctorWarn,
+			Message: "no `release` buildType found in android/app/build.gradle",
+		}}
+	}
+	if strings.Contains(block, "signingConfigs.debug") {
+		return []doctorFinding{{
+			Check: "android-signing", Severity: doctorBroken,
+			Message: "release builds are signed with the debug key — Play will reject the AAB",
+			Detail: "set `signingConfig signingConfigs.release` and define that config from a " +
+				"real upload keystore before building for Play",
+		}}
+	}
+	// No signingConfig at all yields an unsigned artifact, which Play rejects
+	// just the same. "Not debug-signed" is not the bar.
+	if !strings.Contains(block, "signingConfig") {
+		return []doctorFinding{{
+			Check: "android-signing", Severity: doctorBroken,
+			Message: "release buildType declares no signingConfig — the AAB will be unsigned and Play will reject it",
+			Detail:  "define a `release` signing config from an upload keystore and reference it here",
+		}}
+	}
+	return []doctorFinding{{
+		Check: "android-signing", Severity: doctorOK,
+		Message: "release buildType does not use the debug signing config",
+	}}
+}
+
+// releaseBuildTypeBlock returns the body of the `release { … }` buildType,
+// matching braces so nested blocks do not truncate it.
+func releaseBuildTypeBlock(gradle string) (string, bool) {
+	loc := releaseBlockStartRe.FindStringIndex(gradle)
+	if loc == nil {
+		return "", false
+	}
+	depth := 0
+	for i := loc[1] - 1; i < len(gradle); i++ {
+		switch gradle[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return gradle[loc[1]:i], true
+			}
+		}
+	}
+	return "", false
 }

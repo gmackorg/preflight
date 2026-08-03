@@ -66,6 +66,7 @@ func doctorChecks() []doctorCheck {
 		{id: "expo-sdk-align", run: checkExpoSDKAlign},
 		{id: "pods-codegen", run: checkPodsCodegen, fix: fixPodsCodegen},
 		{id: "workspace-dist", run: checkWorkspaceDist, fix: fixWorkspaceDist},
+		{id: "android-signing", run: checkAndroidSigning},
 	}
 }
 

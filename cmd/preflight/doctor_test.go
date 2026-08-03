@@ -295,3 +295,97 @@ func TestCheckWorkspaceDist_SkipsNonWorkspaceApp(t *testing.T) {
 		t.Fatalf("expected no findings without workspace deps, got %+v", f)
 	}
 }
+
+func TestCheckAndroidSigning_FlagsDebugSignedRelease(t *testing.T) {
+	// The Expo/RN template ships `release { signingConfig signingConfigs.debug }`
+	// with a comment telling you to change it. Play rejects an AAB signed with
+	// the debug key, and the rejection arrives at upload — after a full build.
+	dir := t.TempDir()
+	writeDoctorFile(t, dir, "android/app/build.gradle", `
+android {
+    buildTypes {
+        debug { signingConfig signingConfigs.debug }
+        release {
+            // Caution! In production, you need to generate your own keystore file.
+            signingConfig signingConfigs.debug
+            minifyEnabled enableMinifyInReleaseBuilds
+        }
+    }
+}`)
+	f := checkAndroidSigning(dir)
+	if len(f) != 1 || f[0].Severity != doctorBroken {
+		t.Fatalf("expected broken, got %+v", f)
+	}
+	if !strings.Contains(f[0].Message, "debug") {
+		t.Fatalf("expected the debug key named, got %q", f[0].Message)
+	}
+	// Not auto-fixable: generating a keystore is a credential decision.
+	if f[0].Fixable {
+		t.Fatalf("signing must not be auto-fixed")
+	}
+}
+
+func TestCheckAndroidSigning_AcceptsARealReleaseConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeDoctorFile(t, dir, "android/app/build.gradle", `
+android {
+    buildTypes {
+        debug { signingConfig signingConfigs.debug }
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled true
+        }
+    }
+}`)
+	f := checkAndroidSigning(dir)
+	if len(f) != 1 || f[0].Severity != doctorOK {
+		t.Fatalf("expected ok, got %+v", f)
+	}
+}
+
+func TestCheckAndroidSigning_SkipsManagedWorkflow(t *testing.T) {
+	// No android/ directory: EAS manages signing remotely, nothing to inspect.
+	if f := checkAndroidSigning(t.TempDir()); f != nil {
+		t.Fatalf("expected no findings without android/, got %+v", f)
+	}
+}
+
+func TestCheckAndroidSigning_IgnoresDebugBuildType(t *testing.T) {
+	// `debug { signingConfig signingConfigs.debug }` is correct and appears in
+	// every project — matching it would fire on the whole fleet.
+	dir := t.TempDir()
+	writeDoctorFile(t, dir, "android/app/build.gradle", `
+android {
+    buildTypes {
+        debug { signingConfig signingConfigs.debug }
+        release { signingConfig signingConfigs.release }
+    }
+}`)
+	if f := checkAndroidSigning(dir); f[0].Severity != doctorOK {
+		t.Fatalf("expected ok, got %+v", f)
+	}
+}
+
+func TestCheckAndroidSigning_FlagsReleaseWithNoSigningConfig(t *testing.T) {
+	// poker-trainer: the release block declares no signingConfig at all, so
+	// Gradle emits an unsigned artifact. Play rejects that too — reporting it
+	// as healthy merely because it is not debug-signed would be a false pass.
+	dir := t.TempDir()
+	writeDoctorFile(t, dir, "android/app/build.gradle", `
+android {
+    buildTypes {
+        debug { signingConfig signingConfigs.debug }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt')
+        }
+    }
+}`)
+	f := checkAndroidSigning(dir)
+	if len(f) != 1 || f[0].Severity != doctorBroken {
+		t.Fatalf("expected broken for unsigned release, got %+v", f)
+	}
+	if !strings.Contains(f[0].Message, "unsigned") {
+		t.Fatalf("expected unsigned called out, got %q", f[0].Message)
+	}
+}
