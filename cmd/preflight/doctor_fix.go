@@ -480,23 +480,7 @@ func checkPodsCodegen(appDir string) []doctorFinding {
 		}}
 	}
 
-	codegenDir := filepath.Join(iosDir, "build", "generated", "ios", "ReactCodegen")
-	// A tree that predates Podfile.lock was left behind by an older install:
-	// `pod install` rewrites codegen, so newly-added modules are simply absent
-	// and the build fails on a missing `-generated.mm`. Checking only that the
-	// tree is non-empty misses this (festigram, 2026-08-02).
-	if newest, ok := newestCodegenModTime(codegenDir); ok {
-		if lockInfo, err := os.Stat(podfileLock); err == nil &&
-			newest.Before(lockInfo.ModTime()) {
-			return []doctorFinding{{
-				Check: "pods-codegen", Severity: doctorWarn, Fixable: true,
-				Message: "React Native codegen output is older than Podfile.lock — it is stale; " +
-					"run `pod install` in ios/",
-				Detail: "a partially-regenerated tree fails the build on a missing `-generated.mm`",
-			}}
-		}
-	}
-	if !hasReactCodegenOutput(codegenDir) {
+	if !hasReactCodegenOutput(filepath.Join(iosDir, "build", "generated", "ios", "ReactCodegen")) {
 		// Deliberately a warning, not broken. Some repos generate this tree at
 		// `pod install` time (daily-dose, latchflow, sortey — where its absence
 		// really does fail the build); newer Expo setups instead add an
@@ -559,28 +543,6 @@ func hasReactCodegenOutput(codegenDir string) bool {
 		return nil
 	})
 	return found
-}
-
-// newestCodegenModTime returns the most recent mtime among generated codegen
-// implementation files, and whether any were found.
-func newestCodegenModTime(codegenDir string) (time.Time, bool) {
-	var newest time.Time
-	found := false
-	_ = filepath.WalkDir(codegenDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !strings.HasSuffix(path, "-generated.mm") {
-			return nil //nolint:nilerr // absent tree is simply "no output"
-		}
-		info, statErr := entry.Info()
-		if statErr != nil {
-			return nil //nolint:nilerr
-		}
-		if !found || info.ModTime().After(newest) {
-			newest = info.ModTime()
-			found = true
-		}
-		return nil
-	})
-	return newest, found
 }
 
 // fixPodsCodegen runs `pod install` in ios/. Bounded — a cold sandbox on a

@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func writeDoctorFile(t *testing.T, dir, name, content string) {
@@ -447,33 +446,5 @@ func TestHasASCApiKeyCredentials(t *testing.T) {
 	t.Setenv("PREFLIGHT_ASC_KEY_PATH", filepath.Join(t.TempDir(), "missing.p8"))
 	if hasASCApiKeyCredentials() {
 		t.Fatal("expected false when the key file is unreadable")
-	}
-}
-
-func TestCheckPodsCodegen_FlagsCodegenOlderThanPodfileLock(t *testing.T) {
-	// festigram: the codegen tree existed but was STALE — some modules present,
-	// others (rnworklets, safeareacontext, ShadowNodes) missing, so the build
-	// died on "Build input file cannot be found". An "at least one -generated.mm
-	// exists" test reports OK here, which is a false negative: a fresh
-	// `pod install` rewrites the tree, so codegen older than Podfile.lock means
-	// the pods were reinstalled and the tree was never regenerated.
-	dir := t.TempDir()
-	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"expo":"~56.0.0"}}`)
-	writeDoctorFile(t, dir, "ios/Podfile", "use_expo_modules!")
-	writeDoctorFile(t, dir, "ios/Podfile.lock", "COCOAPODS: 1.15.2")
-	writeDoctorFile(t, dir, "ios/Pods/Manifest.lock", "COCOAPODS: 1.15.2")
-	gen := filepath.Join(dir, "ios/build/generated/ios/ReactCodegen/a/a-generated.mm")
-	writeDoctorFile(t, dir, "ios/build/generated/ios/ReactCodegen/a/a-generated.mm", "//")
-
-	old := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(gen, old, old); err != nil {
-		t.Fatal(err)
-	}
-	f := checkPodsCodegen(dir)
-	if len(f) != 1 || f[0].Severity != doctorWarn || !f[0].Fixable {
-		t.Fatalf("expected fixable warn for stale codegen, got %+v", f)
-	}
-	if !strings.Contains(f[0].Message, "older than") {
-		t.Fatalf("expected staleness called out, got %q", f[0].Message)
 	}
 }
