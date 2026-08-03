@@ -62,6 +62,10 @@ func doctorChecks() []doctorCheck {
 		{id: "react-pin", run: checkReactPin},
 		{id: "dirty-tree", run: checkDirtyTree},
 		{id: "lockfile-drift", run: checkLockfileDrift, fix: fixLockfileDrift},
+		{id: "config-poison", run: checkConfigPoison},
+		{id: "expo-sdk-align", run: checkExpoSDKAlign},
+		{id: "pods-codegen", run: checkPodsCodegen, fix: fixPodsCodegen},
+		{id: "workspace-dist", run: checkWorkspaceDist, fix: fixWorkspaceDist},
 	}
 }
 
@@ -270,6 +274,8 @@ func findEASAppDirs(root string) []string {
 func doctorFastChecks(appDir string) []doctorFinding {
 	f := checkEASJson(appDir)
 	f = append(f, checkSentryUpload(appDir)...)
+	f = append(f, checkConfigPoison(appDir)...)
+	f = append(f, checkExpoSDKAlign(appDir)...)
 	if root := findUp(appDir, "pnpm-lock.yaml"); root != "" {
 		if out, _ := gitOutput(root, "status", "--porcelain", "pnpm-lock.yaml"); strings.TrimSpace(out) != "" {
 			f = append(f, doctorFinding{

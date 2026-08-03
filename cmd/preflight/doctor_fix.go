@@ -4,6 +4,7 @@ package main
 // implementations for the fixable checks. See docs/plans pre-build-doctor.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -433,4 +435,261 @@ func commitDoctorFixes(appDir string, fixedChecks []string) (string, error) {
 		return "", fmt.Errorf("git commit: %w", err)
 	}
 	return branch, nil
+}
+
+// checkPodsCodegen: on a prebuilt (bare) iOS checkout, the CocoaPods sandbox
+// must be installed and the React Native codegen output present.
+//
+// This is the single most common build-drift failure across the fleet — hit on
+// five separate repos. The generated tree under ios/build/generated is not
+// committed and is wiped by a clean, a branch switch, or an interrupted build.
+// xcodebuild then fails with "Build input file cannot be found:
+// …/ReactCodegen/<module>/<module>-generated.mm", which reads like a corrupt
+// checkout rather than a missing `pod install`. Roughly 20 wasted minutes per
+// occurrence, since the failure only surfaces deep into compilation.
+func checkPodsCodegen(appDir string) []doctorFinding {
+	iosDir := filepath.Join(appDir, "ios")
+	if !fileExists(filepath.Join(iosDir, "Podfile")) {
+		// Managed workflow — no native project to be stale.
+		return nil
+	}
+
+	podfileLock := filepath.Join(iosDir, "Podfile.lock")
+	manifestLock := filepath.Join(iosDir, "Pods", "Manifest.lock")
+	if !fileExists(podfileLock) || !fileExists(manifestLock) {
+		return []doctorFinding{{
+			Check: "pods-codegen", Severity: doctorBroken, Fixable: true,
+			Message: "CocoaPods sandbox is not installed — run `pod install` in ios/",
+		}}
+	}
+
+	// CocoaPods' own out-of-sync definition: the installed manifest must match
+	// the lockfile byte for byte.
+	lockRaw, lockErr := os.ReadFile(podfileLock)
+	manifestRaw, manifestErr := os.ReadFile(manifestLock)
+	if lockErr == nil && manifestErr == nil && !bytes.Equal(lockRaw, manifestRaw) {
+		return []doctorFinding{{
+			Check: "pods-codegen", Severity: doctorBroken, Fixable: true,
+			Message: "the Pods sandbox is out of sync with Podfile.lock — run `pod install` in ios/",
+		}}
+	}
+
+	if !hasReactCodegenOutput(filepath.Join(iosDir, "build", "generated", "ios", "ReactCodegen")) {
+		return []doctorFinding{{
+			Check: "pods-codegen", Severity: doctorBroken, Fixable: true,
+			Message: "React Native codegen output is missing — the build will fail on a " +
+				"generated .mm file; run `pod install` in ios/",
+		}}
+	}
+
+	return []doctorFinding{{
+		Check: "pods-codegen", Severity: doctorOK,
+		Message: "CocoaPods sandbox is in sync and codegen output is present",
+	}}
+}
+
+// hasReactCodegenOutput reports whether the codegen tree holds at least one
+// generated implementation file. An empty-but-present directory is the common
+// half-wiped state and must not read as healthy.
+func hasReactCodegenOutput(codegenDir string) bool {
+	found := false
+	_ = filepath.WalkDir(codegenDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil //nolint:nilerr // absent tree is simply "no output"
+		}
+		if strings.HasSuffix(path, "-generated.mm") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// fixPodsCodegen runs `pod install` in ios/. Bounded — a cold sandbox on a
+// large app can legitimately take several minutes.
+func fixPodsCodegen(appDir string) (string, error) {
+	iosDir := filepath.Join(appDir, "ios")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pod", "install")
+	cmd.Dir = iosDir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("pod install timed out after 15m")
+	}
+	if err != nil {
+		return "", fmt.Errorf("pod install failed: %w: %s", err, lastLines(string(out), 5))
+	}
+	return "ran `pod install` in ios/ (Pods sandbox + codegen regenerated)", nil
+}
+
+// lastLines returns the final n non-empty lines, for compact error detail.
+func lastLines(text string, n int) string {
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, strings.TrimSpace(line))
+		}
+	}
+	if len(kept) > n {
+		kept = kept[len(kept)-n:]
+	}
+	return strings.Join(kept, "; ")
+}
+
+// checkWorkspaceDist: every workspace dependency the app resolves at *runtime*
+// through a dist/ path must actually be built.
+//
+// These monorepos mix two export styles: packages that resolve `default` to
+// ./src/index.ts (bundled from source, no build needed) and packages that
+// resolve it to ./dist/index.js. Only the latter must be built before a native
+// build, and nothing enforces it — the failure lands ~15 minutes in, as a Metro
+// "unable to resolve module" that reads like a broken import rather than a
+// missing build step. Seen on daily-dose (@dailydose/config).
+//
+// Deliberately ignores `types` conditions: a missing dist/index.d.ts breaks
+// typecheck, not the bundle, and flagging it would false-positive on most of
+// the fleet.
+func checkWorkspaceDist(appDir string) []doctorFinding {
+	unbuilt, applicable := unbuiltWorkspacePackages(appDir)
+	if !applicable {
+		return nil
+	}
+	if len(unbuilt) > 0 {
+		return []doctorFinding{{
+			Check: "workspace-dist", Severity: doctorBroken, Fixable: true,
+			Message: fmt.Sprintf(
+				"workspace package(s) %s resolve at runtime to dist/ but were never built — the Metro bundle will fail",
+				strings.Join(unbuilt, ", ")),
+			Detail: "run `pnpm --filter <pkg> build` for each",
+		}}
+	}
+	return []doctorFinding{{
+		Check: "workspace-dist", Severity: doctorOK,
+		Message: "workspace dependencies resolve to built or source entrypoints",
+	}}
+}
+
+// unbuiltWorkspacePackages returns the workspace dependencies that resolve at
+// runtime through a missing dist/ file. The bool reports whether the check
+// applies at all (false for a non-workspace app).
+func unbuiltWorkspacePackages(appDir string) (names []string, applicable bool) {
+	pkg, err := readJSONMap(filepath.Join(appDir, "package.json"))
+	if err != nil {
+		return nil, false // other checks report a missing/broken package.json
+	}
+
+	workspaceDeps := map[string]bool{}
+	for _, field := range []string{"dependencies", "devDependencies"} {
+		deps, _ := pkg[field].(map[string]any)
+		for name, spec := range deps {
+			if text, ok := spec.(string); ok && strings.HasPrefix(text, "workspace:") {
+				workspaceDeps[name] = true
+			}
+		}
+	}
+	if len(workspaceDeps) == 0 {
+		return nil, false
+	}
+
+	root := findUp(appDir, "pnpm-workspace.yaml")
+	if root == "" {
+		// Convention in every fleet repo: apps/<app> under the monorepo root.
+		root = filepath.Dir(filepath.Dir(appDir))
+	}
+
+	var unbuilt []string
+	for _, pkgDir := range workspacePackageDirs(root) {
+		manifest, err := readJSONMap(filepath.Join(pkgDir, "package.json"))
+		if err != nil {
+			continue
+		}
+		name, _ := manifest["name"].(string)
+		if !workspaceDeps[name] {
+			continue
+		}
+		for _, target := range runtimeExportTargets(manifest["exports"]) {
+			if !strings.Contains(target, "dist") {
+				continue
+			}
+			if !fileExists(filepath.Join(pkgDir, filepath.FromSlash(strings.TrimPrefix(target, "./")))) {
+				unbuilt = append(unbuilt, name)
+				break
+			}
+		}
+	}
+
+	sort.Strings(unbuilt)
+	return unbuilt, true
+}
+
+// workspacePackageDirs lists candidate package directories under a monorepo
+// root. Covers the packages/* and apps/* layout every fleet repo uses.
+func workspacePackageDirs(root string) []string {
+	var dirs []string
+	for _, group := range []string{"packages", "apps", "tooling"} {
+		entries, err := os.ReadDir(filepath.Join(root, group))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				dirs = append(dirs, filepath.Join(root, group, entry.Name()))
+			}
+		}
+	}
+	return dirs
+}
+
+// runtimeExportTargets collects the export targets a bundler actually resolves,
+// walking the conditional-exports tree. `types` is skipped deliberately — it
+// affects typecheck, not the bundle.
+func runtimeExportTargets(exports any) []string {
+	switch value := exports.(type) {
+	case string:
+		return []string{value}
+	case map[string]any:
+		var targets []string
+		for condition, nested := range value {
+			if condition == "types" {
+				continue
+			}
+			targets = append(targets, runtimeExportTargets(nested)...)
+		}
+		sort.Strings(targets)
+		return targets
+	}
+	return nil
+}
+
+// fixWorkspaceDist builds the unbuilt workspace packages via pnpm.
+func fixWorkspaceDist(appDir string) (string, error) {
+	unbuilt, applicable := unbuiltWorkspacePackages(appDir)
+	if !applicable || len(unbuilt) == 0 {
+		return "nothing to build", nil
+	}
+	root := findUp(appDir, "pnpm-workspace.yaml")
+	if root == "" {
+		root = filepath.Dir(filepath.Dir(appDir))
+	}
+
+	args := make([]string, 0, len(unbuilt)*2+1)
+	for _, name := range unbuilt {
+		args = append(args, "--filter", name)
+	}
+	args = append(args, "build")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pnpm", args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("pnpm build timed out after 15m")
+	}
+	if err != nil {
+		return "", fmt.Errorf("pnpm build failed: %w: %s", err, lastLines(string(out), 5))
+	}
+	return fmt.Sprintf("built workspace package(s): %s", strings.Join(unbuilt, ", ")), nil
 }
