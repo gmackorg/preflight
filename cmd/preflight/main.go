@@ -7806,8 +7806,10 @@ func fastlanePlanArgs(appDir string, job apiRunnerJob, ascKeyPath string) ([]str
 			"--app_identifier", p.AppIdentifier,
 			"--skip_binary_upload", "--skip_metadata", "--force",
 			// The Preflight listing is the source of truth: replace whatever
-			// screenshot set ASC has (also avoids "Screenshot Set Already
-			// Exists" collisions from earlier partial runs).
+			// screenshot set ASC has. Note this clears the *images* only, not
+			// the AppScreenshotSets — deliver then dies with "Screenshot Set
+			// Already Exists!" on any re-publish, so the publish route drops
+			// the sets over the ASC API before this job is queued.
 			"--overwrite_screenshots",
 			// Precheck can't run with API-key auth (IAP check aborts the
 			// whole run after the upload already succeeded) and adds nothing

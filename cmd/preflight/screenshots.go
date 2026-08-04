@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,10 @@ type screenshotPlanInput struct {
 	XcrunPath       string // default "xcrun"
 	MaestroPath     string // default "maestro"
 	SkipBuild       bool   // reuse an existing .app (re-capture without rebuilding)
+	// ExtraBuildEnv: recipe-provided public env layered into the xcodebuild
+	// step (EXPO_PUBLIC_* URLs etc.). Flags/process env still win at runtime
+	// since exec inherits os.Environ after these.
+	ExtraBuildEnv map[string]string
 }
 
 // buildScreenshotCapturePlan encodes the proven recipe as an ordered command
@@ -64,7 +69,19 @@ func buildScreenshotCapturePlan(in screenshotPlanInput) ([]screenshotStep, error
 
 	// Auth is baked into the Release build: SecureStore throws on unsigned sim
 	// builds, so the app falls back to these env vars embedded at bundle time.
-	buildEnv := map[string]string{"APP_VARIANT": "preview"}
+	// Metro bundles the whole app inside xcodebuild's "Bundle React Native code
+	// and images" phase. At node's default heap it dies *silently* on larger
+	// apps: the phase exits 0 having written no main.jsbundle, and the build
+	// fails later in hermesc with "Failed to open file: main.jsbundle" — which
+	// reads like a missing-file bug, not an OOM. Observed on bizpulse
+	// (2570 modules). Callers can still override.
+	buildEnv := map[string]string{
+		"APP_VARIANT":  "preview",
+		"NODE_OPTIONS": "--max-old-space-size=8192",
+	}
+	for k, v := range in.ExtraBuildEnv {
+		buildEnv[k] = v
+	}
 	if in.AuthToken != "" {
 		buildEnv["EXPO_PUBLIC_API_TOKEN"] = in.AuthToken
 	}
@@ -86,7 +103,9 @@ func buildScreenshotCapturePlan(in screenshotPlanInput) ([]screenshotStep, error
 				"-destination", "generic/platform=iOS Simulator",
 				"-derivedDataPath", in.DerivedData,
 				"build",
-				"CODE_SIGNING_ALLOWED=NO",
+				// Ad-hoc sign (not CODE_SIGNING_ALLOWED=NO): fully unsigned sim
+				// builds break keychain access, so SecureStore throws in-app.
+				"CODE_SIGN_IDENTITY=-",
 			},
 			env: buildEnv,
 		})
@@ -124,11 +143,22 @@ func buildScreenshotCapturePlan(in screenshotPlanInput) ([]screenshotStep, error
 	)
 
 	if in.FlowPath != "" {
+		// maestro runs with cwd=ScreenshotDir so takeScreenshot lands there,
+		// which means a relative --flow would resolve against the screenshot
+		// dir instead of the app dir ("Flow path does not exist: …/
+		// .preflight/screenshots/.preflight/review/core-flow.maestro.yaml").
+		// Absolutize against the caller's cwd, which is what the path meant.
+		flowPath := in.FlowPath
+		if !filepath.IsAbs(flowPath) {
+			if abs, err := filepath.Abs(flowPath); err == nil {
+				flowPath = abs
+			}
+		}
 		steps = append(steps, screenshotStep{
 			label: "maestro",
 			dir:   in.ScreenshotDir, // takeScreenshot writes relative to CWD
 			name:  maestro,
-			args:  []string{"--device", in.SimUDID, "test", in.FlowPath},
+			args:  []string{"--device", in.SimUDID, "test", flowPath},
 		})
 	}
 
@@ -207,13 +237,26 @@ func collectScreenshots(dir string) ([]string, error) {
 
 // uploadScreenshot POSTs one PNG's raw bytes to the store-listing screenshots
 // route (which stores it in R2 and appends it to the listing).
-func uploadScreenshot(client *http.Client, apiURL, token, appID, pngPath string) error {
+func uploadScreenshot(client *http.Client, apiURL, token, appID, pngPath, displayType, locale string) error {
 	data, err := os.ReadFile(pngPath)
 	if err != nil {
 		return err
 	}
 	endpoint := strings.TrimRight(apiURL, "/") +
 		"/api/preflight/v1/apps/" + appID + "/store-listing/screenshots"
+	// Matrix coordinates (P7): tag the upload with device class + locale so
+	// the listing groups into (displayType × locale) sets. Defaults server-side
+	// are APP_IPHONE_67 / en-US.
+	query := url.Values{}
+	if strings.TrimSpace(displayType) != "" {
+		query.Set("displayType", strings.ToUpper(strings.TrimSpace(displayType)))
+	}
+	if strings.TrimSpace(locale) != "" {
+		query.Set("locale", strings.TrimSpace(locale))
+	}
+	if len(query) > 0 {
+		endpoint += "?" + query.Encode()
+	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -243,7 +286,8 @@ func runAppsScreenshots(args []string, stdout io.Writer, stderr io.Writer, clien
 	in := screenshotPlanInput{StatusBarTime: "9:41", XcrunPath: "xcrun", MaestroPath: "maestro"}
 	workspaceRoot, packagePath, appPathOverride := "", "", ""
 	appID := ""
-	dryRun, doUpload := false, false
+	displayType, uploadLocale := "", ""
+	dryRun, doUpload, doSaveRecipe := false, false, false
 	apiURL := firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL, defaultPreflightAPIURL)
 	token := firstNonEmpty(os.Getenv("PREFLIGHT_TOKEN"), config.Token)
 
@@ -315,14 +359,38 @@ func runAppsScreenshots(args []string, stdout io.Writer, stderr io.Writer, clien
 			dryRun = true
 		case "--upload":
 			doUpload = true
+		case "--save-recipe":
+			doSaveRecipe = true
+		case "--display-type":
+			if !set(&displayType, args, &i) {
+				return 2
+			}
+		case "--locale":
+			if !set(&uploadLocale, args, &i) {
+				return 2
+			}
 		case "--help", "-h":
 			printScreenshotsHelp(stdout)
 			return 0
 		}
 	}
 
+	// With --app, unset inputs come from the stored recipe (flags still win).
+	var recipeBuildEnv map[string]string
+	if appID != "" {
+		recipe, err := fetchScreenshotRecipe(client, apiURL, token, appID)
+		if err != nil {
+			fmt.Fprintf(stderr, "fetch recipe: %v (continuing with flags)\n", err)
+		} else if env, err := applyRecipeDefaults(recipe, &in, &workspaceRoot, &packagePath, stdout); err != nil {
+			fmt.Fprintf(stderr, "apply recipe: %v\n", err)
+			return 1
+		} else {
+			recipeBuildEnv = env
+		}
+	}
+
 	if in.Scheme == "" || in.SimUDID == "" {
-		fmt.Fprintln(stderr, "--scheme and --sim are required (see --help)")
+		fmt.Fprintln(stderr, "--scheme and --sim are required (or store a recipe with --save-recipe; see --help)")
 		return 2
 	}
 	if workspaceRoot == "" {
@@ -348,6 +416,7 @@ func runAppsScreenshots(args []string, stdout io.Writer, stderr io.Writer, clien
 			"Release-iphonesimulator", in.Scheme+".app")
 	}
 
+	in.ExtraBuildEnv = recipeBuildEnv
 	plan, err := buildScreenshotCapturePlan(in)
 	if err != nil {
 		fmt.Fprintf(stderr, "build plan: %v\n", err)
@@ -389,6 +458,31 @@ func runAppsScreenshots(args []string, stdout io.Writer, stderr io.Writer, clien
 		fmt.Fprintf(stderr, "collect screenshots: %v\n", err)
 		return 1
 	}
+	if doSaveRecipe {
+		if appID == "" {
+			fmt.Fprintln(stderr, "--save-recipe needs --app <app-id>")
+		} else {
+			flowYaml := ""
+			if in.FlowPath != "" {
+				if raw, err := os.ReadFile(in.FlowPath); err == nil {
+					flowYaml = string(raw)
+				}
+			}
+			recipe := screenshotRecipe{
+				Platform:    "ios",
+				Scheme:      in.Scheme,
+				PackagePath: packagePath,
+				SimDevice:   in.SimUDID,
+				BuildEnv:    recipeBuildEnv,
+				FlowYaml:    flowYaml,
+			}
+			if err := saveScreenshotRecipe(client, apiURL, token, appID, recipe); err != nil {
+				fmt.Fprintf(stderr, "save recipe: %v\n", err)
+			} else {
+				fmt.Fprintln(stdout, "[recipe] saved")
+			}
+		}
+	}
 	fmt.Fprintf(stdout, "\nCaptured %d screenshot(s) in %s\n", len(pngs), in.ScreenshotDir)
 	if !doUpload || len(pngs) == 0 {
 		if len(pngs) > 0 {
@@ -403,7 +497,7 @@ func runAppsScreenshots(args []string, stdout io.Writer, stderr io.Writer, clien
 	}
 	uploaded := 0
 	for _, p := range pngs {
-		if err := uploadScreenshot(client, apiURL, token, appID, p); err != nil {
+		if err := uploadScreenshot(client, apiURL, token, appID, p, displayType, uploadLocale); err != nil {
 			fmt.Fprintf(stderr, "  upload %s failed: %v\n", filepath.Base(p), err)
 			continue
 		}
@@ -437,5 +531,9 @@ func printScreenshotsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --auth-token / --auth-workspace-id   baked into the Release build for signed-in captures")
 	fmt.Fprintln(w, "  --status-bar-time <t>    status bar time override (default 9:41)")
 	fmt.Fprintln(w, "  --app <app-id> --upload  push captures to the listing + publish kind=screenshots")
+	fmt.Fprintln(w, "  --app <app-id>           also loads the stored capture recipe (scheme/flow/env defaults)")
+	fmt.Fprintln(w, "  --save-recipe            store this run's inputs as the app's recipe")
+	fmt.Fprintln(w, "  --display-type <t>       ASC display type tag for uploads (default APP_IPHONE_67)")
+	fmt.Fprintln(w, "  --locale <l>             locale tag for uploads (default en-US)")
 	fmt.Fprintln(w, "  --dry-run                print the capture plan without running it")
 }
