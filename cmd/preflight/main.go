@@ -15685,6 +15685,8 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		return runAppsChecklist(args[1:], stdout, stderr, client)
 	case "doctor":
 		return runAppsDoctor(args[1:], stdout, stderr, client)
+	case "deps":
+		return runAppsDeps(args[1:], stdout, stderr, client)
 	case "submit-for-review":
 		return runAppsSubmitForReview(args[1:], stdout, stderr, client)
 	case "screenshots":
@@ -15706,6 +15708,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps status <app-id|slug|name> [--platform ...] [--json]")
 	fmt.Fprintln(w, "  preflight apps checklist set <app-id|slug> --key <key> --status <pending|done|blocked|not_applicable> [--note <text>] [--platform ...]")
 	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
+	fmt.Fprintln(w, "  preflight apps deps --all [--root <dir>] [--target <sdk>] [--json]  fleet Expo SDK/plugin/dependency snapshot + drift")
 	fmt.Fprintln(w, "  preflight apps scan-bundle <bundle|.app|.ipa>       scan a built artifact for store poison (localhost/E2E)")
 	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")
 	fmt.Fprintln(w, "  preflight apps screenshots --scheme <s> --sim <udid> [--flow f.yaml] [--app <id> --upload]  capture App Store screenshots (R5)")
