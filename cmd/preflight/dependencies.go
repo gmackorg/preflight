@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -137,9 +138,31 @@ func snapshotAppDeps(appDir string) (*depSnapshot, error) {
 	return snap, nil
 }
 
+// reportDepsSnapshot POSTs a snapshot to the app's dependencies route so it
+// persists on the fleet board (append-only history for SDK drift over time).
+func reportDepsSnapshot(client *http.Client, appID string, snap *depSnapshot) error {
+	apiURL, token := preflightAPIConfig()
+	if apiURL == "" || token == "" {
+		return fmt.Errorf("no Preflight API url/token (set PREFLIGHT_API_URL/PREFLIGHT_TOKEN or run `preflight config`)")
+	}
+	payload := map[string]any{
+		"expoSdk":      snap.ExpoSDK,
+		"expoMajor":    snap.ExpoMajor,
+		"reactNative":  snap.ReactNative,
+		"plugins":      snap.Plugins,
+		"expoPackages": snap.ExpoPackages,
+		"rnPackages":   snap.RNPackages,
+		"drift":        snap.Drift,
+	}
+	endpoint := strings.TrimRight(apiURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/dependencies"
+	_, err := postPreflightJSON(client, endpoint, token, payload)
+	return err
+}
+
 func runAppsDeps(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	path, root := "", ""
-	asJSON, all := false, false
+	path, root, appID := "", "", ""
+	asJSON, all, doReport := false, false, false
 	target := 0
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -153,6 +176,13 @@ func runAppsDeps(args []string, stdout io.Writer, stderr io.Writer, client *http
 				root = args[i+1]
 				i++
 			}
+		case "--app":
+			if i+1 < len(args) {
+				appID = args[i+1]
+				i++
+			}
+		case "--report":
+			doReport = true
 		case "--all":
 			all = true
 		case "--json":
@@ -210,6 +240,22 @@ func runAppsDeps(args []string, stdout io.Writer, stderr io.Writer, client *http
 		}
 		return snaps[i].AppDir < snaps[j].AppDir
 	})
+
+	if doReport {
+		if appID == "" {
+			fmt.Fprintln(stderr, "apps deps --report needs --app <id> (single-app reporting; fleet-wide auto-mapping is not yet wired)")
+			return 2
+		}
+		if len(snaps) != 1 {
+			fmt.Fprintf(stderr, "apps deps --report --app expects exactly one Expo app (found %d); scope it with --path <app-dir>\n", len(snaps))
+			return 2
+		}
+		if err := reportDepsSnapshot(client, appID, snaps[0]); err != nil {
+			fmt.Fprintf(stderr, "report failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "reported dependency snapshot for app %s (expo %s)\n", appID, snaps[0].ExpoSDK)
+	}
 
 	if asJSON {
 		enc := json.NewEncoder(stdout)
@@ -306,6 +352,7 @@ func printAppsDepsHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  preflight apps deps --path <app-dir> [--json]")
 	fmt.Fprintln(w, "  preflight apps deps --all [--root <dir>] [--target <sdk>] [--json]")
+	fmt.Fprintln(w, "  preflight apps deps --path <app-dir> --app <app-id> --report   persist a snapshot to the board")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Snapshot each Expo app's SDK version, config plugins, and expo-*/@expo/*")
 	fmt.Fprintln(w, "/react-native-* package versions, and flag SDK drift across the fleet.")
