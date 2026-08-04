@@ -140,3 +140,24 @@ func TestRenderReviewerNotesText(t *testing.T) {
 		t.Errorf("notes %d chars exceeds ASC ~4000 cap", len(notes))
 	}
 }
+
+func TestHasUnresolvedTemplate(t *testing.T) {
+	// Review flows declare account emails as Maestro templates the runner
+	// substitutes at run time. Forwarding an unsubstituted one to App Store
+	// Connect ships a literal "${TF_ACCOUNT_EMAIL}" to the reviewer.
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"${TF_ACCOUNT_EMAIL}", true},
+		{"prefix-${VAR}-suffix", true},
+		{"reviewer@demo.preflight.app", false},
+		{"", false},
+		{"costs $5", false},
+		{"${unterminated", false},
+	} {
+		if got := hasUnresolvedTemplate(tc.value); got != tc.want {
+			t.Errorf("hasUnresolvedTemplate(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}

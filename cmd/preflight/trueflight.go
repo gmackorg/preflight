@@ -442,16 +442,26 @@ func runReviewNotes(args []string, stdout io.Writer, stderr io.Writer, client *h
 	}
 	notes := renderReviewerNotesText(workflows)
 
+	// A flow's email is a Maestro template ("${TF_ACCOUNT_EMAIL}") that the
+	// runner substitutes at run time from the registered demo account. It is
+	// NOT a literal address: sending it as demoAccountName ships
+	// "${TF_ACCOUNT_EMAIL}" to App Review. Drop it and let the server resolve
+	// the app's registered demo account instead (it already prefers one whose
+	// last probe passed, and reveals the password server-side).
+	demoUsable := demo.Email != "" && !hasUnresolvedTemplate(demo.Email)
+
 	if dryRun {
 		fmt.Fprintf(stdout, "Reviewer notes for %s (%d workflows):\n\n%s\n", appID, len(workflows), notes)
-		if demo.Email != "" {
+		if demoUsable {
 			fmt.Fprintf(stdout, "Demo account: %s (%s)\n", demo.Email, demo.Role)
+		} else if demo.Email != "" {
+			fmt.Fprintf(stdout, "Demo account: resolved server-side from the registered demo account (flow declares the template %s for role %q)\n", demo.Email, demo.Role)
 		}
 		return 0
 	}
 
 	payload := map[string]any{"notes": notes}
-	if demo.Email != "" {
+	if demoUsable {
 		payload["demoAccountName"] = demo.Email
 		if pw := secrets[demo.SecretRef]; pw != "" {
 			payload["demoAccountPassword"] = pw
@@ -684,4 +694,13 @@ func runReviewCompile(args []string, stdout io.Writer, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Compiled %q (%d steps):\n  flow:   %s\n  guide:  %s\n",
 		wf.ID, len(wf.Steps), flowOut, mdOut)
 	return 0
+}
+
+// hasUnresolvedTemplate reports whether a value still carries a "${VAR}"
+// placeholder. Review flows declare account emails as Maestro templates the
+// runner substitutes at run time, so an unsubstituted one must never be
+// forwarded to App Store Connect as a real address.
+func hasUnresolvedTemplate(value string) bool {
+	i := strings.Index(value, "${")
+	return i >= 0 && strings.Contains(value[i:], "}")
 }
