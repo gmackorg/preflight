@@ -160,12 +160,111 @@ func reportDepsSnapshot(client *http.Client, appID string, snap *depSnapshot) er
 	return err
 }
 
+// depsSweepReport snapshots every Expo app under root and POSTs each to its
+// fleet app's dependencies route, mapping checkout→app-id exactly like the
+// doctor sweep (EAS projectId → expo slug → repo dir name → git remote →
+// opt-in expo-config resolve). Backfills pf_app_dependency_snapshot fleet-wide.
+func depsSweepReport(client *http.Client, root string, resolveConfig bool, stdout, stderr io.Writer) int {
+	apiURL, token := preflightAPIConfig()
+	if apiURL == "" || token == "" {
+		fmt.Fprintln(stderr, "--report needs a Preflight API url/token (run `preflight config`)")
+		return 2
+	}
+	rows, err := fetchFleetReleaseRows(client, releaseStatusCLIOptions{
+		apiURL: apiURL, token: token, platform: "ios",
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "fetch fleet failed: %v\n", err)
+		return 1
+	}
+	byProject, bySlug, byName, byRepo := map[string]string{}, map[string]string{}, map[string]string{}, map[string]string{}
+	for _, r := range rows {
+		if r.EASProjectID != "" {
+			byProject[strings.ToLower(r.EASProjectID)] = r.AppID
+		}
+		if r.Slug != "" {
+			bySlug[strings.ToLower(r.Slug)] = r.AppID
+		}
+		if r.Name != "" {
+			byName[strings.ToLower(r.Name)] = r.AppID
+		}
+		if norm := normalizeGitRemote(r.GithubRepoURL); norm != "" {
+			byRepo[norm] = r.AppID
+		}
+	}
+
+	reported, skipped := 0, 0
+	var unmatched []string
+	fmt.Fprintf(stdout, "Reporting Expo dependency snapshots — %s\n\n", root)
+	for _, ad := range findEASAppDirs(root) {
+		rel, relErr := filepath.Rel(root, ad)
+		if relErr != nil {
+			rel = ad
+		}
+		snap, snapErr := snapshotAppDeps(ad)
+		if snapErr != nil || snap == nil {
+			continue // not an Expo app (no expo dep)
+		}
+		appID := ""
+		if pid := extractEASProjectID(ad); pid != "" {
+			appID = byProject[pid]
+		}
+		if appID == "" {
+			if slug := extractExpoSlug(ad); slug != "" {
+				appID = bySlug[strings.ToLower(slug)]
+			}
+		}
+		if appID == "" {
+			repo := strings.ToLower(repoNameUnderRoot(root, ad))
+			appID = firstNonEmpty(bySlug[repo], byName[repo])
+		}
+		if appID == "" && len(byRepo) > 0 {
+			for _, remote := range checkoutGitRemotes(ad) {
+				if norm := normalizeGitRemote(remote); norm != "" {
+					if appID = byRepo[norm]; appID != "" {
+						break
+					}
+				}
+			}
+		}
+		if appID == "" && resolveConfig && len(byProject) > 0 {
+			fmt.Fprintf(stdout, "  ····  %-42s → resolving via expo config…\n", rel)
+			if pid, slug := resolveAppIdentityViaExpo(ad); pid != "" || slug != "" {
+				appID = firstNonEmpty(byProject[pid], bySlug[slug])
+			}
+		}
+		if appID == "" {
+			unmatched = append(unmatched, rel)
+			continue
+		}
+		if repErr := reportDepsSnapshot(client, appID, snap); repErr != nil {
+			fmt.Fprintf(stderr, "  %-42s report failed: %v\n", rel, repErr)
+			skipped++
+			continue
+		}
+		reported++
+		flag := ""
+		if len(snap.Drift) > 0 {
+			flag = fmt.Sprintf("  (%d drift)", len(snap.Drift))
+		}
+		fmt.Fprintf(stdout, "  expo %-9s %-42s → %s%s\n", snap.ExpoSDK, rel, appID, flag)
+	}
+	fmt.Fprintf(stdout, "\nreported %d apps; %d failed; %d unmatched\n", reported, skipped, len(unmatched))
+	if len(unmatched) > 0 {
+		fmt.Fprintf(stdout, "unmatched (no fleet app by projectId/slug/name/remote — template or unregistered): %s\n",
+			strings.Join(unmatched, ", "))
+	}
+	return 0
+}
+
 func runAppsDeps(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	path, root, appID := "", "", ""
-	asJSON, all, doReport := false, false, false
+	asJSON, all, doReport, resolveConfig := false, false, false, false
 	target := 0
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--resolve-config":
+			resolveConfig = true
 		case "--path":
 			if i+1 < len(args) {
 				path = args[i+1]
@@ -196,6 +295,19 @@ func runAppsDeps(args []string, stdout io.Writer, stderr io.Writer, client *http
 			printAppsDepsHelp(stdout)
 			return 0
 		}
+	}
+
+	// Fleet-wide backfill: snapshot every app under root and POST each to its
+	// mapped fleet app. Distinct from the view path below.
+	if doReport && all {
+		if root == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				root = cwd
+			} else {
+				root = "."
+			}
+		}
+		return depsSweepReport(client, root, resolveConfig, stdout, stderr)
 	}
 
 	var appDirs []string
@@ -352,7 +464,8 @@ func printAppsDepsHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  preflight apps deps --path <app-dir> [--json]")
 	fmt.Fprintln(w, "  preflight apps deps --all [--root <dir>] [--target <sdk>] [--json]")
-	fmt.Fprintln(w, "  preflight apps deps --path <app-dir> --app <app-id> --report   persist a snapshot to the board")
+	fmt.Fprintln(w, "  preflight apps deps --path <app-dir> --app <app-id> --report   persist one snapshot to the board")
+	fmt.Fprintln(w, "  preflight apps deps --all --report [--root <dir>] [--resolve-config]  backfill snapshots for the whole fleet")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Snapshot each Expo app's SDK version, config plugins, and expo-*/@expo/*")
 	fmt.Fprintln(w, "/react-native-* package versions, and flag SDK drift across the fleet.")
