@@ -31,6 +31,17 @@ const sentryMinInterval = 260 * time.Millisecond
 // `crucible-mobile` still resolves to the `crucible` preflight app.
 var sentryProjectSuffixes = []string{"-mobile", "-app", "-native", "-ios", "-android", "-expo"}
 
+// Built-in aliases for fleet apps whose Sentry project slug doesn't line up with
+// their preflight slug/name (auto-match can't bridge these). Keyed by the base
+// Sentry project slug (after suffix stripping). Overridable via --alias.
+var defaultSentryAliases = map[string]string{
+	"classcheck":      "pfapp_seed_classcheck_app",
+	"habitplay":       "pfapp_seed_habit_play",
+	"latchflow":       "pfapp_seed_escape_puzzles",
+	"controlsfoundry": "pfapp_seed_edgeops_mobile",
+	"appealkey":       "pfapp_seed_truecomps_app",
+}
+
 // --- Sentry API response shapes (only the fields we consume) ---
 
 type sentryProject struct {
@@ -283,11 +294,22 @@ func normalizeSentryIssue(issue sentryIssue, latest *sentryEvent) sentryErrorPay
 	}
 }
 
-// matchSentryProject auto-matches a Sentry project to a preflight app id by slug
-// then name (case-insensitive), then by slug with a variant suffix stripped
-// (e.g. `crucible-mobile` → `crucible`). Returns "" when nothing lines up.
-func matchSentryProject(project sentryProject, bySlug, byName map[string]string) string {
+// matchSentryProject resolves a Sentry project to a preflight app id: explicit
+// alias first, then auto-match by slug/name (case-insensitive), then the same
+// with a variant suffix stripped (e.g. `crucible-mobile` → `crucible`, or the
+// aliased `classcheck-mobile` → `classcheck`). Returns "" when nothing matches.
+func matchSentryProject(project sentryProject, aliases, bySlug, byName map[string]string) string {
 	slug := strings.ToLower(project.Slug)
+	base := slug
+	for _, suffix := range sentryProjectSuffixes {
+		if strings.HasSuffix(slug, suffix) {
+			base = strings.TrimSuffix(slug, suffix)
+			break
+		}
+	}
+	if id := firstNonEmpty(aliases[slug], aliases[base]); id != "" {
+		return id
+	}
 	if id := bySlug[slug]; id != "" {
 		return id
 	}
@@ -297,12 +319,9 @@ func matchSentryProject(project sentryProject, bySlug, byName map[string]string)
 	if id := byName[slug]; id != "" {
 		return id
 	}
-	for _, suffix := range sentryProjectSuffixes {
-		if strings.HasSuffix(slug, suffix) {
-			base := strings.TrimSuffix(slug, suffix)
-			if id := firstNonEmpty(bySlug[base], byName[base]); id != "" {
-				return id
-			}
+	if base != slug {
+		if id := firstNonEmpty(bySlug[base], byName[base]); id != "" {
+			return id
 		}
 	}
 	return ""
@@ -321,6 +340,7 @@ type sentrySyncOptions struct {
 	limit        int
 	json         bool
 	dryRun       bool
+	aliases      map[string]string
 	preflightURL string
 	preflightTok string
 }
@@ -355,6 +375,7 @@ func printSentryHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --stats-period <p>      Sentry stats period (default 14d)")
 	fmt.Fprintln(w, "  --query <q>             Issue search query (default \"is:unresolved\")")
 	fmt.Fprintln(w, "  --limit <N>             Max issues per project (default 50)")
+	fmt.Fprintln(w, "  --alias <slug=appId>    Map a Sentry project slug to a preflight app id (repeatable)")
 	fmt.Fprintln(w, "  --dry-run               Fetch + normalize but don't POST to preflight")
 	fmt.Fprintln(w, "  --json                  Emit a JSON summary")
 }
@@ -365,6 +386,10 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 		statsPeriod: defaultSentryStatsPeriod,
 		query:       defaultSentryIssueQuery,
 		limit:       defaultSentryIssueLimit,
+		aliases:     map[string]string{},
+	}
+	for k, v := range defaultSentryAliases {
+		opts.aliases[k] = v
 	}
 	authTokenEnv := "SENTRY_AUTH_TOKEN"
 
@@ -408,6 +433,17 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			}
 			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 				opts.limit = n
+			}
+		case "--alias":
+			var pair string
+			if !nextInto(args, &i, &pair, stderr, "--alias") {
+				return 2
+			}
+			if k, v, ok := strings.Cut(pair, "="); ok {
+				opts.aliases[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+			} else {
+				fmt.Fprintf(stderr, "--alias expects slug=appId, got %q\n", pair)
+				return 2
 			}
 		case "--dry-run":
 			opts.dryRun = true
@@ -482,7 +518,7 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 	for _, project := range projects {
 		appID := opts.forcedAppID
 		if appID == "" {
-			appID = matchSentryProject(project, bySlug, byName)
+			appID = matchSentryProject(project, opts.aliases, bySlug, byName)
 		}
 		if appID == "" {
 			unmatched = append(unmatched, project.Slug)

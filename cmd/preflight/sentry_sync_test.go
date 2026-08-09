@@ -176,22 +176,30 @@ func TestNormalizeSentryIssue(t *testing.T) {
 }
 
 func TestMatchSentryProject(t *testing.T) {
+	aliases := map[string]string{"classcheck": "pfapp_seed_classcheck"}
 	bySlug := map[string]string{"crucible": "pfapp_crucible"}
 	byName := map[string]string{"class check": "pfapp_classcheck"}
-	if id := matchSentryProject(sentryProject{Slug: "Crucible"}, bySlug, byName); id != "pfapp_crucible" {
+	if id := matchSentryProject(sentryProject{Slug: "Crucible"}, aliases, bySlug, byName); id != "pfapp_crucible" {
 		t.Errorf("slug match failed: %q", id)
 	}
-	if id := matchSentryProject(sentryProject{Slug: "x", Name: "Class Check"}, bySlug, byName); id != "pfapp_classcheck" {
+	if id := matchSentryProject(sentryProject{Slug: "x", Name: "Class Check"}, aliases, bySlug, byName); id != "pfapp_classcheck" {
 		t.Errorf("name match failed: %q", id)
 	}
-	if id := matchSentryProject(sentryProject{Slug: "unknown", Name: "nope"}, bySlug, byName); id != "" {
+	if id := matchSentryProject(sentryProject{Slug: "unknown", Name: "nope"}, aliases, bySlug, byName); id != "" {
 		t.Errorf("expected no match, got %q", id)
 	}
 	// The mobile Sentry project resolves to the base app via suffix stripping.
-	if id := matchSentryProject(sentryProject{Slug: "crucible-mobile"}, bySlug, byName); id != "pfapp_crucible" {
+	if id := matchSentryProject(sentryProject{Slug: "crucible-mobile"}, aliases, bySlug, byName); id != "pfapp_crucible" {
 		t.Errorf("suffix-stripped match failed: %q", id)
 	}
-	if id := matchSentryProject(sentryProject{Slug: "crucible-backend"}, bySlug, byName); id != "" {
+	if id := matchSentryProject(sentryProject{Slug: "crucible-backend"}, aliases, bySlug, byName); id != "" {
 		t.Errorf("non-app suffix should not match base: %q", id)
+	}
+	// Alias wins, including via suffix-stripped base (classcheck-mobile).
+	if id := matchSentryProject(sentryProject{Slug: "classcheck"}, aliases, bySlug, byName); id != "pfapp_seed_classcheck" {
+		t.Errorf("alias match failed: %q", id)
+	}
+	if id := matchSentryProject(sentryProject{Slug: "classcheck-mobile"}, aliases, bySlug, byName); id != "pfapp_seed_classcheck" {
+		t.Errorf("alias via suffix-strip failed: %q", id)
 	}
 }
