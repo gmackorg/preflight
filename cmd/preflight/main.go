@@ -108,6 +108,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runCredentials(args[1:], stdout, stderr, client)
 	case "providers":
 		return runProviders(args[1:], stdout, stderr, client)
+	case "sentry":
+		return runSentry(args[1:], stdout, stderr, client)
 	case "provider-readiness":
 		return runProviderReadiness(args[1:], stdout, stderr, client)
 	case "credential-flows":
@@ -139,6 +141,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  targets       Register and list local simulator/device inventory")
 	fmt.Fprintln(w, "  credentials   Manage Preflight-owned credential references")
 	fmt.Fprintln(w, "  providers     Manage mobile provider accounts")
+	fmt.Fprintln(w, "  sentry        Relay Sentry issues into crash/error tracking (`sentry sync`)")
 	fmt.Fprintln(w, "  provider-readiness  Inspect or record app provider readiness")
 	fmt.Fprintln(w, "  credential-flows    Inspect provider credential/setup flows")
 	fmt.Fprintln(w, "  oauth-clients Manage Google and Apple OAuth client records")
