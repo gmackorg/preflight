@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // `preflight sentry sync` relays raw Sentry issues into preflight's crash/error
@@ -20,6 +21,15 @@ import (
 const defaultSentryStatsPeriod = "14d"
 const defaultSentryIssueQuery = "is:unresolved"
 const defaultSentryIssueLimit = 50
+
+// Sentry's default rate limit is ~5 requests/second. Keep a hair under 4/s and
+// back off on 429 so a full-fleet sweep doesn't get throttled mid-run.
+const sentryMinInterval = 260 * time.Millisecond
+
+// Project-slug suffixes that name a variant of the same app (the mobile Sentry
+// project is where RN crash data lives). Stripped as a fallback match so
+// `crucible-mobile` still resolves to the `crucible` preflight app.
+var sentryProjectSuffixes = []string{"-mobile", "-app", "-native", "-ios", "-android", "-expo"}
 
 // --- Sentry API response shapes (only the fields we consume) ---
 
@@ -274,16 +284,26 @@ func normalizeSentryIssue(issue sentryIssue, latest *sentryEvent) sentryErrorPay
 }
 
 // matchSentryProject auto-matches a Sentry project to a preflight app id by slug
-// then name (case-insensitive). Returns "" when nothing lines up.
+// then name (case-insensitive), then by slug with a variant suffix stripped
+// (e.g. `crucible-mobile` → `crucible`). Returns "" when nothing lines up.
 func matchSentryProject(project sentryProject, bySlug, byName map[string]string) string {
-	if id := bySlug[strings.ToLower(project.Slug)]; id != "" {
+	slug := strings.ToLower(project.Slug)
+	if id := bySlug[slug]; id != "" {
 		return id
 	}
 	if id := byName[strings.ToLower(project.Name)]; id != "" {
 		return id
 	}
-	if id := byName[strings.ToLower(project.Slug)]; id != "" {
+	if id := byName[slug]; id != "" {
 		return id
+	}
+	for _, suffix := range sentryProjectSuffixes {
+		if strings.HasSuffix(slug, suffix) {
+			base := strings.TrimSuffix(slug, suffix)
+			if id := firstNonEmpty(bySlug[base], byName[base]); id != "" {
+				return id
+			}
+		}
 	}
 	return ""
 }
@@ -532,29 +552,42 @@ func nextInto(args []string, i *int, dst *string, stderr io.Writer, flag string)
 }
 
 func sentryGet(client *http.Client, opts sentrySyncOptions, endpoint string, out any) error {
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+opts.authToken)
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := strings.TrimSpace(string(body))
-		if len(msg) > 200 {
-			msg = msg[:200]
+	// Throttle + retry on 429 to stay under Sentry's ~5 req/s limit.
+	for attempt := 0; ; attempt++ {
+		time.Sleep(sentryMinInterval)
+		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("Sentry HTTP %d: %s", resp.StatusCode, msg)
+		req.Header.Set("Authorization", "Bearer "+opts.authToken)
+		req.Header.Set("Accept", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		retryAfter := resp.Header.Get("Retry-After")
+		resp.Body.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if resp.StatusCode == http.StatusTooManyRequests && attempt < 4 {
+			wait := 1500 * time.Millisecond
+			if secs, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && secs > 0 {
+				wait = time.Duration(secs) * time.Second
+			}
+			time.Sleep(wait)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			msg := strings.TrimSpace(string(body))
+			if len(msg) > 200 {
+				msg = msg[:200]
+			}
+			return fmt.Errorf("Sentry HTTP %d: %s", resp.StatusCode, msg)
+		}
+		return json.Unmarshal(body, out)
 	}
-	return json.Unmarshal(body, out)
 }
 
 func listSentryProjects(client *http.Client, opts sentrySyncOptions) ([]sentryProject, error) {
@@ -610,11 +643,11 @@ func postSentryErrors(client *http.Client, opts sentrySyncOptions, appID string,
 	if err != nil {
 		return sentryPostResult{}, err
 	}
-	var envelope struct {
-		Data sentryPostResult `json:"data"`
+	// postPreflightJSON already unwraps the envelope's `data`, so `raw` is the
+	// route's result object directly.
+	var result sentryPostResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return sentryPostResult{}, fmt.Errorf("decode errors response: %w", err)
 	}
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return sentryPostResult{}, nil
-	}
-	return envelope.Data, nil
+	return result, nil
 }

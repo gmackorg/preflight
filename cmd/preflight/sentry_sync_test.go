@@ -187,4 +187,11 @@ func TestMatchSentryProject(t *testing.T) {
 	if id := matchSentryProject(sentryProject{Slug: "unknown", Name: "nope"}, bySlug, byName); id != "" {
 		t.Errorf("expected no match, got %q", id)
 	}
+	// The mobile Sentry project resolves to the base app via suffix stripping.
+	if id := matchSentryProject(sentryProject{Slug: "crucible-mobile"}, bySlug, byName); id != "pfapp_crucible" {
+		t.Errorf("suffix-stripped match failed: %q", id)
+	}
+	if id := matchSentryProject(sentryProject{Slug: "crucible-backend"}, bySlug, byName); id != "" {
+		t.Errorf("non-app suffix should not match base: %q", id)
+	}
 }
