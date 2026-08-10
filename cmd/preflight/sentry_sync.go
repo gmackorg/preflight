@@ -511,6 +511,7 @@ type sentrySyncOptions struct {
 	limit        int
 	json         bool
 	dryRun       bool
+	alert        bool
 	aliases      map[string]string
 	preflightURL string
 	preflightTok string
@@ -548,6 +549,7 @@ func printSentryHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --limit <N>             Max issues per project (default 50)")
 	fmt.Fprintln(w, "  --alias <slug=appId>    Map a Sentry project slug to a preflight app id (repeatable)")
 	fmt.Fprintln(w, "  --dry-run               Fetch + normalize but don't POST to preflight")
+	fmt.Fprintln(w, "  --alert                 After syncing, evaluate crash alert rules + notify")
 	fmt.Fprintln(w, "  --json                  Emit a JSON summary")
 }
 
@@ -618,6 +620,8 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			}
 		case "--dry-run":
 			opts.dryRun = true
+		case "--alert":
+			opts.alert = true
 		case "--json":
 			opts.json = true
 		default:
@@ -727,6 +731,16 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 		fmt.Fprintf(stdout, "  %-30s → %-24s %d issues (%d new, %d dup)\n",
 			project.Slug, appID, rep.issues, rep.newGroup, rep.deduped)
 		reports = append(reports, rep)
+	}
+
+	// After syncing, evaluate crash alert rules so a fresh regression raises a
+	// notification on the board (opt-in via --alert).
+	if opts.alert && !opts.dryRun {
+		if raised, err := evaluateCrashAlerts(client, opts); err != nil {
+			fmt.Fprintf(stderr, "alert evaluation failed: %v\n", err)
+		} else if raised > 0 {
+			fmt.Fprintf(stdout, "raised %d crash alert(s)\n", raised)
+		}
 	}
 
 	if opts.json {
@@ -857,4 +871,22 @@ func postSentryErrors(client *http.Client, opts sentrySyncOptions, appID string,
 		return sentryPostResult{}, fmt.Errorf("decode errors response: %w", err)
 	}
 	return result, nil
+}
+
+// evaluateCrashAlerts asks the server to evaluate crash.* alert rules across the
+// caller's workspaces + write notifications. Returns the number raised.
+func evaluateCrashAlerts(client *http.Client, opts sentrySyncOptions) (int, error) {
+	endpoint := strings.TrimRight(opts.preflightURL, "/") +
+		"/api/preflight/v1/crashes/alerts/evaluate"
+	raw, err := postPreflightJSON(client, endpoint, opts.preflightTok, map[string]any{})
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		Raised int `json:"raised"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return 0, nil
+	}
+	return result.Raised, nil
 }
