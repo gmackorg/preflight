@@ -175,6 +175,61 @@ func TestNormalizeSentryIssue(t *testing.T) {
 	}
 }
 
+func TestNormalizeSentryIssueEnrichesFromContexts(t *testing.T) {
+	issue := sentryIssue{ID: "1", Title: "boom", Level: "error", Platform: "javascript"}
+	issue.Metadata.Type = "Error"
+
+	appCtx, _ := json.Marshal(map[string]any{"app_version": "1.4.0", "app_build": "231"})
+	osCtx, _ := json.Marshal(map[string]any{"name": "iOS", "version": "18.3"})
+	devCtx, _ := json.Marshal(map[string]any{"model": "iPhone16,1", "family": "iPhone"})
+	bc, _ := json.Marshal(map[string]any{
+		"values": []map[string]any{
+			{"category": "navigation", "message": "Home -> Profile", "level": "info", "timestamp": "2026-08-09T10:00:00Z"},
+		},
+	})
+	event := &sentryEvent{
+		EventID:  "e1",
+		Platform: "cocoa",
+		Contexts: map[string]json.RawMessage{"app": appCtx, "os": osCtx, "device": devCtx},
+		Tags: []struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}{{Key: "environment", Value: "production"}},
+		Entries: []struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}{{Type: "breadcrumbs", Data: bc}},
+	}
+	p := normalizeSentryIssue(issue, event)
+	if p.Release != "1.4.0 (231)" || p.AppVersion != "1.4.0" {
+		t.Errorf("release/appVersion wrong: %q / %q", p.Release, p.AppVersion)
+	}
+	if p.OsName != "iOS" || p.OsVersion != "18.3" || p.DeviceModel != "iPhone16,1" {
+		t.Errorf("os/device wrong: %+v", p)
+	}
+	if len(p.Breadcrumbs) != 1 || p.Breadcrumbs[0].Category != "navigation" {
+		t.Errorf("breadcrumbs wrong: %+v", p.Breadcrumbs)
+	}
+	if p.Context["environment"] != "production" {
+		t.Errorf("environment not captured: %+v", p.Context)
+	}
+}
+
+func TestNormalizeSentryIssueWorkerRuntime(t *testing.T) {
+	// A Cloudflare Worker error: platform tag says javascript but the runtime
+	// context should reclassify it as node, not expo.
+	issue := sentryIssue{ID: "2", Title: "worker boom", Level: "error", Platform: "javascript"}
+	rtCtx, _ := json.Marshal(map[string]any{"name": "cloudflare"})
+	event := &sentryEvent{Platform: "javascript", Contexts: map[string]json.RawMessage{"runtime": rtCtx}}
+	p := normalizeSentryIssue(issue, event)
+	if p.Runtime != "node" {
+		t.Errorf("worker runtime = %q, want node", p.Runtime)
+	}
+	if p.Context["sentryRuntime"] != "cloudflare" {
+		t.Errorf("sentryRuntime context missing: %+v", p.Context)
+	}
+}
+
 func TestMatchSentryProject(t *testing.T) {
 	aliases := map[string]string{"classcheck": "pfapp_seed_classcheck"}
 	bySlug := map[string]string{"crucible": "pfapp_crucible"}

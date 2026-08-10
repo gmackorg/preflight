@@ -83,6 +83,39 @@ type sentryEvent struct {
 		Type string          `json:"type"`
 		Data json.RawMessage `json:"data"`
 	} `json:"entries"`
+	// Structured contexts (app/os/device/runtime/…). Values are heterogeneous
+	// so we decode the ones we care about individually.
+	Contexts map[string]json.RawMessage `json:"contexts"`
+}
+
+// Sentry breadcrumb entry payload (entries[].type == "breadcrumbs").
+type sentryBreadcrumbData struct {
+	Values []struct {
+		Timestamp any                    `json:"timestamp"`
+		Category  string                 `json:"category"`
+		Level     string                 `json:"level"`
+		Message   string                 `json:"message"`
+		Type      string                 `json:"type"`
+		Data      map[string]interface{} `json:"data"`
+	} `json:"values"`
+}
+
+// Only the context fields we lift onto the error payload.
+type sentryContexts struct {
+	release     string
+	appVersion  string
+	osName      string
+	osVersion   string
+	deviceModel string
+	runtimeName string
+}
+
+type sentryBreadcrumb struct {
+	Timestamp string                 `json:"timestamp,omitempty"`
+	Category  string                 `json:"category,omitempty"`
+	Level     string                 `json:"level,omitempty"`
+	Message   string                 `json:"message,omitempty"`
+	Data      map[string]interface{} `json:"data,omitempty"`
 }
 
 // The exception entry payload (entries[].type == "exception").
@@ -130,9 +163,118 @@ type sentryErrorPayload struct {
 	Stack           []sentryStackFrame `json:"stack,omitempty"`
 	IsFatal         bool               `json:"isFatal,omitempty"`
 	Release         string             `json:"release,omitempty"`
+	AppVersion      string             `json:"appVersion,omitempty"`
+	OsName          string             `json:"osName,omitempty"`
+	OsVersion       string             `json:"osVersion,omitempty"`
+	DeviceModel     string             `json:"deviceModel,omitempty"`
+	Breadcrumbs     []sentryBreadcrumb `json:"breadcrumbs,omitempty"`
 	IssueURL        string             `json:"issueUrl,omitempty"`
 	OccurredAt      string             `json:"occurredAt,omitempty"`
 	Context         map[string]any     `json:"context,omitempty"`
+}
+
+// extractSentryContexts lifts app/os/device/runtime details from an event's
+// structured contexts. Mobile events carry app+os+device; server/worker events
+// carry runtime. Everything is best-effort.
+func extractSentryContexts(event *sentryEvent) sentryContexts {
+	out := sentryContexts{}
+	if event == nil || event.Contexts == nil {
+		return out
+	}
+	if raw, ok := event.Contexts["app"]; ok {
+		var app struct {
+			AppVersion string `json:"app_version"`
+			AppBuild   string `json:"app_build"`
+		}
+		if json.Unmarshal(raw, &app) == nil {
+			out.appVersion = app.AppVersion
+			if app.AppVersion != "" && app.AppBuild != "" {
+				out.release = fmt.Sprintf("%s (%s)", app.AppVersion, app.AppBuild)
+			} else {
+				out.release = firstNonEmpty(app.AppVersion, app.AppBuild)
+			}
+		}
+	}
+	if raw, ok := event.Contexts["os"]; ok {
+		var os struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(raw, &os) == nil {
+			out.osName = os.Name
+			out.osVersion = os.Version
+		}
+	}
+	if raw, ok := event.Contexts["device"]; ok {
+		var dev struct {
+			Model  string `json:"model"`
+			Family string `json:"family"`
+		}
+		if json.Unmarshal(raw, &dev) == nil {
+			out.deviceModel = firstNonEmpty(dev.Model, dev.Family)
+		}
+	}
+	if raw, ok := event.Contexts["runtime"]; ok {
+		var rt struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &rt) == nil {
+			out.runtimeName = rt.Name
+		}
+	}
+	return out
+}
+
+// sentryEventEnvironment pulls the environment tag (development/production/…).
+func sentryEventEnvironment(event *sentryEvent) string {
+	if event == nil {
+		return ""
+	}
+	for _, tag := range event.Tags {
+		if tag.Key == "environment" {
+			return tag.Value
+		}
+	}
+	return ""
+}
+
+// extractSentryBreadcrumbs converts an event's breadcrumb trail (oldest→newest
+// in Sentry) into preflight breadcrumbs, capped to the most recent 30.
+func extractSentryBreadcrumbs(event *sentryEvent) []sentryBreadcrumb {
+	if event == nil {
+		return nil
+	}
+	for _, entry := range event.Entries {
+		if entry.Type != "breadcrumbs" {
+			continue
+		}
+		var data sentryBreadcrumbData
+		if json.Unmarshal(entry.Data, &data) != nil {
+			return nil
+		}
+		crumbs := make([]sentryBreadcrumb, 0, len(data.Values))
+		for _, v := range data.Values {
+			ts := ""
+			switch t := v.Timestamp.(type) {
+			case string:
+				ts = t
+			case float64:
+				ts = strconv.FormatFloat(t, 'f', -1, 64)
+			}
+			crumbs = append(crumbs, sentryBreadcrumb{
+				Timestamp: ts,
+				Category:  firstNonEmpty(v.Category, v.Type),
+				Level:     v.Level,
+				Message:   v.Message,
+				Data:      v.Data,
+			})
+		}
+		if len(crumbs) > 30 {
+			crumbs = crumbs[len(crumbs)-30:]
+		}
+		return crumbs
+	}
+	return nil
 }
 
 // mapSentryLevel collapses Sentry levels onto preflight's error levels.
@@ -158,7 +300,8 @@ func sentryRuntime(platform string) string {
 	switch {
 	case strings.Contains(p, "unity"), strings.Contains(p, "csharp"), strings.Contains(p, "dotnet"):
 		return "unity"
-	case strings.Contains(p, "node"):
+	case strings.Contains(p, "node"), strings.Contains(p, "cloudflare"),
+		strings.Contains(p, "deno"), strings.Contains(p, "worker"):
 		return "node"
 	case strings.Contains(p, "react-native"), strings.Contains(p, "javascript"),
 		strings.Contains(p, "cocoa"), p == "apple-ios", strings.Contains(p, "android"),
@@ -259,6 +402,23 @@ func normalizeSentryIssue(issue sentryIssue, latest *sentryEvent) sentryErrorPay
 		}
 	}
 
+	// Enrich from the event's structured contexts + breadcrumbs.
+	cx := extractSentryContexts(latest)
+	if release == "" {
+		release = cx.release
+	}
+	environment := sentryEventEnvironment(latest)
+	breadcrumbs := extractSentryBreadcrumbs(latest)
+
+	// Runtime: prefer the event runtime context (cloudflare/node/deno →
+	// server), fall back to the platform-tag heuristic.
+	runtime := sentryRuntime(platformTag)
+	if cx.runtimeName != "" {
+		if rt := sentryRuntime(cx.runtimeName); rt != "" {
+			runtime = rt
+		}
+	}
+
 	ctx := map[string]any{}
 	if issue.Count != "" {
 		if n, err := strconv.Atoi(issue.Count); err == nil {
@@ -271,6 +431,12 @@ func normalizeSentryIssue(issue sentryIssue, latest *sentryEvent) sentryErrorPay
 	if issue.FirstSeen != "" {
 		ctx["sentryFirstSeen"] = issue.FirstSeen
 	}
+	if environment != "" {
+		ctx["environment"] = environment
+	}
+	if cx.runtimeName != "" {
+		ctx["sentryRuntime"] = cx.runtimeName
+	}
 	if len(ctx) == 0 {
 		ctx = nil
 	}
@@ -280,7 +446,7 @@ func normalizeSentryIssue(issue sentryIssue, latest *sentryEvent) sentryErrorPay
 		ProviderEventID: eventID,
 		ProviderIssueID: issue.ID,
 		Level:           level,
-		Runtime:         sentryRuntime(platformTag),
+		Runtime:         runtime,
 		Platform:        sentryPlatform(platformTag),
 		Type:            excType,
 		Message:         message,
@@ -288,6 +454,11 @@ func normalizeSentryIssue(issue sentryIssue, latest *sentryEvent) sentryErrorPay
 		Stack:           stack,
 		IsFatal:         level == "fatal",
 		Release:         release,
+		AppVersion:      cx.appVersion,
+		OsName:          cx.osName,
+		OsVersion:       cx.osVersion,
+		DeviceModel:     cx.deviceModel,
+		Breadcrumbs:     breadcrumbs,
 		IssueURL:        issue.Permalink,
 		OccurredAt:      issue.LastSeen,
 		Context:         ctx,
