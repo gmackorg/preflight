@@ -728,6 +728,12 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 			rep.newGroup = res.NewGroups
 			totalPosted += res.Ingested
 		}
+		// Relay session health (crash-free rate) — best-effort, feeds the gate.
+		if crashFree, sessions := fetchSentrySessionHealth(client, opts, project.ID); crashFree != nil {
+			if err := postSessionHealth(client, opts, appID, crashFree, sessions); err == nil {
+				fmt.Fprintf(stdout, "  %-30s   crash-free %.2f%% (%d sessions)\n", project.Slug, *crashFree, sessions)
+			}
+		}
 		fmt.Fprintf(stdout, "  %-30s → %-24s %d issues (%d new, %d dup)\n",
 			project.Slug, appID, rep.issues, rep.newGroup, rep.deduped)
 		reports = append(reports, rep)
@@ -847,6 +853,57 @@ func fetchSentryLatestEvent(client *http.Client, opts sentrySyncOptions, issueID
 		return nil, err
 	}
 	return &event, nil
+}
+
+type sentrySessionsResponse struct {
+	Groups []struct {
+		Totals map[string]float64 `json:"totals"`
+	} `json:"groups"`
+}
+
+// fetchSentrySessionHealth returns (crashFreePercent, sessions) for a project
+// over the sync window from Sentry's sessions API. crashFree is nil when the
+// project has no session/release-health data. Best-effort.
+func fetchSentrySessionHealth(client *http.Client, opts sentrySyncOptions, projectID string) (*float64, int) {
+	if projectID == "" {
+		return nil, 0
+	}
+	base := strings.TrimRight(opts.apiURL, "/")
+	q := url.Values{}
+	q.Add("field", "crash_free_rate(session)")
+	q.Add("field", "sum(session)")
+	q.Set("project", projectID)
+	q.Set("statsPeriod", opts.statsPeriod)
+	q.Set("interval", "1d")
+	endpoint := base + "/api/0/organizations/" + url.PathEscape(opts.org) + "/sessions/?" + q.Encode()
+	var resp sentrySessionsResponse
+	if err := sentryGet(client, opts, endpoint, &resp); err != nil {
+		return nil, 0
+	}
+	if len(resp.Groups) == 0 {
+		return nil, 0
+	}
+	totals := resp.Groups[0].Totals
+	sessions := int(totals["sum(session)"])
+	rate, ok := totals["crash_free_rate(session)"]
+	if !ok || sessions == 0 {
+		return nil, sessions
+	}
+	pct := rate * 100
+	return &pct, sessions
+}
+
+// postSessionHealth relays a project's crash-free rate into preflight
+// diagnostics so the crash gate + crash-free insight light up.
+func postSessionHealth(client *http.Client, opts sentrySyncOptions, appID string, crashFree *float64, sessions int) error {
+	endpoint := strings.TrimRight(opts.preflightURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/session-health"
+	body := map[string]any{"sessions": sessions}
+	if crashFree != nil {
+		body["crashFreePercent"] = *crashFree
+	}
+	_, err := postPreflightJSON(client, endpoint, opts.preflightTok, body)
+	return err
 }
 
 type sentryPostResult struct {
