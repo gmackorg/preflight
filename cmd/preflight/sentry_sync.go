@@ -734,6 +734,13 @@ func runSentrySync(args []string, stdout io.Writer, stderr io.Writer, client *ht
 				fmt.Fprintf(stdout, "  %-30s   crash-free %.2f%% (%d sessions)\n", project.Slug, *crashFree, sessions)
 			}
 		}
+		// Relay performance (slowest transactions) — best-effort, feeds the
+		// perf panel.
+		if txns := fetchSentryPerformance(client, opts, project.ID); len(txns) > 0 {
+			if err := postPerformance(client, opts, appID, txns); err == nil {
+				fmt.Fprintf(stdout, "  %-30s   %d transactions\n", project.Slug, len(txns))
+			}
+		}
 		fmt.Fprintf(stdout, "  %-30s → %-24s %d issues (%d new, %d dup)\n",
 			project.Slug, appID, rep.issues, rep.newGroup, rep.deduped)
 		reports = append(reports, rep)
@@ -903,6 +910,74 @@ func postSessionHealth(client *http.Client, opts sentrySyncOptions, appID string
 		body["crashFreePercent"] = *crashFree
 	}
 	_, err := postPreflightJSON(client, endpoint, opts.preflightTok, body)
+	return err
+}
+
+type perfTransaction struct {
+	Transaction string   `json:"transaction"`
+	P50Ms       *float64 `json:"p50Ms,omitempty"`
+	P95Ms       *float64 `json:"p95Ms,omitempty"`
+	Count       *int     `json:"count,omitempty"`
+	FailureRate *float64 `json:"failureRate,omitempty"`
+}
+
+// fetchSentryPerformance returns the busiest transactions for a project with
+// p50/p95/count/failure-rate from Sentry's events (discover) API. Best-effort.
+func fetchSentryPerformance(client *http.Client, opts sentrySyncOptions, projectID string) []perfTransaction {
+	if projectID == "" {
+		return nil
+	}
+	base := strings.TrimRight(opts.apiURL, "/")
+	q := url.Values{}
+	q.Add("field", "transaction")
+	q.Add("field", "p50(transaction.duration)")
+	q.Add("field", "p95(transaction.duration)")
+	q.Add("field", "count()")
+	q.Add("field", "failure_rate()")
+	q.Set("query", "event.type:transaction")
+	q.Set("project", projectID)
+	q.Set("statsPeriod", opts.statsPeriod)
+	q.Set("sort", "-count")
+	q.Set("per_page", "20")
+	endpoint := base + "/api/0/organizations/" + url.PathEscape(opts.org) + "/events/?" + q.Encode()
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := sentryGet(client, opts, endpoint, &resp); err != nil {
+		return nil
+	}
+	f := func(m map[string]any, k string) *float64 {
+		if v, ok := m[k].(float64); ok {
+			return &v
+		}
+		return nil
+	}
+	out := make([]perfTransaction, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		name, _ := m["transaction"].(string)
+		if name == "" {
+			continue
+		}
+		t := perfTransaction{
+			Transaction: name,
+			P50Ms:       f(m, "p50(transaction.duration)"),
+			P95Ms:       f(m, "p95(transaction.duration)"),
+			FailureRate: f(m, "failure_rate()"),
+		}
+		if c := f(m, "count()"); c != nil {
+			n := int(*c)
+			t.Count = &n
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// postPerformance relays transaction stats into preflight pf_perf_snapshot.
+func postPerformance(client *http.Client, opts sentrySyncOptions, appID string, txns []perfTransaction) error {
+	endpoint := strings.TrimRight(opts.preflightURL, "/") +
+		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/performance"
+	_, err := postPreflightJSON(client, endpoint, opts.preflightTok, map[string]any{"transactions": txns})
 	return err
 }
 
