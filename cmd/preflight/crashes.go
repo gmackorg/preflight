@@ -159,7 +159,8 @@ func printCrashesHelp(w io.Writer) {
 	fmt.Fprintln(w, "(claude -p / codex) and post them back to preflight.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Options:")
-	fmt.Fprintln(w, "  --app <id>       Preflight app id (required)")
+	fmt.Fprintln(w, "  --app <id>       Preflight app id (or use --all)")
+	fmt.Fprintln(w, "  --all            Analyze every fleet app's queue")
 	fmt.Fprintln(w, "  --agent <cmd>    Agent CLI to pipe the prompt to (default \"claude -p\")")
 	fmt.Fprintln(w, "  --limit <N>      Max issues to analyze (default 10)")
 	fmt.Fprintln(w, "  --reanalyze      Include issues that already have an analysis")
@@ -172,6 +173,7 @@ func runCrashesAnalyze(args []string, stdout io.Writer, stderr io.Writer, client
 	limit := defaultAnalyzeLimit
 	reanalyze := false
 	dryRun := false
+	all := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--help", "-h":
@@ -197,13 +199,15 @@ func runCrashesAnalyze(args []string, stdout io.Writer, stderr io.Writer, client
 			reanalyze = true
 		case "--dry-run":
 			dryRun = true
+		case "--all":
+			all = true
 		default:
 			fmt.Fprintf(stderr, "unknown flag %q\n", args[i])
 			return 2
 		}
 	}
-	if strings.TrimSpace(appID) == "" {
-		fmt.Fprintln(stderr, "--app <id> is required")
+	if !all && strings.TrimSpace(appID) == "" {
+		fmt.Fprintln(stderr, "--app <id> or --all is required")
 		return 2
 	}
 	apiURL, token := preflightAPIConfig()
@@ -212,37 +216,85 @@ func runCrashesAnalyze(args []string, stdout io.Writer, stderr io.Writer, client
 		return 2
 	}
 
+	// Resolve the app set: one app, or every distinct fleet app id.
+	var appIDs []string
+	if all {
+		rows, err := fetchFleetReleaseRows(client, releaseStatusCLIOptions{
+			apiURL: apiURL, token: token, platform: "ios",
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "fetch fleet failed: %v\n", err)
+			return 1
+		}
+		seen := map[string]bool{}
+		for _, r := range rows {
+			if r.AppID != "" && !seen[r.AppID] {
+				seen[r.AppID] = true
+				appIDs = append(appIDs, r.AppID)
+			}
+		}
+	} else {
+		appIDs = []string{appID}
+	}
+
+	opts := analyzeOptions{agent: agent, limit: limit, reanalyze: reanalyze, dryRun: dryRun}
+	totalAnalyzed, totalFailed := 0, 0
+	for _, id := range appIDs {
+		a, f := analyzeApp(client, apiURL, token, id, opts, stdout, stderr)
+		totalAnalyzed += a
+		totalFailed += f
+	}
+	fmt.Fprintf(stdout, "\nanalyzed %d issue(s) across %d app(s); %d failed\n",
+		totalAnalyzed, len(appIDs), totalFailed)
+	return 0
+}
+
+type analyzeOptions struct {
+	agent     string
+	limit     int
+	reanalyze bool
+	dryRun    bool
+}
+
+// analyzeApp fetches one app's analysis queue and runs the agent over each item,
+// posting the narrative back. Returns (analyzed, failed).
+func analyzeApp(
+	client *http.Client,
+	apiURL, token, appID string,
+	opts analyzeOptions,
+	stdout, stderr io.Writer,
+) (int, int) {
 	q := url.Values{}
-	q.Set("limit", strconv.Itoa(limit))
-	if reanalyze {
+	q.Set("limit", strconv.Itoa(opts.limit))
+	if opts.reanalyze {
 		q.Set("reanalyze", "1")
 	}
 	endpoint := strings.TrimRight(apiURL, "/") +
 		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/errors/analysis-queue?" + q.Encode()
 	raw, err := getPreflightJSON(client, endpoint, token)
 	if err != nil {
-		fmt.Fprintf(stderr, "fetch analysis queue failed: %v\n", err)
-		return 1
+		fmt.Fprintf(stderr, "  %s: fetch queue failed: %v\n", appID, err)
+		return 0, 1
 	}
 	var payload struct {
 		Queue []analysisQueueItem `json:"queue"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		fmt.Fprintf(stderr, "decode queue failed: %v\n", err)
-		return 1
+		fmt.Fprintf(stderr, "  %s: decode queue failed: %v\n", appID, err)
+		return 0, 1
 	}
 	if len(payload.Queue) == 0 {
-		fmt.Fprintln(stdout, "no issues need analysis")
-		return 0
+		return 0, 0
 	}
+	fmt.Fprintf(stdout, "%s: %d issue(s) to analyze\n", appID, len(payload.Queue))
 
 	analyzed, failed := 0, 0
 	for _, item := range payload.Queue {
 		prompt := buildAnalysisPrompt(item)
-		if dryRun {
+		if opts.dryRun {
 			fmt.Fprintf(stdout, "\n=== %s (%s) ===\n%s\n", item.ID, item.Type, prompt)
 		}
-		out, err := runAgent(agent, prompt)
+		out, err := runAgent(opts.agent, prompt)
 		if err != nil {
 			fmt.Fprintf(stderr, "  %s: agent failed: %v\n", item.ID, err)
 			failed++
@@ -254,8 +306,8 @@ func runCrashesAnalyze(args []string, stdout io.Writer, stderr io.Writer, client
 			failed++
 			continue
 		}
-		res.Agent = strings.Fields(agent)[0]
-		if dryRun {
+		res.Agent = strings.Fields(opts.agent)[0]
+		if opts.dryRun {
 			fmt.Fprintf(stdout, "  → %s [%s]\n", res.LikelyCause, res.Confidence)
 			analyzed++
 			continue
@@ -271,8 +323,7 @@ func runCrashesAnalyze(args []string, stdout io.Writer, stderr io.Writer, client
 		fmt.Fprintf(stdout, "  %s → %s [%s]\n", item.ID, truncate(res.LikelyCause, 70), res.Confidence)
 		analyzed++
 	}
-	fmt.Fprintf(stdout, "\nanalyzed %d issue(s); %d failed\n", analyzed, failed)
-	return 0
+	return analyzed, failed
 }
 
 func truncate(s string, n int) string {
