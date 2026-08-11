@@ -10462,6 +10462,24 @@ exit 0
 	}
 }
 
+func TestUnityArtifactKindForTargetIncludesLinuxServer(t *testing.T) {
+	cases := map[string]string{
+		"Android":           "android_apk",
+		"iOS":               "ios_xcode_archive",
+		"WebGL":             "webgl_bundle",
+		"StandaloneLinux64": "linux_server_build",
+		"LinuxServer":       "linux_server_build",
+		"DedicatedServer":   "linux_server_build",
+		"server":            "linux_server_build",
+		"somethingElse":     "tool_output",
+	}
+	for target, want := range cases {
+		if got := unityArtifactKindForTarget(target); got != want {
+			t.Errorf("unityArtifactKindForTarget(%q) = %q, want %q", target, got, want)
+		}
+	}
+}
+
 func TestValidateUnityBuildCommandPlanDecoupledFromLevelForge(t *testing.T) {
 	// A generic (non-LevelForge) Unity plan: no -lf* args, target/output carried
 	// in the structured output block, and a custom execute method.

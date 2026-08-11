@@ -7020,6 +7020,19 @@ func unityArtifactKindForTarget(target string) string {
 		return "android_apk"
 	case "ios":
 		return "ios_xcode_archive"
+	case "webgl":
+		return "webgl_bundle"
+	// Linux players + dedicated servers (StandaloneLinux64, optionally the
+	// Server subtarget) — the natural Unity target for the labnuc/vanuc Linux
+	// build nodes. The output is a Linux binary + data dir, collected as an
+	// archive.
+	case "standalonelinux64", "linux64", "linux",
+		"linuxserver", "linux_server", "dedicatedserver", "server":
+		return "linux_server_build"
+	case "standalonewindows64", "windows64", "windows":
+		return "windows_build"
+	case "standaloneosx", "macos", "osx":
+		return "macos_build"
 	default:
 		return "tool_output"
 	}
