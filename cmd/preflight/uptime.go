@@ -15,11 +15,13 @@ import (
 // cron, same pattern as sentry sync / crashes analyze.
 
 type uptimeMonitor struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	URL            string `json:"url"`
-	Method         string `json:"method"`
-	ExpectedStatus int    `json:"expectedStatus"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	URL             string `json:"url"`
+	Method          string `json:"method"`
+	ExpectedStatus  int    `json:"expectedStatus"`
+	BodyMatch       string `json:"bodyMatch"`
+	BodyMatchAbsent bool   `json:"bodyMatchAbsent"`
 }
 
 func runUptime(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -61,13 +63,31 @@ func probeMonitor(client *http.Client, m uptimeMonitor) map[string]any {
 		}
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 65536))
+	// Read enough body to run the assertion (bounded).
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	expected := m.ExpectedStatus
 	if expected == 0 {
 		expected = 200
 	}
-	up := resp.StatusCode == expected ||
+	statusOK := resp.StatusCode == expected ||
 		(expected == 200 && resp.StatusCode >= 200 && resp.StatusCode < 400)
+
+	up := statusOK
+	failReason := ""
+	if !statusOK {
+		failReason = fmt.Sprintf("HTTP %d (expected %d)", resp.StatusCode, expected)
+	} else if m.BodyMatch != "" {
+		// Body assertion only runs when the status is OK.
+		present := strings.Contains(string(bodyBytes), m.BodyMatch)
+		if m.BodyMatchAbsent && present {
+			up = false
+			failReason = fmt.Sprintf("body contains %q (should be absent)", m.BodyMatch)
+		} else if !m.BodyMatchAbsent && !present {
+			up = false
+			failReason = fmt.Sprintf("body missing %q", m.BodyMatch)
+		}
+	}
+
 	status := "down"
 	if up {
 		status = "up"
@@ -78,7 +98,7 @@ func probeMonitor(client *http.Client, m uptimeMonitor) map[string]any {
 		"latencyMs":  latency,
 	}
 	if !up {
-		out["error"] = fmt.Sprintf("HTTP %d (expected %d)", resp.StatusCode, expected)
+		out["error"] = failReason
 	}
 	return out
 }
