@@ -10462,6 +10462,52 @@ exit 0
 	}
 }
 
+func TestValidateUnityBuildCommandPlanDecoupledFromLevelForge(t *testing.T) {
+	// A generic (non-LevelForge) Unity plan: no -lf* args, target/output carried
+	// in the structured output block, and a custom execute method.
+	genericPlan := func(method string) runnerJobCommandPlan {
+		return runnerJobCommandPlan{
+			Tool:    "unity",
+			Command: "batchmode",
+			Args: []string{
+				"-batchmode", "-nographics", "-quit",
+				"-projectPath", "/tmp/game",
+				"-executeMethod", method,
+				"-logFile", "/tmp/game/build.log",
+			},
+			Output: runnerJobCommandPlanOutput{
+				BuildTarget:  "WebGL",
+				OutputPath:   "/tmp/game/Build/webgl",
+				LogPath:      "/tmp/game/build.log",
+				ArtifactKind: "tool_output",
+			},
+		}
+	}
+
+	// LevelForge's method stays allowlisted by default.
+	if err := validateUnityBuildCommandPlan(genericPlan(levelForgeUnityExecuteMethod)); err != nil {
+		t.Fatalf("LevelForge method should remain allowlisted: %v", err)
+	}
+
+	// A non-allowlisted method is rejected (arbitrary C# guard).
+	if err := validateUnityBuildCommandPlan(genericPlan("MyGame.Build.CI")); err == nil {
+		t.Fatal("expected non-allowlisted execute method to be rejected")
+	}
+
+	// Operator opt-in permits any project's method.
+	t.Setenv("PREFLIGHT_UNITY_EXECUTE_METHODS", "MyGame.Build.CI")
+	if err := validateUnityBuildCommandPlan(genericPlan("MyGame.Build.CI")); err != nil {
+		t.Fatalf("allowlisted custom method should validate: %v", err)
+	}
+
+	// A plan with no resolvable build output is rejected.
+	noOutput := genericPlan("MyGame.Build.CI")
+	noOutput.Output = runnerJobCommandPlanOutput{LogPath: "/tmp/game/build.log"}
+	if err := validateUnityBuildCommandPlan(noOutput); err == nil {
+		t.Fatal("expected plan with no build output path to be rejected")
+	}
+}
+
 func TestRunnerOnceRunsUnityAndroidBuildPlayer(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	if err := os.MkdirAll(workspaceRoot, 0o755); err != nil {

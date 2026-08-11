@@ -6816,6 +6816,53 @@ func unityBuildArtifactsFromPlan(options runnerOnceOptions, job apiRunnerJob) un
 	}
 }
 
+// levelForgeUnityExecuteMethod is the built-in build entry point. It stays
+// allowlisted by default so LevelForge projects work unchanged, but the runner
+// is no longer coupled to it: any Unity project's build method can be permitted
+// via PREFLIGHT_UNITY_EXECUTE_METHODS, and the build target/output come from the
+// structured command plan (output.*) rather than LevelForge's -lf* arg names.
+const levelForgeUnityExecuteMethod = "LevelForge.Editor.LevelForgeBuild.RunHeadlessBuild"
+
+// unityAllowedExecuteMethods returns the batchmode -executeMethod values this
+// runner will run. Executing an editor method runs arbitrary C# in the project,
+// so it stays an allowlist — but an operator-configurable one, so a node can
+// build non-LevelForge Unity projects without a code change.
+func unityAllowedExecuteMethods() []string {
+	methods := []string{levelForgeUnityExecuteMethod}
+	if extra := strings.TrimSpace(os.Getenv("PREFLIGHT_UNITY_EXECUTE_METHODS")); extra != "" {
+		for _, method := range strings.Split(extra, ",") {
+			if method = strings.TrimSpace(method); method != "" {
+				methods = append(methods, method)
+			}
+		}
+	}
+	return methods
+}
+
+func unityExecuteMethodAllowed(method string) bool {
+	method = strings.TrimSpace(method)
+	if method == "" {
+		return false
+	}
+	for _, allowed := range unityAllowedExecuteMethods() {
+		if method == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// unityBuildOutputResolvable reports whether the plan yields a build output path
+// for the runner to collect + upload — from the structured output block or,
+// for LevelForge, its -lfBuildOutput arg.
+func unityBuildOutputResolvable(plan runnerJobCommandPlan) bool {
+	return firstNonEmpty(
+		strings.TrimSpace(plan.Output.OutputPath),
+		strings.TrimSpace(plan.Output.BuildOutputDirectory),
+		unityArgValue(plan.Args, "-lfBuildOutput"),
+	) != ""
+}
+
 func validateUnityBuildCommandPlan(plan runnerJobCommandPlan) error {
 	if strings.ToLower(strings.TrimSpace(plan.Tool)) != "unity" {
 		return fmt.Errorf("unity.build.player command plan tool must be unity")
@@ -6823,27 +6870,34 @@ func validateUnityBuildCommandPlan(plan runnerJobCommandPlan) error {
 	if strings.ToLower(strings.TrimSpace(plan.Command)) != "batchmode" {
 		return fmt.Errorf("unity.build.player command plan command must be batchmode")
 	}
+	// The engine-agnostic batchmode contract. -lfBuildTarget/-lfBuildOutput are
+	// LevelForge-specific and no longer required: a generic Unity method carries
+	// its target/output via the structured command plan (output.*).
 	for _, required := range []string{
 		"-batchmode",
 		"-nographics",
 		"-quit",
 		"-projectPath",
 		"-executeMethod",
-		"-lfBuildTarget",
-		"-lfBuildOutput",
 		"-logFile",
 	} {
 		if !containsString(plan.Args, required) {
 			return fmt.Errorf("unity.build.player command plan missing required arg %s", required)
 		}
 	}
-	if method := unityArgValue(plan.Args, "-executeMethod"); method != "LevelForge.Editor.LevelForgeBuild.RunHeadlessBuild" {
-		return fmt.Errorf("unity.build.player command plan execute method %q is not allowlisted", method)
+	if method := unityArgValue(plan.Args, "-executeMethod"); !unityExecuteMethodAllowed(method) {
+		return fmt.Errorf(
+			"unity.build.player execute method %q is not allowlisted (set PREFLIGHT_UNITY_EXECUTE_METHODS to permit it)",
+			method,
+		)
 	}
-	for _, valueArg := range []string{"-projectPath", "-executeMethod", "-lfBuildTarget", "-lfBuildOutput", "-logFile"} {
+	for _, valueArg := range []string{"-projectPath", "-executeMethod", "-logFile"} {
 		if unityArgValue(plan.Args, valueArg) == "" {
 			return fmt.Errorf("unity.build.player command plan arg %s requires a value", valueArg)
 		}
+	}
+	if !unityBuildOutputResolvable(plan) {
+		return fmt.Errorf("unity.build.player command plan must provide a build output path (output.outputPath, output.buildOutputDirectory, or -lfBuildOutput)")
 	}
 	return nil
 }
