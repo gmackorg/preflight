@@ -112,6 +112,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runSentry(args[1:], stdout, stderr, client)
 	case "crashes":
 		return runCrashes(args[1:], stdout, stderr, client)
+	case "uptime":
+		return runUptime(args[1:], stdout, stderr, client)
 	case "provider-readiness":
 		return runProviderReadiness(args[1:], stdout, stderr, client)
 	case "credential-flows":
@@ -145,6 +147,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  providers     Manage mobile provider accounts")
 	fmt.Fprintln(w, "  sentry        Relay Sentry issues into crash/error tracking (`sentry sync`)")
 	fmt.Fprintln(w, "  crashes       AI root-cause analysis of crash issues (`crashes analyze`)")
+	fmt.Fprintln(w, "  uptime        Probe uptime monitors (`uptime check`)")
 	fmt.Fprintln(w, "  provider-readiness  Inspect or record app provider readiness")
 	fmt.Fprintln(w, "  credential-flows    Inspect provider credential/setup flows")
 	fmt.Fprintln(w, "  oauth-clients Manage Google and Apple OAuth client records")
