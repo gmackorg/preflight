@@ -10970,6 +10970,17 @@ func expoCommandEnv(job apiRunnerJob) []string {
 	if expoDevelopmentVariant(job) {
 		env = upsertEnv(env, "APP_VARIANT", "development")
 	}
+	// @sentry/react-native's Xcode build phase runs `sentry-cli` to upload
+	// source maps on every build; without a configured org/sentry.properties it
+	// fails xcodebuild with code 65 (seen fleet-wide). A local simulator/dev
+	// build has no reason to upload source maps, so disable the auto-upload (and
+	// allow-failure as a belt-and-suspenders) unless the caller set it already.
+	if os.Getenv("SENTRY_DISABLE_AUTO_UPLOAD") == "" {
+		env = upsertEnv(env, "SENTRY_DISABLE_AUTO_UPLOAD", "true")
+	}
+	if os.Getenv("SENTRY_ALLOW_FAILURE") == "" {
+		env = upsertEnv(env, "SENTRY_ALLOW_FAILURE", "true")
+	}
 	return env
 }
 
