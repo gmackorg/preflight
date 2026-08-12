@@ -10462,6 +10462,38 @@ exit 0
 	}
 }
 
+func TestAllocateBuildMetroPortGivesDistinctPorts(t *testing.T) {
+	// Simulate several concurrent builds allocating a Metro port from the same
+	// base — each must get a distinct free port (no collision), which is what
+	// lets concurrent iOS builds run on one host without per-agent config.
+	seen := map[int]bool{}
+	listeners := []net.Listener{}
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+	for i := 0; i < 6; i++ {
+		p := allocateBuildMetroPort(8081)
+		if p < 8081 {
+			t.Fatalf("allocated port %d below base", p)
+		}
+		if seen[p] {
+			t.Fatalf("port %d allocated twice — concurrent builds would collide", p)
+		}
+		seen[p] = true
+		// Hold the port (as expo would) so the next allocation must pick another.
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			t.Fatalf("allocated port %d was not actually free: %v", p, err)
+		}
+		listeners = append(listeners, l)
+	}
+	if len(seen) != 6 {
+		t.Fatalf("expected 6 distinct ports, got %d", len(seen))
+	}
+}
+
 func TestUnityArtifactKindForTargetIncludesLinuxServer(t *testing.T) {
 	cases := map[string]string{
 		"Android":           "android_apk",

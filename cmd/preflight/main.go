@@ -5811,16 +5811,19 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	// uses it too.
 	if options.metroStatusURL == "" && options.metroPort > 0 {
 		configuredStatusURL := runnerLocalDevServerURL(options) + "/status"
-		if !preflightOwnedMetroReady(client, appDir, configuredStatusURL) &&
-			!localPortIsFree(options.metroPort) {
-			if freePort := nextFreeLocalPort(options.metroPort, 64); freePort != 0 {
+		// Reuse our own metro if it's already up on the configured port (the
+		// dev_session -> simulator.open chain records + reuses one port). Otherwise
+		// allocate a per-build unique free port so concurrent builds on this host
+		// never collide — no per-agent --metro-port config needed.
+		if !preflightOwnedMetroReady(client, appDir, configuredStatusURL) {
+			if allocated := allocateBuildMetroPort(options.metroPort); allocated != options.metroPort {
 				fmt.Fprintf(
 					stdout,
-					"metro port %d is in use by another process; using %d\n",
+					"metro: allocated free port %d for this build (configured %d)\n",
+					allocated,
 					options.metroPort,
-					freePort,
 				)
-				options.metroPort = freePort
+				options.metroPort = allocated
 			}
 		}
 	}
@@ -11546,6 +11549,55 @@ func nextFreeLocalPort(start int, span int) int {
 		}
 	}
 	return 0
+}
+
+// allocateBuildMetroPort returns a free Metro port for THIS build, giving
+// concurrent builds on the same host distinct ports with no per-agent config.
+// An atomic (flock'd) host-wide sequence offsets each build's starting port so
+// two concurrent builds never scan from the same base (the collision that made
+// expo print "Skipping dev server" on the loser); then we take the first free
+// port from that distinct base.
+func allocateBuildMetroPort(base int) int {
+	if base <= 0 {
+		base = 8081
+	}
+	offset := nextMetroPortSeq()
+	start := base + offset
+	if start > 64000 {
+		start = base
+	}
+	if p := nextFreeLocalPort(start, 128); p != 0 {
+		return p
+	}
+	// Fallback: wide scan from the base.
+	if p := nextFreeLocalPort(base, 512); p != 0 {
+		return p
+	}
+	return base
+}
+
+// nextMetroPortSeq atomically bumps a host-wide counter and returns an offset in
+// [0,200). flock serializes concurrent runner processes; PID is the fallback.
+func nextMetroPortSeq() int {
+	lockPath := filepath.Join(os.TempDir(), "preflight-metro-port.seq")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return os.Getpid() % 200
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return os.Getpid() % 200
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	seq := 0
+	if content, readErr := io.ReadAll(f); readErr == nil {
+		_, _ = fmt.Sscanf(strings.TrimSpace(string(content)), "%d", &seq)
+	}
+	seq = (seq + 1) % 200
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
+	_, _ = fmt.Fprintf(f, "%d", seq)
+	return seq
 }
 
 func lanHost() (string, error) {
