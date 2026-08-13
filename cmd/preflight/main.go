@@ -5823,13 +5823,26 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	// port, making expo decline to start ("Skipping dev server") for this build.
 	// Reap leftover dev servers from other CI checkouts before we resolve the port.
 	cleanupStalePreflightDevServers(appDir, stdout)
+	// An Android emulator dev-client bakes the default Metro port 8081 (paired
+	// with the REACT_NATIVE_PACKAGER_HOSTNAME=10.0.2.2 pin in expoCommandEnv), so
+	// pin Metro to 8081 to keep host+port aligned (10.0.2.2:8081). Android builds
+	// run serially on the Linux nodes, so a fixed port can't collide the way the
+	// Macs' concurrent iOS builds would.
+	if isAndroidEmulatorJob(job) {
+		options.metroPort = 8081
+	}
 	// Resolve the metro port up front: reuse our own dev server on the configured
 	// port; keep the configured port if it's free; otherwise pick the next free
 	// port so a foreign dev server on a multi-app host doesn't make expo decline
 	// to start ("Skipping dev server"). Every URL below derives from the result,
 	// and the chosen port is recorded in the dev-session payload so simulator.open
 	// uses it too.
-	if options.metroStatusURL == "" && options.metroPort > 0 {
+	// Android emulator dev-clients bake Metro port 8081, so keep the pinned port
+	// (set just above) — do NOT auto-allocate a free port, or the baked 8081 and
+	// the actual Metro port diverge and the dev-client can't connect. A stale
+	// Metro squatting on 8081 is reaped below (cleanupStalePreflightDevServers)
+	// or reused; Android runs serially so there's no concurrent-build collision.
+	if options.metroStatusURL == "" && options.metroPort > 0 && !isAndroidEmulatorJob(job) {
 		configuredStatusURL := runnerLocalDevServerURL(options) + "/status"
 		// Reuse our own metro if it's already up on the configured port (the
 		// dev_session -> simulator.open chain records + reuses one port). Otherwise
@@ -9319,6 +9332,95 @@ func shutdownOtherBootedIOSSimulators(
 	}
 }
 
+// flowRecording holds an in-progress screen recording of a Maestro flow.
+type flowRecording struct {
+	platform   string
+	provider   string
+	options    runnerOnceOptions
+	cmd        *exec.Cmd
+	devicePath string // android: on-device path
+	outPath    string // final local mp4
+}
+
+// startFlowRecording begins recording the device screen to an mp4 in outputDir.
+// Android uses `adb shell screenrecord` (self-caps at ~180s); iOS uses
+// `simctl io recordVideo`. Best-effort — returns nil if it can't start, and the
+// run continues without video (screenshots still captured).
+func startFlowRecording(options runnerOnceOptions, job apiRunnerJob, providerIdentity string, outputDir string) *flowRecording {
+	if strings.TrimSpace(providerIdentity) == "" {
+		return nil
+	}
+	rec := &flowRecording{
+		platform: jobPlatform(job),
+		provider: providerIdentity,
+		options:  options,
+		outPath:  filepath.Join(outputDir, "flow.mp4"),
+	}
+	switch rec.platform {
+	case "android":
+		rec.devicePath = "/sdcard/pf-flow-" + sanitizeID(job.ID) + ".mp4"
+		cmd := exec.Command(options.adbPath, "-s", providerIdentity,
+			"shell", "screenrecord", "--bit-rate", "4000000", rec.devicePath)
+		if err := cmd.Start(); err != nil {
+			return nil
+		}
+		rec.cmd = cmd
+	case "ios":
+		cmd := exec.Command(options.xcrunPath, "simctl", "io", providerIdentity,
+			"recordVideo", "--codec=h264", "--force", rec.outPath)
+		if err := cmd.Start(); err != nil {
+			return nil
+		}
+		rec.cmd = cmd
+	default:
+		return nil
+	}
+	return rec
+}
+
+// stopFlowRecording finalizes the recording and, for Android, pulls the mp4 off
+// the device into outputDir. Best-effort; any failure leaves the run intact.
+func stopFlowRecording(rec *flowRecording) {
+	if rec == nil {
+		return
+	}
+	switch rec.platform {
+	case "android":
+		// SIGINT screenrecord ON the device so it finalizes the mp4 header.
+		_ = exec.Command(rec.options.adbPath, "-s", rec.provider,
+			"shell", "pkill", "-INT", "screenrecord").Run()
+		if rec.cmd != nil {
+			_ = rec.cmd.Wait()
+		}
+		time.Sleep(1500 * time.Millisecond) // let the device flush the file
+		_ = exec.Command(rec.options.adbPath, "-s", rec.provider,
+			"pull", rec.devicePath, rec.outPath).Run()
+		_ = exec.Command(rec.options.adbPath, "-s", rec.provider,
+			"shell", "rm", "-f", rec.devicePath).Run()
+	case "ios":
+		if rec.cmd != nil && rec.cmd.Process != nil {
+			_ = rec.cmd.Process.Signal(os.Interrupt) // simctl finalizes on SIGINT
+			_ = rec.cmd.Wait()
+		}
+	}
+}
+
+// grantAndroidRuntimePermissions pre-grants common first-run runtime
+// permissions to the app on the emulator so their system dialogs don't block a
+// Maestro smoke flow. Best-effort: `pm grant` fails harmlessly for permissions
+// the app doesn't declare, so errors are ignored.
+func grantAndroidRuntimePermissions(options runnerOnceOptions, providerIdentity string, appID string) {
+	perms := []string{
+		"android.permission.POST_NOTIFICATIONS",
+		"android.permission.ACCESS_FINE_LOCATION",
+		"android.permission.ACCESS_COARSE_LOCATION",
+		"android.permission.CAMERA",
+	}
+	for _, perm := range perms {
+		_ = exec.Command(options.adbPath, "-s", providerIdentity, "shell", "pm", "grant", appID, perm).Run()
+	}
+}
+
 func bootIOSSimulator(options runnerOnceOptions, providerIdentity string) error {
 	_ = exec.Command(options.xcrunPath, "simctl", "boot", providerIdentity).Run()
 	output, err := exec.Command(options.xcrunPath, "simctl", "bootstatus", providerIdentity, "-b").CombinedOutput()
@@ -11044,6 +11146,14 @@ func expoCommandEnv(job apiRunnerJob) []string {
 	if os.Getenv("SENTRY_ALLOW_FAILURE") == "" {
 		env = upsertEnv(env, "SENTRY_ALLOW_FAILURE", "true")
 	}
+	// An Android emulator reaches the host only via the 10.0.2.2 alias, never the
+	// runner's LAN IP. Without this, `expo run:android` bakes the detected LAN
+	// host into the dev-client, which then can't reach Metro (ECONNREFUSED) and
+	// renders a blank screen. Pinning the packager hostname makes the built
+	// dev-client target 10.0.2.2:<metro-port> (we also pin the port to 8081).
+	if isAndroidEmulatorJob(job) {
+		env = upsertEnv(env, "REACT_NATIVE_PACKAGER_HOSTNAME", "10.0.2.2")
+	}
 	return env
 }
 
@@ -11100,11 +11210,24 @@ func flowPathForJob(options runnerOnceOptions, job apiRunnerJob) string {
 	if fileExists(preferred) {
 		return preferred
 	}
-	// Fallback for the other common gmacko layout (.maestro/config.yaml +
-	// flows/*.yaml): point Maestro at the .maestro directory so it discovers the
-	// workspace config and runs its flows. config.yaml's appId: ${APP_ID:-…}
-	// resolves from the -e APP_ID arg the runner now supplies.
+	// The other common gmacko layout is .maestro/config.yaml + flows/*.yaml.
+	// The simulator-proof lane only needs to verify the app LAUNCHES, so prefer a
+	// launch-smoke flow (flows/01-app-launch*.yaml) rather than the whole
+	// workspace — running the full suite would execute auth/business flows that
+	// require a live backend and fail on a bare emulator. Its appId: ${APP_ID:-…}
+	// resolves from the -e APP_ID arg the runner supplies.
 	if fileExists(filepath.Join(maestroDir, "config.yaml")) || fileExists(filepath.Join(maestroDir, "config.yml")) {
+		for _, pattern := range []string{
+			filepath.Join(maestroDir, "flows", "01-app-launch*.yaml"),
+			filepath.Join(maestroDir, "flows", "*launch*.yaml"),
+			filepath.Join(maestroDir, "flows", "*launch*.yml"),
+		} {
+			if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+				sort.Strings(matches)
+				return matches[0]
+			}
+		}
+		// No launch smoke — run the whole workspace as a last resort.
 		return maestroDir
 	}
 	// Otherwise run the first flow we can find (flows/ first, then top-level).
@@ -11181,7 +11304,17 @@ func runMaestroSmoke(
 		"--output",
 		relativeReportPath,
 	)
-	command.Args = append(command.Args, maestroDevSessionEnvArgs(job)...)
+	appID := resolveMaestroAppID(options, job, providerIdentity)
+	// Android 13+ shows a runtime POST_NOTIFICATIONS system dialog on first
+	// launch. It belongs to a different package (permissioncontroller), so a
+	// Maestro flow scoped to the app can't see or dismiss it, and it blocks the
+	// app under test. Pre-grant it (and camera/location, common first-run
+	// prompts) so the smoke flow sees the real UI. Best-effort; ignore errors for
+	// apps that don't declare the permission.
+	if jobPlatform(job) == "android" && appID != "" && providerIdentity != "" {
+		grantAndroidRuntimePermissions(options, providerIdentity, appID)
+	}
+	command.Args = append(command.Args, maestroDevSessionEnvArgs(job, appID)...)
 	// Select a tier (e.g. smoke / full) when the job requests one.
 	var tags []string
 	for _, t := range job.Payload.IncludeTags {
@@ -11200,12 +11333,17 @@ func runMaestroSmoke(
 	if len(cancellationChecks) > 0 {
 		cancellationCheck = cancellationChecks[0]
 	}
+	// Record the whole flow as video so runs are verifiable/shareable. The mp4
+	// lands in outputDir where the artifact glob below picks it up; best-effort,
+	// so a recorder that can't start never fails the run.
+	recording := startFlowRecording(options, job, providerIdentity, outputDir)
 	err = runCommandWithTimeoutAndCancellation(
 		command,
 		maestroSmokeTimeout(),
 		cancellationCheck,
 		runnerPollInterval(),
 	)
+	stopFlowRecording(recording)
 	flushLog()
 	if err != nil {
 		artifacts.CommandPaths = findFilesWithPrefixAndExtension(outputDir, "commands-", ".json")
@@ -11219,21 +11357,17 @@ func runMaestroSmoke(
 	return artifacts, nil
 }
 
-func maestroDevSessionEnvArgs(job apiRunnerJob) []string {
+func maestroDevSessionEnvArgs(job apiRunnerJob, appID string) []string {
 	values := map[string]string{
 		"FG_DEV_CLIENT_URL":       preferredDevSessionURL(job.Payload.DevSession),
 		"FG_DEV_CLIENT_DEEP_LINK": strings.TrimSpace(job.Payload.DevSession.DeepLinkURL),
 		"FG_DEV_CLIENT_QR_URL":    strings.TrimSpace(job.Payload.DevSession.QRURL),
 	}
 	// APP_ID lets the gmacko launch-smoke flow (appId: ${APP_ID:-com.gmacko.app})
-	// target the actually-installed package for this platform. Without it Maestro
-	// defaults to the template placeholder and can't find the app under test.
-	appID := strings.TrimSpace(job.Payload.SourceBinding.AndroidPackage)
-	if jobPlatform(job) == "ios" {
-		appID = strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
-	}
-	if appID != "" {
-		values["APP_ID"] = appID
+	// target the actually-installed package. Without it Maestro defaults to the
+	// template placeholder and can't find the app under test.
+	if strings.TrimSpace(appID) != "" {
+		values["APP_ID"] = strings.TrimSpace(appID)
 	}
 	args := make([]string, 0, len(values)*2)
 	for _, key := range []string{
@@ -11249,6 +11383,82 @@ func maestroDevSessionEnvArgs(job apiRunnerJob) []string {
 		args = append(args, "-e", key+"="+value)
 	}
 	return args
+}
+
+// androidApplicationIDFromGradle reads the `applicationId "..."` from the app's
+// generated android/app/build.gradle — the base package of whatever
+// expo run:android built and installed. Returns "" when unavailable.
+func androidApplicationIDFromGradle(job apiRunnerJob) string {
+	root := job.Payload.SourceBinding.WorkspaceRoot
+	appDir := filepath.Join(root, job.Payload.SourceBinding.PackagePath)
+	data, err := os.ReadFile(filepath.Join(appDir, "android", "app", "build.gradle"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "applicationId") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "applicationId"))
+		rest = strings.Trim(rest, "'\"")
+		if idx := strings.IndexAny(rest, "'\""); idx >= 0 {
+			rest = rest[:idx]
+		}
+		if rest = strings.TrimSpace(rest); rest != "" {
+			return rest
+		}
+	}
+	return ""
+}
+
+// resolveMaestroAppID returns the package/bundle id Maestro should target. The
+// installed Android package suffix is inconsistent across the fleet (.dev,
+// .expo, .preview, or none) and the source binding's value doesn't always match
+// what `expo run:android` installed — so for Android we query the emulator for
+// the package actually installed under this app's base id. iOS uses the binding
+// bundle id directly.
+func resolveMaestroAppID(options runnerOnceOptions, job apiRunnerJob, providerIdentity string) string {
+	binding := strings.TrimSpace(job.Payload.SourceBinding.AndroidPackage)
+	if jobPlatform(job) == "ios" {
+		return strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
+	}
+	base := binding
+	for _, suffix := range []string{".dev", ".expo", ".preview", ".staging"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	if base == "" {
+		// The source binding's androidPackage is often empty; fall back to the
+		// applicationId in the app's generated Gradle config — the base of
+		// whatever expo run:android installed.
+		base = androidApplicationIDFromGradle(job)
+	}
+	if base == "" || providerIdentity == "" {
+		return binding
+	}
+	out, err := exec.Command(options.adbPath, "-s", providerIdentity, "shell", "pm", "list", "packages").Output()
+	if err != nil {
+		return binding
+	}
+	var candidates []string
+	for _, line := range strings.Split(string(out), "\n") {
+		pkg := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "package:"))
+		if pkg == base || strings.HasPrefix(pkg, base+".") {
+			candidates = append(candidates, pkg)
+		}
+	}
+	// Exact binding match wins; otherwise the installed variant (normally exactly
+	// one under a given base on a fresh emulator).
+	for _, c := range candidates {
+		if c == binding {
+			return c
+		}
+	}
+	if len(candidates) > 0 {
+		sort.Strings(candidates)
+		return candidates[0]
+	}
+	return binding
 }
 
 func preferredDevSessionURL(devSession runnerJobDevSession) string {
