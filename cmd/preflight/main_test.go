@@ -3552,56 +3552,55 @@ func TestCredentialFlowsCreateUsesProviderAccountScopedAPI(t *testing.T) {
 	}
 }
 
-func TestDefaultRunnerCapabilitiesAdvertiseExecutableMobileTooling(t *testing.T) {
+func TestDefaultRunnerCapabilitiesAdvertiseOnlyWhatTheHostHas(t *testing.T) {
+	// This used to assert a fixed list, which passed everywhere because the
+	// list was hardcoded — that is exactly the bug: labnuc (Linux) advertised
+	// xcrun/simctl/fastlane/adb while having none of them, so it could be
+	// handed iOS work it could not run. Assert the invariant instead, so the
+	// test means something on a Mac, on Linux CI, and on a bare container.
 	capabilities := defaultRunnerCapabilities("lan")
+
 	localTools, ok := capabilities["localTools"].([]string)
 	if !ok {
 		t.Fatalf("expected localTools capability list, got %#v", capabilities["localTools"])
 	}
-	for _, expected := range []string{
-		"adb",
-		"avdmanager",
-		"eas",
-		"emulator",
-		"expo",
-		"gcloud",
-		"maestro",
-		"sdkmanager",
-		"simctl",
-		"xcrun",
-	} {
-		if !containsArg(localTools, expected) {
-			t.Fatalf("expected localTools to include %q, got %#v", expected, localTools)
+	for _, tool := range localTools {
+		if !localToolAvailable(tool) {
+			t.Errorf("advertised %q but it is not available on this host", tool)
 		}
 	}
+
+	platforms, ok := capabilities["platforms"].([]string)
+	if !ok {
+		t.Fatalf("expected platforms capability list, got %#v", capabilities["platforms"])
+	}
+	for _, platform := range platforms {
+		switch platform {
+		case "ios":
+			if !localToolAvailable("xcrun") {
+				t.Error("advertised ios without xcrun")
+			}
+		case "android":
+			if resolveAndroidSdkTool("adb") == "" {
+				t.Error("advertised android without a resolvable adb")
+			}
+		default:
+			t.Errorf("unexpected platform %q", platform)
+		}
+	}
+
+	// Platform-specific adapters must not outlive their platform.
 	adapters, ok := capabilities["adapters"].([]string)
 	if !ok {
 		t.Fatalf("expected adapters capability list, got %#v", capabilities["adapters"])
 	}
-	for _, expected := range []string{
-		"android.emulator",
-		"android.emulator.discovery",
-		"android.emulator.install",
-		"android.sdk.management",
-		"apple_oauth.management",
-		"app_store_connect.api",
-		"eas.development",
-		"eas.cli",
-		"expo.dev_client",
-		"expo.dev_server",
-		"expo.local_build",
-		"google_cloud.cli",
-		"google_oauth.management",
-		"google_play.api",
-		"ios.simulator",
-		"ios.simulator.boot",
-		"ios.simulator.discovery",
-		"ios.simulator.install",
-		"sentry.api",
-		"sentry.source_maps.upload",
-	} {
-		if !containsArg(adapters, expected) {
-			t.Fatalf("expected adapters to include %q, got %#v", expected, adapters)
+	have := map[string]bool{}
+	for _, platform := range platforms {
+		have[platform] = true
+	}
+	for _, adapter := range adapters {
+		if required, gated := adapterRequirements[adapter]; gated && !have[required] {
+			t.Errorf("advertised adapter %q without platform %q", adapter, required)
 		}
 	}
 }
