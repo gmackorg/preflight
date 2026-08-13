@@ -92,6 +92,14 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runRunner(args[1:], stdout, stderr, client)
 	case "apps":
 		return runApps(args[1:], stdout, stderr, client)
+	case "build":
+		return runBuild(args[1:], stdout, stderr, client)
+	case "queue":
+		return runQueue(args[1:], stdout, stderr, client)
+	case "nodes":
+		return runNodes(args[1:], stdout, stderr, client)
+	case "integrations":
+		return runIntegrations(args[1:], stdout, stderr, client)
 	case "cleanup":
 		return runCleanup(args[1:], stdout, stderr)
 	case "fleet":
@@ -138,6 +146,10 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  login         Authenticate with the Preflight API")
 	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist/doctor/screenshots/submit-for-review)")
 	fmt.Fprintln(w, "  fleet         Fleet cockpit: `fleet next` = per-app next action + owner")
+	fmt.Fprintln(w, "  build         Queue a build/test work order on the build farm")
+	fmt.Fprintln(w, "  queue         Build-farm queue: what is queued/running/blocked, and why")
+	fmt.Fprintln(w, "  nodes         Build-farm runners: heartbeat freshness + active jobs")
+	fmt.Fprintln(w, "  integrations  Probe the Preflight API and its upstreams")
 	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
 	fmt.Fprintln(w, "  testflight    Manage TestFlight tester enrollment")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
@@ -12223,6 +12235,14 @@ func doPreflightJSONOnce(
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
+		// A 404 from the worker is an HTML error page, not an envelope, so the
+		// raw parse error ("invalid character '<'") hides the real cause: the
+		// route does not exist on the deployment being talked to.
+		if bytes.HasPrefix(bytes.TrimSpace(body), []byte("<")) {
+			return nil, response.StatusCode, fmt.Errorf(
+				"Preflight API returned HTML (HTTP %d) rather than JSON — the endpoint is missing on this deployment",
+				response.StatusCode)
+		}
 		return nil, response.StatusCode, fmt.Errorf("decode Preflight response envelope: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {

@@ -1,0 +1,644 @@
+package main
+
+// Build-farm operations: trigger work, watch the queue, and see the hosts.
+//
+// The control plane already exposes all of this (work orders carry the
+// provider decision + dispatch planning; runners report capacity and
+// heartbeats), but none of it was reachable from the CLI — so the only way to
+// answer "why is nothing building?" was to open a psql session against
+// production. These four commands close that gap:
+//
+//	preflight build         trigger a work order
+//	preflight queue         what is queued/running/blocked, and why
+//	preflight nodes         which runners exist, which are stale, what they hold
+//	preflight integrations  is the API + its upstreams actually reachable
+//
+// The recurring failure this is built to expose is a deep queue with zero live
+// runners: both halves look fine in isolation, so `queue` and `nodes` each
+// report the other's number.
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// shared
+// ---------------------------------------------------------------------------
+
+type buildOpsContext struct {
+	apiURL      string
+	token       string
+	workspaceID string
+}
+
+func newBuildOpsContext() buildOpsContext {
+	config, _ := loadPreflightCLIConfig()
+	return buildOpsContext{
+		apiURL:      firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL, defaultPreflightAPIURL),
+		token:       firstNonEmpty(os.Getenv("PREFLIGHT_TOKEN"), config.Token),
+		workspaceID: firstNonEmpty(os.Getenv("PREFLIGHT_WORKSPACE_ID"), config.WorkspaceID),
+	}
+}
+
+func (c buildOpsContext) endpoint(path string, query url.Values) string {
+	base := strings.TrimRight(c.apiURL, "/") + "/api/preflight/v1" + path
+	if len(query) == 0 {
+		return base
+	}
+	return base + "?" + query.Encode()
+}
+
+// requireWorkspace fails early rather than letting the API answer with an
+// opaque 401 — an unset workspace is the most common first-run mistake.
+func (c buildOpsContext) requireWorkspace(stderr io.Writer) bool {
+	if strings.TrimSpace(c.workspaceID) == "" {
+		fmt.Fprintln(stderr, "no workspace id — run `preflight login` or set PREFLIGHT_WORKSPACE_ID")
+		return false
+	}
+	return true
+}
+
+// relativeAge renders a second count the way an operator reads it.
+func relativeAge(seconds *int) string {
+	if seconds == nil {
+		return "never"
+	}
+	s := *seconds
+	switch {
+	case s < 90:
+		return fmt.Sprintf("%ds", s)
+	case s < 5400:
+		return fmt.Sprintf("%dm", s/60)
+	default:
+		return fmt.Sprintf("%dh", s/3600)
+	}
+}
+
+func writeJSON(stdout io.Writer, payload any) int {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// preflight build
+// ---------------------------------------------------------------------------
+
+var workOrderKinds = []string{
+	"build", "simulator_test", "device_test", "e2e_suite",
+	"submission_verify", "submit", "release_candidate",
+	"build_matrix", "post_release_monitor",
+}
+
+type workOrder struct {
+	ID            string `json:"id"`
+	AppID         string `json:"appId"`
+	Kind          string `json:"kind"`
+	Platform      string `json:"platform"`
+	Status        string `json:"status"`
+	PriorityClass string `json:"priorityClass"`
+	BuildProvider string `json:"buildProvider"`
+	BlockedReason string `json:"blockedReason"`
+	RequestedBy   string `json:"requestedBy"`
+	CreatedAt     string `json:"createdAt"`
+}
+
+func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		printBuildHelp(stdout)
+		return 0
+	}
+	ctx := newBuildOpsContext()
+	appID, platform, runtime := "", "ios", "expo"
+	kind, priorityClass, idempotencyKey := "build", "normal", ""
+	wait, jsonOut := false, false
+	preference := ""
+
+	for i := 0; i < len(args); i++ {
+		next := func(dst *string) {
+			if value, ok := nextFlagValue(args, &i); ok {
+				*dst = value
+			}
+		}
+		switch args[i] {
+		case "--app":
+			next(&appID)
+		case "--platform":
+			next(&platform)
+		case "--runtime":
+			next(&runtime)
+		case "--kind":
+			next(&kind)
+		case "--priority-class":
+			next(&priorityClass)
+		case "--provider":
+			next(&preference)
+		case "--idempotency-key":
+			next(&idempotencyKey)
+		case "--wait":
+			wait = true
+		case "--json":
+			jsonOut = true
+		}
+	}
+
+	if strings.TrimSpace(appID) == "" {
+		fmt.Fprintln(stderr, "--app is required")
+		printBuildHelp(stderr)
+		return 2
+	}
+	if !contains(workOrderKinds, kind) {
+		fmt.Fprintf(stderr, "unknown --kind %q; expected one of: %s\n", kind, strings.Join(workOrderKinds, ", "))
+		return 2
+	}
+	if platform != "ios" && platform != "android" {
+		fmt.Fprintf(stderr, "--platform must be ios or android, got %q\n", platform)
+		return 2
+	}
+	if !ctx.requireWorkspace(stderr) {
+		return 2
+	}
+
+	payload := map[string]any{
+		"workspaceId":   ctx.workspaceID,
+		"appId":         appID,
+		"runtime":       runtime,
+		"platform":      platform,
+		"kind":          kind,
+		"priorityClass": priorityClass,
+		"requestedBy":   "cli",
+	}
+	if preference != "" {
+		payload["buildProviderPreference"] = preference
+	}
+	if idempotencyKey != "" {
+		payload["idempotencyKey"] = idempotencyKey
+	}
+
+	raw, err := postPreflightJSON(client, ctx.endpoint("/work-orders", nil), ctx.token, payload)
+	if err != nil {
+		fmt.Fprintf(stderr, "create work order failed: %v\n", err)
+		return 1
+	}
+	var response struct {
+		WorkOrder  workOrder `json:"workOrder"`
+		Idempotent bool      `json:"idempotent"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		fmt.Fprintf(stderr, "decode response: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		return writeJSON(stdout, response)
+	}
+
+	order := response.WorkOrder
+	if response.Idempotent {
+		fmt.Fprintf(stdout, "Reused existing work order %s (idempotency key matched).\n", order.ID)
+	} else {
+		fmt.Fprintf(stdout, "Queued %s %s for %s → %s\n", order.Kind, order.Platform, order.AppID, order.ID)
+	}
+	if order.BuildProvider != "" {
+		fmt.Fprintf(stdout, "  provider: %s\n", order.BuildProvider)
+	}
+	// A blocked order is accepted by the API but will never run; say so here
+	// rather than letting it sit in the queue looking pending.
+	if order.Status == "blocked" {
+		fmt.Fprintf(stdout, "  BLOCKED: %s\n", firstNonEmpty(order.BlockedReason, "no reason reported"))
+		return 1
+	}
+	if !wait {
+		fmt.Fprintf(stdout, "  watch with: preflight queue --app %s --watch\n", order.AppID)
+		return 0
+	}
+	return waitForWorkOrder(ctx, client, order.ID, stdout, stderr)
+}
+
+// waitForWorkOrder polls until the order reaches a terminal state. Terminal
+// failures exit non-zero so this is usable in a script.
+func waitForWorkOrder(ctx buildOpsContext, client *http.Client, id string, stdout, stderr io.Writer) int {
+	last := ""
+	for {
+		raw, err := getPreflightJSON(client, ctx.endpoint("/work-orders/"+url.PathEscape(id), nil), ctx.token)
+		if err != nil {
+			fmt.Fprintf(stderr, "poll work order: %v\n", err)
+			return 1
+		}
+		var response struct {
+			WorkOrder workOrder `json:"workOrder"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			fmt.Fprintf(stderr, "decode work order: %v\n", err)
+			return 1
+		}
+		status := response.WorkOrder.Status
+		if status != last {
+			fmt.Fprintf(stdout, "  %s\n", status)
+			last = status
+		}
+		switch status {
+		case "succeeded":
+			return 0
+		case "failed", "cancelled":
+			return 1
+		case "blocked":
+			fmt.Fprintf(stdout, "  BLOCKED: %s\n", firstNonEmpty(response.WorkOrder.BlockedReason, "no reason reported"))
+			return 1
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func printBuildHelp(w io.Writer) {
+	fmt.Fprintln(w, "Usage: preflight build --app <appId> [flags]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Queue a work order on the build farm.")
+	fmt.Fprintln(w, "  --app <id>             app to build (required)")
+	fmt.Fprintln(w, "  --platform ios|android default ios")
+	fmt.Fprintln(w, "  --runtime <name>       app runtime, default expo")
+	fmt.Fprintln(w, "  --kind <kind>          default build; one of:")
+	fmt.Fprintf(w, "                         %s\n", strings.Join(workOrderKinds, ", "))
+	fmt.Fprintln(w, "  --priority-class <c>   background|normal|… default normal")
+	fmt.Fprintln(w, "  --provider <p>         build provider preference (local/cloud)")
+	fmt.Fprintln(w, "  --idempotency-key <k>  reuse an existing order instead of duplicating")
+	fmt.Fprintln(w, "  --wait                 poll until the order reaches a terminal state")
+	fmt.Fprintln(w, "  --json                 machine-readable output")
+}
+
+// ---------------------------------------------------------------------------
+// preflight queue
+// ---------------------------------------------------------------------------
+
+func runQueue(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(stdout, "Usage: preflight queue [--status <s>] [--app <id>] [--watch] [--json]")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Show the build-farm work-order queue.")
+		fmt.Fprintln(stdout, "  --status <s>  filter: queued|planning|waiting_for_resource|running|blocked|succeeded|failed|cancelled")
+		fmt.Fprintln(stdout, "  --app <id>    filter to one app")
+		fmt.Fprintln(stdout, "  --watch       refresh every 5s until interrupted")
+		fmt.Fprintln(stdout, "  --json        machine-readable output")
+		return 0
+	}
+	ctx := newBuildOpsContext()
+	status, appID := "", ""
+	watch, jsonOut := false, false
+	for i := 0; i < len(args); i++ {
+		next := func(dst *string) {
+			if value, ok := nextFlagValue(args, &i); ok {
+				*dst = value
+			}
+		}
+		switch args[i] {
+		case "--status":
+			next(&status)
+		case "--app":
+			next(&appID)
+		case "--watch":
+			watch = true
+		case "--json":
+			jsonOut = true
+		}
+	}
+	if !ctx.requireWorkspace(stderr) {
+		return 2
+	}
+	for {
+		code := printQueueOnce(ctx, client, status, appID, jsonOut, stdout, stderr)
+		if !watch || jsonOut || code != 0 {
+			return code
+		}
+		time.Sleep(5 * time.Second)
+		fmt.Fprintln(stdout)
+	}
+}
+
+func printQueueOnce(ctx buildOpsContext, client *http.Client, status, appID string, jsonOut bool, stdout, stderr io.Writer) int {
+	query := url.Values{}
+	query.Set("workspaceId", ctx.workspaceID)
+	if status != "" {
+		query.Set("status", status)
+	}
+	if appID != "" {
+		query.Set("appId", appID)
+	}
+	raw, err := getPreflightJSON(client, ctx.endpoint("/work-orders", query), ctx.token)
+	if err != nil {
+		fmt.Fprintf(stderr, "list work orders failed: %v\n", err)
+		return 1
+	}
+	var response struct {
+		WorkOrders []workOrder `json:"workOrders"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		fmt.Fprintf(stderr, "decode work orders: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		return writeJSON(stdout, response)
+	}
+	if len(response.WorkOrders) == 0 {
+		fmt.Fprintln(stdout, "Queue is empty.")
+		return 0
+	}
+
+	byStatus := map[string]int{}
+	for _, order := range response.WorkOrders {
+		byStatus[order.Status]++
+	}
+	fmt.Fprintf(stdout, "%-26s %-18s %-9s %-22s %s\n", "WORK ORDER", "APP", "PLATFORM", "STATUS", "KIND")
+	for _, order := range response.WorkOrders {
+		statusCell := order.Status
+		// Blocked orders never run; surface the reason inline so the queue
+		// explains itself instead of prompting a second lookup.
+		if order.Status == "blocked" && order.BlockedReason != "" {
+			statusCell = "blocked: " + truncate(order.BlockedReason, 40)
+		}
+		fmt.Fprintf(stdout, "%-26s %-18s %-9s %-22s %s\n",
+			truncate(order.ID, 26), truncate(order.AppID, 18),
+			order.Platform, truncate(statusCell, 22), order.Kind)
+	}
+	fmt.Fprintf(stdout, "\n%d work order(s): %s\n", len(response.WorkOrders), summarizeCounts(byStatus))
+
+	// The queue alone cannot tell you a build is stuck for lack of a host, so
+	// pull runner state whenever anything is actually waiting.
+	waiting := byStatus["queued"] + byStatus["waiting_for_resource"]
+	if waiting > 0 {
+		if online, total, ok := nodeHeadcount(ctx, client); ok && online == 0 {
+			fmt.Fprintf(stdout, "WARNING: %d work order(s) waiting and 0 of %d node(s) online — run `preflight nodes`.\n", waiting, total)
+		}
+	}
+	return 0
+}
+
+func summarizeCounts(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", key, counts[key]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ---------------------------------------------------------------------------
+// preflight nodes
+// ---------------------------------------------------------------------------
+
+type farmNode struct {
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	MachineID         string   `json:"machineId"`
+	Status            string   `json:"status"`
+	Engines           []string `json:"engines"`
+	Platforms         []string `json:"platforms"`
+	AgentCount        int      `json:"agentCount"`
+	LiveAgentCount    int      `json:"liveAgentCount"`
+	FreeDiskGb        *int     `json:"freeDiskGb"`
+	DiskPressure      string   `json:"diskPressure"`
+	LastSeenAgeSecond *int     `json:"lastSeenAgeSeconds"`
+	Jobs              *struct {
+		Running     int `json:"running"`
+		Queued      int `json:"queued"`
+		Succeeded24 int `json:"succeeded24h"`
+		Failed24    int `json:"failed24h"`
+	} `json:"jobs"`
+}
+
+type nodeSummary struct {
+	Total             int      `json:"total"`
+	Online            int      `json:"online"`
+	Stale             int      `json:"stale"`
+	Retired           int      `json:"retired"`
+	LiveAgents        int      `json:"liveAgents"`
+	DiskCritical      int      `json:"diskCritical"`
+	DiskCriticalNodes []string `json:"diskCriticalNodes"`
+	QueuedJobs        int      `json:"queuedJobs"`
+	RunningJobs       int      `json:"runningJobs"`
+}
+
+func fetchNodes(ctx buildOpsContext, client *http.Client) ([]farmNode, nodeSummary, error) {
+	query := url.Values{}
+	query.Set("workspaceId", ctx.workspaceID)
+	raw, err := getPreflightJSON(client, ctx.endpoint("/nodes", query), ctx.token)
+	if err != nil {
+		return nil, nodeSummary{}, err
+	}
+	var response struct {
+		Nodes   []farmNode  `json:"nodes"`
+		Summary nodeSummary `json:"summary"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		// An HTML body here means the route 404'd, which reads as a confusing
+		// JSON parse error ("invalid character '<'") unless we say so.
+		if strings.HasPrefix(strings.TrimSpace(string(raw)), "<") {
+			return nil, nodeSummary{}, fmt.Errorf(
+				"/nodes returned HTML, not JSON — the endpoint is missing on this deployment")
+		}
+		return nil, nodeSummary{}, err
+	}
+	return response.Nodes, response.Summary, nil
+}
+
+// nodeHeadcount is the cheap form used to annotate the queue. Failures are
+// silent: an unavailable node list must not break `queue`.
+func nodeHeadcount(ctx buildOpsContext, client *http.Client) (online int, total int, ok bool) {
+	_, summary, err := fetchNodes(ctx, client)
+	if err != nil {
+		return 0, 0, false
+	}
+	return summary.Online, summary.Total, true
+}
+
+func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(stdout, "Usage: preflight nodes [--watch] [--json]")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Show build-farm nodes: engines, free disk, agents, and live job counts.")
+		fmt.Fprintln(stdout, "  --watch  refresh every 5s until interrupted")
+		fmt.Fprintln(stdout, "  --json   machine-readable output")
+		return 0
+	}
+	ctx := newBuildOpsContext()
+	watch, jsonOut := false, false
+	for _, arg := range args {
+		switch arg {
+		case "--watch":
+			watch = true
+		case "--json":
+			jsonOut = true
+		}
+	}
+	if !ctx.requireWorkspace(stderr) {
+		return 2
+	}
+	for {
+		code := printNodesOnce(ctx, client, jsonOut, stdout, stderr)
+		if !watch || jsonOut || code != 0 {
+			return code
+		}
+		time.Sleep(5 * time.Second)
+		fmt.Fprintln(stdout)
+	}
+}
+
+func printNodesOnce(ctx buildOpsContext, client *http.Client, jsonOut bool, stdout, stderr io.Writer) int {
+	nodes, summary, err := fetchNodes(ctx, client)
+	if err != nil {
+		fmt.Fprintf(stderr, "list nodes failed: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		return writeJSON(stdout, map[string]any{"nodes": nodes, "summary": summary})
+	}
+	if len(nodes) == 0 {
+		fmt.Fprintln(stdout, "No nodes registered for this workspace.")
+		return 0
+	}
+	fmt.Fprintf(stdout, "%-16s %-8s %-7s %-16s %-9s %s\n",
+		"NODE", "STATE", "AGENTS", "ENGINES", "DISK", "JOBS(run/queued)")
+	for _, node := range nodes {
+		disk := "unknown"
+		if node.FreeDiskGb != nil {
+			disk = fmt.Sprintf("%dGB", *node.FreeDiskGb)
+			// A host under the floor silently stops claiming, so flag it here
+			// rather than leaving it looking merely idle.
+			if node.DiskPressure == "critical" {
+				disk += "!"
+			}
+		}
+		jobs := "0/0"
+		if node.Jobs != nil {
+			jobs = fmt.Sprintf("%d/%d", node.Jobs.Running, node.Jobs.Queued)
+		}
+		fmt.Fprintf(stdout, "%-16s %-8s %-7s %-16s %-9s %s\n",
+			truncate(node.Name, 16), node.Status,
+			fmt.Sprintf("%d/%d", node.LiveAgentCount, node.AgentCount),
+			truncate(strings.Join(node.Engines, ","), 16), disk, jobs)
+	}
+	fmt.Fprintf(stdout, "\n%d node(s): %d online, %d stale, %d retired. %d live agent(s). %d queued / %d running.\n",
+		summary.Total, summary.Online, summary.Stale, summary.Retired,
+		summary.LiveAgents, summary.QueuedJobs, summary.RunningJobs)
+	exit := 0
+	if summary.DiskCritical > 0 {
+		fmt.Fprintf(stdout, "WARNING: disk critical on %s — these hosts decline work below the free-space floor.\n",
+			strings.Join(summary.DiskCriticalNodes, ", "))
+		exit = 1
+	}
+	if summary.Online == 0 && summary.QueuedJobs > 0 {
+		fmt.Fprintln(stdout, "WARNING: work is queued but no node is online — nothing will be claimed.")
+		exit = 1
+	}
+	return exit
+}
+
+// ---------------------------------------------------------------------------
+// preflight integrations
+// ---------------------------------------------------------------------------
+
+func runIntegrations(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(stdout, "Usage: preflight integrations [--json]")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Probe the Preflight API and the upstreams it depends on.")
+		return 0
+	}
+	ctx := newBuildOpsContext()
+	jsonOut := false
+	for _, arg := range args {
+		if arg == "--json" {
+			jsonOut = true
+		}
+	}
+
+	type probe struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Detail string `json:"detail"`
+	}
+	probes := []probe{}
+	add := func(name string, err error, detail string) {
+		if err != nil {
+			probes = append(probes, probe{Name: name, Status: "fail", Detail: err.Error()})
+			return
+		}
+		probes = append(probes, probe{Name: name, Status: "ok", Detail: detail})
+	}
+
+	start := time.Now()
+	_, err := getPreflightJSON(client, ctx.endpoint("/health", nil), ctx.token)
+	add("preflight api", err, fmt.Sprintf("%s (%dms)", ctx.apiURL, time.Since(start).Milliseconds()))
+
+	// Capabilities is the contract surface: it reports which integrations the
+	// server believes are configured, which is the thing that silently drifts.
+	raw, err := getPreflightJSON(client, ctx.endpoint("/capabilities", nil), ctx.token)
+	if err != nil {
+		add("capabilities", err, "")
+	} else {
+		var caps map[string]any
+		if err := json.Unmarshal(raw, &caps); err != nil {
+			add("capabilities", err, "")
+		} else {
+			add("capabilities", nil, fmt.Sprintf("%d field(s)", len(caps)))
+		}
+	}
+
+	if ctx.workspaceID != "" {
+		_, summary, err := fetchNodes(ctx, client)
+		if err != nil {
+			add("build farm", err, "")
+		} else {
+			detail := fmt.Sprintf("%d node(s), %d online, %d job(s) queued",
+				summary.Total, summary.Online, summary.QueuedJobs)
+			if summary.Online == 0 && summary.Total > 0 {
+				probes = append(probes, probe{Name: "build farm", Status: "warn", Detail: detail + " — no node online"})
+			} else {
+				add("build farm", nil, detail)
+			}
+		}
+	}
+
+	if jsonOut {
+		return writeJSON(stdout, map[string]any{"probes": probes})
+	}
+	failed := 0
+	for _, p := range probes {
+		marker := "ok  "
+		if p.Status == "fail" {
+			marker = "FAIL"
+			failed++
+		} else if p.Status == "warn" {
+			marker = "warn"
+		}
+		fmt.Fprintf(stdout, "[%s] %-16s %s\n", marker, p.Name, p.Detail)
+	}
+	if failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+
+func contains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
