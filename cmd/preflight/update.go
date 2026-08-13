@@ -276,8 +276,16 @@ func installPath() (string, error) {
 	return exe, nil
 }
 
-// installAtomically writes beside the target then renames over it, so an
-// interrupted update can never leave a half-written binary in place.
+// installAtomically writes beside the target then renames over it.
+//
+// Rename (not copy) is load-bearing for two reasons. An interrupted update can
+// never leave a half-written binary in place; and rename swaps the directory
+// entry so a NEW inode is created, leaving any running process on the old one.
+// Copying over a binary that is currently executing mutates its inode in place,
+// which on macOS invalidates the code signature — the next exec is SIGKILLed
+// (exit 137). Learned by doing exactly that to the build farm's runner binary
+// on 2026-08-13; the running agents survived, but the next restart would not
+// have.
 func installAtomically(target string, payload []byte) error {
 	dir := filepath.Dir(target)
 	temp, err := os.CreateTemp(dir, ".preflight-update-*")
