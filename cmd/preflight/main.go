@@ -6456,7 +6456,16 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		// (a different checkout has a live expo/xcodebuild) — shutting down its
 		// booted sim would wedge it. With concurrent builds we rely on expo's
 		// explicit --device <udid> targeting instead of the booted-singleton trick.
-		if strings.TrimSpace(options.simulatorUDID) != "" {
+		if strings.TrimSpace(providerIdentity) != "" {
+			// We target this exact sim via `expo run:ios --device <udid>`, so
+			// there's no generic-"booted" ambiguity — never shut down other
+			// simulators. That was wedging concurrent builds: the old ps-based
+			// concurrency guard only saw /.preflight-ci/ checkouts and missed
+			// local prove-app builds under /Volumes/dev, so it ran the shutdown
+			// and killed a peer build's sim mid-install. Each concurrent build
+			// boots + owns its own target sim.
+			fmt.Fprintf(stdout, "explicit --device %s targeting; leaving other simulators booted (concurrent-safe)\n", providerIdentity)
+		} else if strings.TrimSpace(options.simulatorUDID) != "" {
 			fmt.Fprintf(stdout, "pinned to simulator %s; skipping booted-simulator shutdown (sole owner of its sim)\n", options.simulatorUDID)
 		} else if concurrentPreflightBuildActive(preflightCiCheckoutSegment(appDir)) {
 			fmt.Fprintf(stdout, "concurrent runner build active; skipping booted-simulator shutdown\n")
