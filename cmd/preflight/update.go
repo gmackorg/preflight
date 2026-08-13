@@ -184,6 +184,17 @@ func fetchLatestRelease(client *http.Client) (*githubRelease, error) {
 	if response.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("no published release found for %s", updateRepoSlug())
 	}
+	if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusTooManyRequests {
+		// Anonymous GitHub API access is 60 requests/hour per IP. A fleet of
+		// runners behind one NAT hits that easily, and a bare "HTTP 403" sends
+		// people looking for a permissions problem that does not exist.
+		if response.Header.Get("X-RateLimit-Remaining") == "0" {
+			reset := response.Header.Get("X-RateLimit-Reset")
+			return nil, fmt.Errorf(
+				"GitHub API rate limit reached (anonymous limit is 60/hour, resets at epoch %s) — set GITHUB_TOKEN to raise it", reset)
+		}
+		return nil, fmt.Errorf("GitHub returned HTTP %d — set GITHUB_TOKEN if this is a rate limit", response.StatusCode)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, fmt.Errorf("GitHub returned HTTP %d", response.StatusCode)
 	}
