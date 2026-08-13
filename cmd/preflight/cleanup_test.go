@@ -138,3 +138,49 @@ func writeCleanupFixture(t *testing.T, path string, content string, modified tim
 		t.Fatal(err)
 	}
 }
+
+func TestCleanupBuildStorageUnderPressureSweepsHostCachesToo(t *testing.T) {
+	// Regression for 2026-08-13: every labtop runner logged "after sweeping 0
+	// cache entries — declining claims" and stopped, because the sweep only
+	// looked under the workspace root while the space sat in Xcode's own
+	// DerivedData. A sweep that can only report 0 makes a recoverable host
+	// look dead.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	root := t.TempDir()
+	workspaceStale := filepath.Join(root, "DerivedData", "workspace-build")
+	writeCleanupFixture(t, workspaceStale, "cache", time.Now().Add(-48*time.Hour))
+
+	hostStale := filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData", "App-abc123")
+	writeCleanupFixture(t, hostStale, "cache", time.Now().Add(-48*time.Hour))
+
+	result, err := cleanupBuildStorageUnderPressure(
+		root,
+		24*time.Hour,
+		20*bytesPerGiB,
+		func(string) (uint64, error) { return 5 * bytesPerGiB, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 2 {
+		t.Fatalf("removed = %d, want 2 (workspace + host cache)", result.Removed)
+	}
+	if _, err := os.Stat(hostStale); !os.IsNotExist(err) {
+		t.Fatalf("host-level Xcode DerivedData was not swept: %v", err)
+	}
+}
+
+func TestHostCacheRootsStayNarrow(t *testing.T) {
+	// Widening this is how a "cleanup" starts deleting things people miss.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	roots := hostCacheRoots()
+	if len(roots) != 1 {
+		t.Fatalf("hostCacheRoots() = %v, want exactly one narrow root", roots)
+	}
+	if !strings.HasSuffix(roots[0], filepath.Join("Library", "Developer", "Xcode")) {
+		t.Fatalf("unexpected host cache root: %s", roots[0])
+	}
+}

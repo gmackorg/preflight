@@ -148,7 +148,39 @@ func cleanupBuildStorageUnderPressure(
 	if err != nil {
 		return cleanupPressureResult{Removed: removed, FreeBytes: free}, err
 	}
+
+	// The workspace root is not where the space usually is. On 2026-08-13 all
+	// five labtop runners logged
+	//
+	//   low disk: 10.4 GiB free (< 15 GiB) after sweeping 0 cache entries
+	//
+	// and then stopped: the sweep was scoped to managed cache dirs under the
+	// workspace root, which were already clean, while ~6.8 GiB sat in
+	// simulator data and several more in Xcode's own DerivedData. A sweep that
+	// can only ever report 0 is worse than none — it makes the host look
+	// unrecoverable when it is one directory away from healthy.
+	//
+	// Xcode keeps DerivedData under ~/Library/Developer/Xcode, and DerivedData
+	// is already a managed cache dir, so the same collector handles it.
+	for _, hostRoot := range hostCacheRoots() {
+		hostRemoved, hostErr := cleanupBuilds(hostRoot, maxAge, false, false, io.Discard)
+		removed += hostRemoved
+		if hostErr != nil {
+			return cleanupPressureResult{Removed: removed, FreeBytes: free}, hostErr
+		}
+	}
 	return cleanupPressureResult{Removed: removed, FreeBytes: free}, nil
+}
+
+// hostCacheRoots are machine-level roots holding regenerable build caches that
+// no workspace owns. Kept deliberately narrow: only caches a build is expected
+// to recreate, never anything a user would miss.
+func hostCacheRoots() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, "Library", "Developer", "Xcode")}
 }
 
 func runCleanup(args []string, stdout, stderr io.Writer) int {
