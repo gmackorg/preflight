@@ -78,7 +78,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 
 	switch args[0] {
 	case "version":
-		fmt.Fprintf(stdout, "preflight dev (contract %s)\n", contractVersion)
+		fmt.Fprintf(stdout, "preflight %s (contract %s)\n", preflightCLIVersion, contractVersion)
 		return 0
 	case "login":
 		return runLogin(args[1:], stdout, stderr, client)
@@ -102,6 +102,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runIntegrations(args[1:], stdout, stderr, client)
 	case "disk":
 		return runDisk(args[1:], stdout, stderr, client)
+	case "update":
+		return runUpdate(args[1:], stdout, stderr, client)
 	case "cleanup":
 		return runCleanup(args[1:], stdout, stderr)
 	case "fleet":
@@ -153,6 +155,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  nodes         Build-farm machines: engines, free disk, agents, live jobs")
 	fmt.Fprintln(w, "  integrations  Probe the Preflight API and its upstreams")
 	fmt.Fprintln(w, "  disk          Free space here + across the farm; --reclaim prunes caches")
+	fmt.Fprintln(w, "  update        Install the latest released binary from GitHub")
 	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
 	fmt.Fprintln(w, "  testflight    Manage TestFlight tester enrollment")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
@@ -288,6 +291,14 @@ func runLogin(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	fmt.Fprintf(stdout, "Signed in to %s (workspace %s)\n", config.APIURL, config.WorkspaceID)
 	return 0
 }
+
+// preflightCLIVersion is stamped at release time with
+//
+//	-ldflags "-X main.preflightCLIVersion=v1.2.3"
+//
+// and stays "dev" for local builds, which `preflight update` treats as always
+// out of date so a hand-built binary can still pull a release.
+var preflightCLIVersion = "dev"
 
 const defaultPreflightAPIURL = "https://preflight.forgegraf.com"
 
@@ -9160,7 +9171,7 @@ func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, re
 	}
 	fmt.Fprintf(stdout, "reported %d %s target(s)\n", len(targets.Targets), discoveryTargetLabel(job))
 
-	target := firstAvailableTarget(targets.Targets)
+	target := preferredSimulatorTarget(options, job.Payload.Platform, targets.Targets)
 	if target == nil {
 		return fmt.Errorf("no available %s targets reported", discoveryTargetLabel(job))
 	}
@@ -9321,6 +9332,28 @@ func bootIOSSimulator(options runnerOnceOptions, providerIdentity string) error 
 		return fmt.Errorf("boot iOS simulator %s: %w: %s", providerIdentity, err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// resolvedPathForBindingCheck normalises a path for source-binding comparison:
+// absolute AND symlink-resolved. Abs alone is not enough — on macOS /var is a
+// symlink to /private/var, and a build host may legitimately symlink a
+// workspace root onto another volume (the build farm points
+// /Volumes/dev/.preflight-ci at an external SSD). Comparing a resolved path
+// against an unresolved one fails with a source_binding_mismatch that looks
+// like a misconfigured job rather than two spellings of the same directory.
+//
+// Falls back to the absolute path when the target does not exist yet, since a
+// checkout root is created after this check in some flows.
+func resolvedPathForBindingCheck(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return absolute, nil
+	}
+	return resolved, nil
 }
 
 func appDirectoryForJob(options runnerOnceOptions, job apiRunnerJob) string {
@@ -9590,7 +9623,7 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	}
 
 	appDir := appDirectoryForJob(options, job)
-	absoluteAppDir, err := filepath.Abs(appDir)
+	absoluteAppDir, err := resolvedPathForBindingCheck(appDir)
 	if err != nil {
 		return sourceBindingMismatch("packagePath", appDir, err.Error())
 	}
@@ -9615,7 +9648,7 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		return absErr == nil && pathHasSegment(abs, ciCheckoutRootSegment)
 	}()
 	if strings.TrimSpace(bindingRoot) != "" {
-		absoluteBindingRoot, err := filepath.Abs(bindingRoot)
+		absoluteBindingRoot, err := resolvedPathForBindingCheck(bindingRoot)
 		if err != nil {
 			return sourceBindingMismatch("workspaceRoot", bindingRoot, err.Error())
 		}
@@ -9624,7 +9657,7 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		}
 	}
 	if strings.TrimSpace(options.workspaceRoot) != "" {
-		absoluteRunnerRoot, err := filepath.Abs(options.workspaceRoot)
+		absoluteRunnerRoot, err := resolvedPathForBindingCheck(options.workspaceRoot)
 		if err != nil {
 			return sourceBindingMismatch("runnerWorkspaceRoot", options.workspaceRoot, err.Error())
 		}
@@ -9647,7 +9680,16 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 			}
 		}
 		if binding.DirtyWorkspace != nil || binding.ChangedSetupFiles != nil {
-			dirtyWorkspace, changedSetupFiles := sourceBindingGitState(bindingRoot, absoluteAppDir)
+			// Both sides must be normalised the same way. absoluteAppDir is
+			// symlink-resolved, so passing a raw bindingRoot here made
+			// filterRunnerManagedPaths fail to recognise paths as being inside
+			// the workspace — nothing got filtered and every build looked
+			// dirty.
+			resolvedBindingRoot, resolveErr := resolvedPathForBindingCheck(bindingRoot)
+			if resolveErr != nil {
+				resolvedBindingRoot = bindingRoot
+			}
+			dirtyWorkspace, changedSetupFiles := sourceBindingGitState(resolvedBindingRoot, absoluteAppDir)
 			if binding.ChangedSetupFiles != nil {
 				if err := compareSourceBindingFileList(
 					"changedSetupFiles",
@@ -11039,18 +11081,52 @@ func upsertEnv(env []string, key string, value string) []string {
 }
 
 func flowPathForJob(options runnerOnceOptions, job apiRunnerJob) string {
-	flowPath := job.Payload.FlowPath
-	if flowPath == "" {
-		flowPath = filepath.Join(job.Payload.SourceBinding.PackagePath, ".maestro", "01-app-launches.yaml")
-	}
-	if filepath.IsAbs(flowPath) {
-		return flowPath
-	}
 	root := job.Payload.SourceBinding.WorkspaceRoot
 	if root == "" {
 		root = options.workspaceRoot
 	}
-	return filepath.Join(root, flowPath)
+	resolve := func(p string) string {
+		if filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Join(root, p)
+	}
+	// An explicit flow path wins when it actually exists. prove-app stamps a
+	// default `.maestro/01-app-launches.yaml` at workflow-creation time, which is
+	// wrong for apps using the config.yaml+flows/ layout — so a stamped-but-
+	// missing path falls through to layout discovery below rather than failing.
+	if job.Payload.FlowPath != "" {
+		if p := resolve(job.Payload.FlowPath); fileExists(p) {
+			return p
+		}
+	}
+	maestroDir := filepath.Join(root, job.Payload.SourceBinding.PackagePath, ".maestro")
+	// Preferred conventional entry flow.
+	preferred := filepath.Join(maestroDir, "01-app-launches.yaml")
+	if fileExists(preferred) {
+		return preferred
+	}
+	// Fallback for the other common gmacko layout (.maestro/config.yaml +
+	// flows/*.yaml): point Maestro at the .maestro directory so it discovers the
+	// workspace config and runs its flows. config.yaml's appId: ${APP_ID:-…}
+	// resolves from the -e APP_ID arg the runner now supplies.
+	if fileExists(filepath.Join(maestroDir, "config.yaml")) || fileExists(filepath.Join(maestroDir, "config.yml")) {
+		return maestroDir
+	}
+	// Otherwise run the first flow we can find (flows/ first, then top-level).
+	for _, pattern := range []string{
+		filepath.Join(maestroDir, "flows", "*.yaml"),
+		filepath.Join(maestroDir, "flows", "*.yml"),
+		filepath.Join(maestroDir, "*.yaml"),
+		filepath.Join(maestroDir, "*.yml"),
+	} {
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			sort.Strings(matches)
+			return matches[0]
+		}
+	}
+	// Nothing found — return the preferred path so the failure names the file.
+	return preferred
 }
 
 type maestroRunArtifacts struct {
@@ -11155,11 +11231,22 @@ func maestroDevSessionEnvArgs(job apiRunnerJob) []string {
 		"FG_DEV_CLIENT_DEEP_LINK": strings.TrimSpace(job.Payload.DevSession.DeepLinkURL),
 		"FG_DEV_CLIENT_QR_URL":    strings.TrimSpace(job.Payload.DevSession.QRURL),
 	}
+	// APP_ID lets the gmacko launch-smoke flow (appId: ${APP_ID:-com.gmacko.app})
+	// target the actually-installed package for this platform. Without it Maestro
+	// defaults to the template placeholder and can't find the app under test.
+	appID := strings.TrimSpace(job.Payload.SourceBinding.AndroidPackage)
+	if jobPlatform(job) == "ios" {
+		appID = strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
+	}
+	if appID != "" {
+		values["APP_ID"] = appID
+	}
 	args := make([]string, 0, len(values)*2)
 	for _, key := range []string{
 		"FG_DEV_CLIENT_URL",
 		"FG_DEV_CLIENT_DEEP_LINK",
 		"FG_DEV_CLIENT_QR_URL",
+		"APP_ID",
 	} {
 		value := values[key]
 		if value == "" {
@@ -12089,6 +12176,108 @@ func firstAvailableTarget(targets []apiTarget) *apiTarget {
 		}
 	}
 	return nil
+}
+
+// preferredSimulatorTarget pins a stable iOS simulator so every test reuses the
+// same device instead of launching a different iOS version each run:
+//  1. Reuse an available simulator that is already booted (the common case — a
+//     prior test left it running).
+//  2. Otherwise pick deterministically — an available iPhone on the newest iOS
+//     runtime, tie-broken by udid — so the first run always boots the same sim
+//     and later runs then find it booted and reuse it.
+//
+// Only "available" targets are considered; a simulator locked by another job is
+// reported "busy", so concurrent builds still get distinct simulators.
+// Non-iOS platforms keep the plain first-available behavior.
+func preferredSimulatorTarget(options runnerOnceOptions, platform string, targets []apiTarget) *apiTarget {
+	if platform != "ios" {
+		return firstAvailableTarget(targets)
+	}
+	booted := bootedIOSSimulatorUDIDs(options)
+	for index := range targets {
+		if targets[index].Availability == "available" &&
+			booted[strings.ToLower(targets[index].ProviderIdentity)] {
+			return &targets[index]
+		}
+	}
+	runtimes := iosSimulatorRuntimeByUDID(options)
+	var chosen *apiTarget
+	var chosenRuntime string
+	for index := range targets {
+		t := &targets[index]
+		if t.Availability != "available" ||
+			!strings.Contains(strings.ToLower(t.DisplayName), "iphone") {
+			continue
+		}
+		rt := runtimes[strings.ToLower(t.ProviderIdentity)]
+		if chosen == nil || rt > chosenRuntime ||
+			(rt == chosenRuntime && t.ProviderIdentity < chosen.ProviderIdentity) {
+			chosen = t
+			chosenRuntime = rt
+		}
+	}
+	if chosen != nil {
+		return chosen
+	}
+	return firstAvailableTarget(targets)
+}
+
+// bootedIOSSimulatorUDIDs returns the set of currently-booted simulator UDIDs
+// (lowercased) so target selection can reuse a running simulator.
+func bootedIOSSimulatorUDIDs(options runnerOnceOptions) map[string]bool {
+	booted := map[string]bool{}
+	output, err := exec.Command(
+		options.xcrunPath, "simctl", "list", "devices", "booted", "--json",
+	).Output()
+	if err != nil {
+		return booted
+	}
+	var parsed struct {
+		Devices map[string][]struct {
+			UDID  string `json:"udid"`
+			State string `json:"state"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return booted
+	}
+	for _, devices := range parsed.Devices {
+		for _, device := range devices {
+			if device.State == "Booted" && device.UDID != "" {
+				booted[strings.ToLower(device.UDID)] = true
+			}
+		}
+	}
+	return booted
+}
+
+// iosSimulatorRuntimeByUDID maps each available simulator udid (lowercased) to
+// its runtime identifier (e.g. ...SimRuntime.iOS-26-0) so selection can prefer
+// the newest iOS deterministically.
+func iosSimulatorRuntimeByUDID(options runnerOnceOptions) map[string]string {
+	runtimes := map[string]string{}
+	output, err := exec.Command(
+		options.xcrunPath, "simctl", "list", "devices", "available", "--json",
+	).Output()
+	if err != nil {
+		return runtimes
+	}
+	var parsed struct {
+		Devices map[string][]struct {
+			UDID string `json:"udid"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(output, &parsed); err != nil {
+		return runtimes
+	}
+	for runtimeIdentifier, devices := range parsed.Devices {
+		for _, device := range devices {
+			if device.UDID != "" {
+				runtimes[strings.ToLower(device.UDID)] = runtimeIdentifier
+			}
+		}
+	}
+	return runtimes
 }
 
 func runnerLeaseOwner(options runnerOnceOptions) string {
