@@ -5159,20 +5159,7 @@ func handleRunnerClaim(
 }
 
 func defaultRunnerCapabilities(hostMode string) map[string]any {
-	localTools := []string{
-		"adb",
-		"avdmanager",
-		"eas",
-		"emulator",
-		"expo",
-		"fastlane",
-		"gcloud",
-		"java",
-		"maestro",
-		"sdkmanager",
-		"simctl",
-		"xcrun",
-	}
+	localTools := detectedLocalTools()
 	adapters := []string{
 		"android.emulator",
 		"android.emulator.discovery",
@@ -5219,8 +5206,15 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 		machineID = "unknown-machine"
 	}
 
+	// Advertise only what this host can actually do. Claiming a platform the
+	// machine cannot build means taking the job and failing it, which is worse
+	// than never claiming it — labnuc (Linux) advertised ios and the full macOS
+	// toolchain until 2026-08-13.
+	platforms := detectedPlatforms()
+	adapters = filterAdaptersForPlatforms(adapters, platforms)
+
 	return map[string]any{
-		"platforms":             []string{"ios", "android"},
+		"platforms":             platforms,
 		"localTools":            localTools,
 		"adapters":              adapters,
 		"machineId":             machineID,
