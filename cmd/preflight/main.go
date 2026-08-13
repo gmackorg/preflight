@@ -150,7 +150,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  fleet         Fleet cockpit: `fleet next` = per-app next action + owner")
 	fmt.Fprintln(w, "  build         Queue a build/test work order on the build farm")
 	fmt.Fprintln(w, "  queue         Build-farm queue: what is queued/running/blocked, and why")
-	fmt.Fprintln(w, "  nodes         Build-farm runners: heartbeat freshness + active jobs")
+	fmt.Fprintln(w, "  nodes         Build-farm machines: engines, free disk, agents, live jobs")
 	fmt.Fprintln(w, "  integrations  Probe the Preflight API and its upstreams")
 	fmt.Fprintln(w, "  disk          Free space here + across the farm; --reclaim prunes caches")
 	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
