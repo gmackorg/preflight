@@ -466,25 +466,38 @@ func nodeHeadcount(ctx buildOpsContext, client *http.Client) (online int, total 
 
 func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: preflight nodes [--watch] [--json]")
+		fmt.Fprintln(stdout, "Usage: preflight nodes [--watch] [--json] [--retire <node>]")
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "Show build-farm nodes: engines, free disk, agents, and live job counts.")
-		fmt.Fprintln(stdout, "  --watch  refresh every 5s until interrupted")
-		fmt.Fprintln(stdout, "  --json   machine-readable output")
+		fmt.Fprintln(stdout, "  --watch          refresh every 5s until interrupted")
+		fmt.Fprintln(stdout, "  --json           machine-readable output")
+		fmt.Fprintln(stdout, "  --retire <node>  revoke a node's agents and take it out of the fleet")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Retiring is for a host that is gone for good (decommissioned, reimaged).")
+		fmt.Fprintln(stdout, "A host that is merely offline stays listed as stale on purpose — hiding it")
+		fmt.Fprintln(stdout, "is how an outage goes unnoticed. The agents re-register if it comes back.")
 		return 0
 	}
 	ctx := newBuildOpsContext()
 	watch, jsonOut := false, false
-	for _, arg := range args {
-		switch arg {
+	retire := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "--watch":
 			watch = true
 		case "--json":
 			jsonOut = true
+		case "--retire":
+			if value, ok := nextFlagValue(args, &i); ok {
+				retire = value
+			}
 		}
 	}
 	if !ctx.requireWorkspace(stderr) {
 		return 2
+	}
+	if retire != "" {
+		return retireNode(ctx, client, retire, stdout, stderr)
 	}
 	for {
 		code := printNodesOnce(ctx, client, jsonOut, stdout, stderr)
@@ -641,4 +654,55 @@ func contains(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// retireNode revokes every agent on a machine, which takes the node out of the
+// fleet: reconcile ignores revoked agents, so the node stops counting as
+// capacity and is marked retired.
+//
+// Deliberately explicit rather than automatic on "offline". A machine that is
+// merely unreachable should stay visible as stale — that is how an outage gets
+// noticed — and its agents come back on their own. Retiring is for a host that
+// is not coming back.
+func retireNode(ctx buildOpsContext, client *http.Client, name string, stdout, stderr io.Writer) int {
+	nodes, _, err := fetchNodes(ctx, client)
+	if err != nil {
+		fmt.Fprintf(stderr, "list nodes failed: %v\n", err)
+		return 1
+	}
+	var target *farmNode
+	for i := range nodes {
+		if nodes[i].Name == name || nodes[i].MachineID == name || nodes[i].ID == name {
+			target = &nodes[i]
+			break
+		}
+	}
+	if target == nil {
+		fmt.Fprintf(stderr, "no node named %q in this workspace\n", name)
+		return 1
+	}
+	if target.LiveAgentCount > 0 {
+		// Refusing here is the point: retiring a live host silently removes
+		// working capacity, and the agents would re-register anyway.
+		fmt.Fprintf(stderr, "%s still has %d live agent(s) — it is not offline. Stop its agents first, or revoke them individually.\n",
+			target.Name, target.LiveAgentCount)
+		return 1
+	}
+
+	raw, err := postPreflightJSON(client,
+		ctx.endpoint("/nodes/"+url.PathEscape(target.ID)+"/retire", nil),
+		ctx.token,
+		map[string]any{"workspaceId": ctx.workspaceID})
+	if err != nil {
+		fmt.Fprintf(stderr, "retire %s failed: %v\n", target.Name, err)
+		return 1
+	}
+	var response struct {
+		Revoked int `json:"revokedAgents"`
+	}
+	_ = json.Unmarshal(raw, &response)
+	fmt.Fprintf(stdout, "Retired %s — revoked %d agent(s). It will drop out of the fleet on the next reconcile.\n",
+		target.Name, response.Revoked)
+	fmt.Fprintln(stdout, "If the machine comes back, its agents re-register and the node returns.")
+	return 0
 }

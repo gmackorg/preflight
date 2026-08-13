@@ -5830,6 +5830,13 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	// Macs' concurrent iOS builds would.
 	if isAndroidEmulatorJob(job) {
 		options.metroPort = 8081
+		// Serial Android builds all pin 8081, so a prior app's Metro can squat on
+		// it and make expo decline ("Port 8081 is being used ... Skipping dev
+		// server"). Reap whatever holds 8081 unless it's our own ready dev server
+		// for THIS app (the dev_session -> simulator.open reuse case).
+		if !preflightOwnedMetroReady(client, appDir, runnerLocalDevServerURL(options)+"/status") {
+			reapMetroPort(options.metroPort, stdout)
+		}
 	}
 	// Resolve the metro port up front: reuse our own dev server on the configured
 	// port; keep the configured port if it's free; otherwise pick the next free
@@ -9329,6 +9336,30 @@ func shutdownOtherBootedIOSSimulators(
 				fmt.Fprintf(logWriter, "shut down extra booted simulator %s\n", device.UDID)
 			}
 		}
+	}
+}
+
+// reapMetroPort kills whatever process is listening on the given TCP port, so a
+// leftover Metro from a prior serial build doesn't make expo skip the dev
+// server. Best-effort — tries fuser then lsof so it works on the Linux build
+// nodes (NixOS ships fuser, not lsof) and macOS.
+func reapMetroPort(port int, stdout io.Writer) {
+	reaped := false
+	if err := exec.Command("fuser", "-k", fmt.Sprintf("%d/tcp", port)).Run(); err == nil {
+		reaped = true
+	} else if out, lerr := exec.Command("lsof", "-ti", fmt.Sprintf("tcp:%d", port)).Output(); lerr == nil {
+		for _, pidStr := range strings.Fields(string(out)) {
+			if pid, convErr := strconv.Atoi(strings.TrimSpace(pidStr)); convErr == nil && pid > 1 {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+				reaped = true
+			}
+		}
+	}
+	if reaped {
+		if stdout != nil {
+			fmt.Fprintf(stdout, "reaped leftover process on metro port %d\n", port)
+		}
+		time.Sleep(500 * time.Millisecond) // let the port free up
 	}
 }
 
