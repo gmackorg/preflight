@@ -100,6 +100,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runNodes(args[1:], stdout, stderr, client)
 	case "integrations":
 		return runIntegrations(args[1:], stdout, stderr, client)
+	case "disk":
+		return runDisk(args[1:], stdout, stderr, client)
 	case "cleanup":
 		return runCleanup(args[1:], stdout, stderr)
 	case "fleet":
@@ -150,6 +152,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  queue         Build-farm queue: what is queued/running/blocked, and why")
 	fmt.Fprintln(w, "  nodes         Build-farm runners: heartbeat freshness + active jobs")
 	fmt.Fprintln(w, "  integrations  Probe the Preflight API and its upstreams")
+	fmt.Fprintln(w, "  disk          Free space here + across the farm; --reclaim prunes caches")
 	fmt.Fprintln(w, "  status        Alias: apps status <app> / apps list")
 	fmt.Fprintln(w, "  testflight    Manage TestFlight tester enrollment")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
