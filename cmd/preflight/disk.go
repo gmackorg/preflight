@@ -22,7 +22,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -152,6 +154,22 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 			}
 			reclaimed += n
 		}
+
+		// DerivedData alone is not where the space goes. On labtop the managed
+		// sweep found ZERO reclaimable entries while the disk sat at 9GB — the
+		// actual consumers were a 19GB pnpm store and 10GB of CocoaPods. The
+		// launchd sweep on both Macs has therefore been running for days and
+		// reclaiming almost nothing, which is why they keep falling under the
+		// floor and declining iOS work.
+		//
+		// The store is content-addressable and fully regenerable, so pruning it
+		// is safe; pnpm refetches on the next install. Only run it under
+		// pressure, since a warm store is worth a lot to build times.
+		if free, err := freeBytesForPath("/"); err == nil && free/bytesPerGiB < pnpmStorePruneFloorGb() {
+			if pruned := prunePnpmStore(dryRun, stdout, stderr); pruned {
+				reclaimed++
+			}
+		}
 	}
 
 	// Fleet view. Best-effort: no workspace/auth must not break the local report.
@@ -220,4 +238,45 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		}
 	}
 	return exit
+}
+
+// Below this many GB free, `--reclaim` also prunes the pnpm store. Kept under
+// the runner's 15GB claim floor so a host prunes before it starts declining
+// work, not after.
+const defaultPnpmStorePruneFloorGb = 25
+
+// Overridable so a host with different headroom can tune it, and so the path is
+// exercisable without having to fill a disk to test it.
+func pnpmStorePruneFloorGb() uint64 {
+	if raw := strings.TrimSpace(os.Getenv("PREFLIGHT_STORE_PRUNE_FLOOR_GB")); raw != "" {
+		if parsed, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return defaultPnpmStorePruneFloorGb
+}
+
+// prunePnpmStore drops unreferenced packages from the shared pnpm store.
+// Reported 12.8GB reclaimed on labtop, versus 0 from the DerivedData sweep.
+func prunePnpmStore(dryRun bool, stdout io.Writer, stderr io.Writer) bool {
+	if _, err := exec.LookPath("pnpm"); err != nil {
+		return false
+	}
+	if dryRun {
+		fmt.Fprintln(stdout, "would prune the pnpm store (unreferenced packages)")
+		return false
+	}
+	fmt.Fprintln(stdout, "pruning the pnpm store…")
+	cmd := exec.Command("pnpm", "store", "prune")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(stderr, "pnpm store prune: %v\n", err)
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			fmt.Fprintf(stdout, "  %s\n", line)
+		}
+	}
+	return true
 }
