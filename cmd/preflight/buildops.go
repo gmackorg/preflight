@@ -189,6 +189,24 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		return 2
 	}
 
+	// A binding taken from a developer working tree can only be satisfied by a
+	// runner sharing that exact tree. Any other runner claims the job, compares
+	// the binding against its own checkout, rejects it with
+	// source_binding_mismatch, and releases — then the next runner does the
+	// same. Observed on 2026-08-14: seven claim/release cycles in seven minutes
+	// for one order, churning the farm and never building anything.
+	//
+	// A dirty tree guarantees that outcome, since the runner cannot reproduce
+	// uncommitted work. Refuse up front rather than queue an order that can only
+	// thrash. CI-owned checkouts under .preflight-ci/ are exempt: the runner
+	// syncs those to the requested commit itself.
+	if binding.DirtyWorkspace && !strings.Contains(binding.WorkspaceRoot, ".preflight-ci") {
+		fmt.Fprintf(stderr, "refusing to queue: %s has uncommitted changes\n", binding.WorkspaceRoot)
+		fmt.Fprintf(stderr, "the runner validates the binding against its own checkout and will reject it\n")
+		fmt.Fprintf(stderr, "commit and push, then re-run — or build from a .preflight-ci checkout\n")
+		return 2
+	}
+
 	payload := map[string]any{
 		"workspaceId":   ctx.workspaceID,
 		"appId":         appID,
