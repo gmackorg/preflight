@@ -250,6 +250,24 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		return 2
 	}
 
+	// A work order whose workspaceRoot no active runner can reach is accepted,
+	// queued, and then sits forever: nothing rejects it and nothing reports it.
+	// Observed on 2026-08-14 — a probe job rooted at /Users/mackieg/playtrek-build
+	// sat queued for 47 minutes because every runner serves only /Volumes/dev,
+	// while the board showed it as ordinary pending work.
+	//
+	// prove-app already refuses this; `build` did not. Same probe, same message.
+	if err := verifyPreflightRunnerCapacity(client, proveAppOptions{
+		apiURL:      ctx.apiURL,
+		token:       ctx.token,
+		workspaceID: ctx.workspaceID,
+		platform:    platform,
+		lane:        "simulator",
+	}, binding); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+
 	payload := map[string]any{
 		"workspaceId":   ctx.workspaceID,
 		"appId":         appID,
