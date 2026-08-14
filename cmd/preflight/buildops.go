@@ -124,6 +124,7 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	kind, priorityClass, idempotencyKey := "build", "normal", ""
 	wait, jsonOut := false, false
 	preference := ""
+	appDir := "."
 
 	for i := 0; i < len(args); i++ {
 		next := func(dst *string) {
@@ -146,6 +147,8 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 			next(&preference)
 		case "--idempotency-key":
 			next(&idempotencyKey)
+		case "--app-dir":
+			next(&appDir)
 		case "--wait":
 			wait = true
 		case "--json":
@@ -170,6 +173,22 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		return 2
 	}
 
+	// The API rejects a work order without sourceBinding.workspaceRoot, and the
+	// runner routes jobs by matching that root against the checkouts it owns —
+	// so an approximate binding would queue an order no runner can claim.
+	// Derived with the same discoverSourceBinding() prove-app uses, rather than
+	// a second implementation that could drift from it.
+	binding, bindingErr := discoverSourceBinding(proveAppOptions{
+		appDir:   appDir,
+		platform: platform,
+		lane:     "simulator",
+	})
+	if bindingErr != nil {
+		fmt.Fprintf(stderr, "cannot describe the app source: %v\n", bindingErr)
+		fmt.Fprintf(stderr, "run this from the app package, or pass --app-dir <path-to-expo-app>\n")
+		return 2
+	}
+
 	payload := map[string]any{
 		"workspaceId":   ctx.workspaceID,
 		"appId":         appID,
@@ -178,6 +197,7 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		"kind":          kind,
 		"priorityClass": priorityClass,
 		"requestedBy":   "cli",
+		"sourceBinding": binding,
 	}
 	if preference != "" {
 		payload["buildProviderPreference"] = preference
@@ -272,6 +292,8 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --priority-class <c>   background|normal|… default normal")
 	fmt.Fprintln(w, "  --provider <p>         build provider preference (local/cloud)")
 	fmt.Fprintln(w, "  --idempotency-key <k>  reuse an existing order instead of duplicating")
+	fmt.Fprintln(w, "  --app-dir <dir>        the Expo app package (default \".\"); its workspace")
+	fmt.Fprintln(w, "                         root is what the runner matches jobs against")
 	fmt.Fprintln(w, "  --wait                 poll until the order reaches a terminal state")
 	fmt.Fprintln(w, "  --json                 machine-readable output")
 }
