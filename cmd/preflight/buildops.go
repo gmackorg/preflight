@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -125,6 +126,7 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	wait, jsonOut := false, false
 	preference := ""
 	appDir := "."
+	ciBuild := false
 
 	for i := 0; i < len(args); i++ {
 		next := func(dst *string) {
@@ -149,6 +151,8 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 			next(&idempotencyKey)
 		case "--app-dir":
 			next(&appDir)
+		case "--ci":
+			ciBuild = true
 		case "--wait":
 			wait = true
 		case "--json":
@@ -200,7 +204,34 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	// uncommitted work. Refuse up front rather than queue an order that can only
 	// thrash. CI-owned checkouts under .preflight-ci/ are exempt: the runner
 	// syncs those to the requested commit itself.
-	if binding.DirtyWorkspace && !strings.Contains(binding.WorkspaceRoot, ".preflight-ci") {
+	// --ci retargets the binding at a Preflight-owned checkout. The runner
+	// clones the remote there and hard-resets to the requested commit, so the
+	// build no longer depends on the caller's working tree existing (or being
+	// clean) on the machine that claims the job. This is the only way a farm
+	// build works from a developer machine: a developer-tree binding can only
+	// ever be satisfied by that same machine.
+	//
+	// The commit must be pushed — the runner fetches it from the remote.
+	if ciBuild {
+		if strings.TrimSpace(binding.GitRemoteURL) == "" {
+			fmt.Fprintln(stderr, "--ci needs a git remote; this checkout has none")
+			return 2
+		}
+		if strings.TrimSpace(binding.GitCommitSHA) == "" {
+			fmt.Fprintln(stderr, "--ci needs a commit sha to sync to")
+			return 2
+		}
+		repo := filepath.Base(strings.TrimSuffix(binding.WorkspaceRoot, "/"))
+		binding.WorkspaceRoot = filepath.Join(
+			filepath.Dir(binding.WorkspaceRoot), ciCheckoutRootSegment, repo)
+		// The runner hard-resets this checkout, so whatever was uncommitted
+		// locally is irrelevant to what actually gets built.
+		binding.DirtyWorkspace = false
+		binding.ChangedSetupFiles = nil
+		fmt.Fprintf(stdout, "ci build: %s @ %s\n", binding.WorkspaceRoot, binding.GitCommitSHA[:min(12, len(binding.GitCommitSHA))])
+	}
+
+	if binding.DirtyWorkspace && !strings.Contains(binding.WorkspaceRoot, ciCheckoutRootSegment) {
 		fmt.Fprintf(stderr, "refusing to queue: %s has uncommitted changes\n", binding.WorkspaceRoot)
 		fmt.Fprintf(stderr, "the runner validates the binding against its own checkout and will reject it\n")
 		fmt.Fprintf(stderr, "commit and push, then re-run — or build from a .preflight-ci checkout\n")
@@ -312,6 +343,8 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --idempotency-key <k>  reuse an existing order instead of duplicating")
 	fmt.Fprintln(w, "  --app-dir <dir>        the Expo app package (default \".\"); its workspace")
 	fmt.Fprintln(w, "                         root is what the runner matches jobs against")
+	fmt.Fprintln(w, "  --ci                   build a Preflight-owned checkout of the pushed commit")
+	fmt.Fprintln(w, "                         instead of your working tree (required for farm builds)")
 	fmt.Fprintln(w, "  --wait                 poll until the order reaches a terminal state")
 	fmt.Fprintln(w, "  --json                 machine-readable output")
 }
