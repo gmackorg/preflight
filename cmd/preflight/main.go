@@ -6663,7 +6663,7 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		runnerJobCancellationCheck(client, options, registration, job),
 	)
 	if err != nil {
-		_ = uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts)
+		_ = uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout)
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status":  "cancelled",
@@ -6687,7 +6687,7 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		fmt.Fprintf(stdout, "failed Maestro smoke %s %s\n", job.ID, err.Error())
 		return nil
 	}
-	if err := uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts); err != nil {
+	if err := uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout); err != nil {
 		// The smoke already passed (runMaestroSmoke returned no error). Artifact
 		// uploads are diagnostic (logs/junit/screenshots) and post only small
 		// metadata records; a transient control-plane deadline here must NOT fail
@@ -8253,6 +8253,7 @@ func uploadMaestroRunArtifacts(
 	providerIdentity string,
 	flowPath string,
 	artifacts maestroRunArtifacts,
+	stdout io.Writer,
 ) error {
 	if !runnerArtifactUploadEnabled(registration) {
 		return nil
@@ -8270,8 +8271,20 @@ func uploadMaestroRunArtifacts(
 		if strings.TrimSpace(artifact.URI) == "" {
 			continue
 		}
-		if err := uploadRunnerArtifact(client, options, registration, job, artifact.Kind, artifact.URI, "diagnostic", metadata); err != nil {
+		summary, err := uploadRunnerArtifactRecord(client, options, registration, job, artifact.Kind, artifact.URI, "diagnostic", metadata)
+		if err != nil {
 			return err
+		}
+		// The record above only carries a local node path. For media the
+		// reporting UI must actually serve — video (run verification) and
+		// screenshots (timeline) — push the bytes to R2; the blob handler
+		// rewrites the artifact uri to the servable /artifacts/<id>/blob route.
+		// Byte upload is best-effort: a passing smoke must not go red over a
+		// diagnostic-media transfer hiccup.
+		if (artifact.Kind == "video" || artifact.Kind == "screenshot") && summary.ID != "" {
+			if err := uploadRunnerArtifactBytes(client, options, registration, summary.ID, artifact.Kind, artifact.URI); err != nil {
+				fmt.Fprintf(stdout, "maestro %s byte upload failed for %s: %v\n", artifact.Kind, summary.ID, err)
+			}
 		}
 	}
 	return nil
@@ -8352,6 +8365,72 @@ func uploadRunnerArtifactRecord(
 		return runnerArtifactSummary{}, fmt.Errorf("decode runner artifact upload response failed: %w", err)
 	}
 	return uploaded.Artifact, nil
+}
+
+// uploadRunnerArtifactBytes streams a registered artifact's file to the control
+// plane, which stores it in R2 and repoints the artifact uri at the servable
+// blob route. Called after uploadRunnerArtifactRecord mints the artifact id.
+func uploadRunnerArtifactBytes(
+	client *http.Client,
+	options runnerOnceOptions,
+	registration runnerRegistrationData,
+	artifactID string,
+	kind string,
+	uri string,
+) error {
+	path := uri
+	if parsed, err := url.Parse(uri); err == nil && parsed.Scheme == "file" {
+		path = parsed.Path
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open artifact %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat artifact %s: %w", path, err)
+	}
+	endpoint := runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/artifacts/%s/blob", registration.Runner.ID, artifactID))
+	request, err := http.NewRequest(http.MethodPut, endpoint, file)
+	if err != nil {
+		return fmt.Errorf("build artifact byte upload request: %w", err)
+	}
+	request.ContentLength = info.Size()
+	request.Header.Set("Content-Type", artifactContentType(kind, path))
+	if registration.Token != "" {
+		request.Header.Set("Authorization", "Bearer "+registration.Token)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("artifact byte upload request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return fmt.Errorf("artifact byte upload returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func artifactContentType(kind string, path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	}
+	switch kind {
+	case "video":
+		return "video/mp4"
+	case "screenshot":
+		return "image/png"
+	}
+	return "application/octet-stream"
 }
 
 func artifactSizeBytes(uri string) (int64, bool) {
