@@ -9867,7 +9867,9 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		if err != nil {
 			return sourceBindingMismatch("runnerWorkspaceRoot", options.workspaceRoot, err.Error())
 		}
-		if !pathWithin(absoluteRunnerRoot, absoluteAppDir) && !pathWithin(absoluteAppDir, absoluteRunnerRoot) {
+		if !pathWithin(absoluteRunnerRoot, absoluteAppDir) &&
+			!pathWithin(absoluteAppDir, absoluteRunnerRoot) &&
+			!lexicalWorkspaceRootCovers(options.workspaceRoot, appDir) {
 			return sourceBindingMismatch("runnerWorkspaceRoot", "covering "+absoluteAppDir, absoluteRunnerRoot)
 		}
 	}
@@ -10114,6 +10116,26 @@ func pathWithin(root string, path string) bool {
 		return false
 	}
 	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+// lexicalWorkspaceRootCovers checks runner-root containment WITHOUT resolving
+// symlinks. Apps under a runner root are often per-app symlinks onto another
+// volume (e.g. /Volumes/dev/<app> -> /Volumes/T9-APFS/apps/<app>); EvalSymlinks
+// then relocates the resolved appDir out of the root's tree even though it is
+// lexically inside it, which wrongly fails the source-binding coverage check and
+// wedges device.discover. This lexical fallback accepts that case for the
+// coverage test only — the symlink-resolved paths still drive the CI-checkout
+// and git-state comparisons below.
+func lexicalWorkspaceRootCovers(workspaceRoot string, appDir string) bool {
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	app, err := filepath.Abs(appDir)
+	if err != nil {
+		return false
+	}
+	return pathWithin(root, app) || pathWithin(app, root)
 }
 
 func expoConfigDigest(appDir string) string {
