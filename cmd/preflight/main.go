@@ -10638,6 +10638,17 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 		} else {
 			fmt.Fprintf(logFile, "warning: could not install headless osascript shim: %v\n", shimErr)
 		}
+		// Simulator builds never need code signing, but a runner Mac may have no
+		// signing certs — `expo run:ios` then dies with "No code signing
+		// certificates are available to use." Shim xcodebuild (simulator lane only)
+		// to force signing off; device-lane iOS builds are untouched and still sign.
+		if shouldBootIOSSimulator(job) {
+			if shimDir, shimErr := ensureSimulatorXcodebuildShim(); shimErr == nil {
+				command.Env = prependPathEnv(command.Env, shimDir)
+			} else {
+				fmt.Fprintf(logFile, "warning: could not install simulator xcodebuild shim: %v\n", shimErr)
+			}
+		}
 	}
 	flushExpoRunLog := attachRedactedCommandLog(command, logFile)
 	if err := runExpoPrebuild(logFile, appDir, platform, job, cancellationCheck); err != nil {
@@ -10711,6 +10722,35 @@ func ensureHeadlessOsascriptShim() (string, error) {
 		"  *) : ;;\n" +
 		"esac\n" +
 		"exit 0\n"
+	if existing, err := os.ReadFile(shimPath); err != nil || string(existing) != script {
+		if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Chmod(shimPath, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// ensureSimulatorXcodebuildShim writes an `xcodebuild` wrapper (returned dir is
+// meant to be prepended to PATH for simulator-lane iOS builds only) that appends
+// CODE_SIGNING_ALLOWED=NO to real build invocations. A simulator build never
+// needs a signing identity, so this lets a runner Mac with no certs build+install
+// the .app onto the sim; informational xcodebuild calls (-version/-list) pass
+// through untouched, and it execs the absolute /usr/bin/xcodebuild (no recursion).
+func ensureSimulatorXcodebuildShim() (string, error) {
+	dir := filepath.Join(os.TempDir(), "preflight-sim-xcodebuild-bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	shimPath := filepath.Join(dir, "xcodebuild")
+	script := "#!/bin/sh\n" +
+		"# Preflight simulator shim: simulator builds never need code signing.\n" +
+		"case \" $* \" in\n" +
+		"  *\" -version \"*|*\" -list \"*|*\" -showsdks \"*|*\" -showBuildSettings \"*) exec /usr/bin/xcodebuild \"$@\" ;;\n" +
+		"esac\n" +
+		"exec /usr/bin/xcodebuild \"$@\" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= CODE_SIGN_ENTITLEMENTS=\n"
 	if existing, err := os.ReadFile(shimPath); err != nil || string(existing) != script {
 		if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
 			return "", err
