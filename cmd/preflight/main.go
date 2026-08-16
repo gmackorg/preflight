@@ -3081,7 +3081,12 @@ func mintIOSSigningCert(client *http.Client, stdout io.Writer, issuerID, keyID, 
 	}
 
 	fmt.Fprintf(stdout, "assembling %s\n", outP12)
-	p12 := exec.Command("openssl", "pkcs12", "-export",
+	// `-legacy` forces the SHA1/3DES PKCS#12 encoding that macOS `security
+	// import` accepts. OpenSSL 3.x defaults to AES-256/PBKDF2, which openssl can
+	// read but Apple's Security framework rejects with "MAC verification failed
+	// (wrong password?)" — even with the correct password — so a modern .p12 is
+	// silently unusable on every build Mac.
+	p12 := exec.Command("openssl", "pkcs12", "-export", "-legacy",
 		"-inkey", keyFile, "-in", certFile,
 		"-out", outP12, "-passout", "pass:"+p12Password, "-name", commonName)
 	if out, err := p12.CombinedOutput(); err != nil {
@@ -5814,9 +5819,10 @@ func registerRunner(client *http.Client, options runnerOnceOptions, capabilities
 }
 
 type fleetSigningCert struct {
-	P12Base64 string `json:"p12Base64"`
-	Password  string `json:"password"`
-	Version   string `json:"version"`
+	P12Base64     string `json:"p12Base64"`
+	Password      string `json:"password"`
+	Version       string `json:"version"`
+	WWDRPemBase64 string `json:"wwdrPemBase64"`
 }
 
 // installFleetSigningIdentity fetches the shared iOS signing identity that
@@ -5913,6 +5919,33 @@ func importFleetSigningP12(cert fleetSigningCert, keychain string, stdout io.Wri
 			return fmt.Errorf("import p12: %v: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
+
+	// Import the Apple WWDR intermediate so the leaf chains to a trusted root;
+	// without it `security find-identity -v` (and codesign) treat the identity
+	// as invalid. The chained cert can't ride inside the .p12 (Cloudflare caps
+	// secrets at 5 KB), so it arrives as a separate base64 PEM.
+	if pem := strings.TrimSpace(cert.WWDRPemBase64); pem != "" {
+		if der, err := base64.StdEncoding.DecodeString(pem); err == nil {
+			wwdrTmp, err := os.CreateTemp("", "preflight-wwdr-*.pem")
+			if err == nil {
+				wwdrPath := wwdrTmp.Name()
+				defer os.Remove(wwdrPath)
+				if _, err := wwdrTmp.Write(der); err == nil {
+					wwdrTmp.Close()
+					if out, err := exec.Command(
+						"security", "import", wwdrPath, "-k", keychain,
+					).CombinedOutput(); err != nil {
+						if !strings.Contains(string(out), "already exists") {
+							fmt.Fprintf(stdout, "wwdr intermediate import warning: %s\n", strings.TrimSpace(string(out)))
+						}
+					}
+				} else {
+					wwdrTmp.Close()
+				}
+			}
+		}
+	}
+
 	_ = exec.Command(
 		"security", "set-key-partition-list",
 		"-S", "apple-tool:,apple:,codesign:", "-s", "-k", kcpw, keychain,
