@@ -11079,6 +11079,15 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 		if err := buildAndInstallIOSSimulatorApp(logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
 			return logPath, fmt.Errorf("build/install iOS simulator app: %w", err)
 		}
+	} else if platform == "ios" {
+		// Physical-device lane: `expo run:ios --device` signs via an interactive
+		// Xcode account the headless runner Macs lack. Build + sign directly with
+		// xcodebuild using the fleet identity Preflight distributed + the ASC key
+		// for automatic provisioning, then install with devicectl.
+		flushExpoRunLog()
+		if err := buildSignInstallIOSDeviceApp(logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
+			return logPath, fmt.Errorf("build/sign/install iOS device app: %w", err)
+		}
 	} else {
 		if err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
 			flushExpoRunLog()
@@ -11192,6 +11201,149 @@ func findBuiltSimulatorApp(derivedDataPath string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no .app under %s after xcodebuild", productsDir)
+}
+
+// buildSignInstallIOSDeviceApp builds the prebuilt iOS app for a physical device
+// and signs it with the fleet signing identity Preflight distributed to this
+// Mac's keychain, using automatic provisioning driven by the App Store Connect
+// API key: `-allowProvisioningUpdates` registers the device and mints/updates
+// the provisioning profile via ASC with no interactive Xcode account. It then
+// installs the .app onto the device with devicectl. This replaces
+// `expo run:ios --device`, which relies on an interactive Xcode signing account
+// the headless runner Macs don't have ("No code signing certificates ...").
+func buildSignInstallIOSDeviceApp(
+	logFile *os.File,
+	options runnerOnceOptions,
+	appDir string,
+	deviceUDID string,
+	job apiRunnerJob,
+	cancellationCheck func() (bool, error),
+) error {
+	iosDir := filepath.Join(appDir, "ios")
+	workspace, err := findIOSAppWorkspace(iosDir)
+	if err != nil {
+		return err
+	}
+	scheme := strings.TrimSuffix(filepath.Base(workspace), ".xcworkspace")
+	derivedData := filepath.Join(appDir, ".preflight", "ios-device-deriveddata")
+
+	args := []string{
+		"-workspace", workspace,
+		"-scheme", scheme,
+		"-configuration", "Debug",
+		"-sdk", "iphoneos",
+		"-destination", "id=" + deviceUDID,
+		"-derivedDataPath", derivedData,
+		"-allowProvisioningUpdates",
+	}
+	// The ASC API key lets -allowProvisioningUpdates register the device + manage
+	// the profile without an interactive Xcode account login. Same env the
+	// fastlane/EAS paths read.
+	keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID"))
+	issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID"))
+	keyPath := expandHomePath(strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_PATH")))
+	if keyID != "" && issuerID != "" && keyPath != "" {
+		args = append(args,
+			"-authenticationKeyID", keyID,
+			"-authenticationKeyIssuerID", issuerID,
+			"-authenticationKeyPath", keyPath,
+		)
+	} else {
+		_, _ = fmt.Fprintf(logFile, "warning: ASC API key not fully configured; device provisioning may fail\n")
+	}
+	args = append(args, "build")
+	// Expo-prebuilt projects usually leave DEVELOPMENT_TEAM blank, which fails
+	// device signing outright. Pin it to the fleet identity's team so automatic
+	// signing selects our distributed cert.
+	if team := fleetSigningTeamID(); team != "" {
+		args = append(args, "CODE_SIGN_STYLE=Automatic", "DEVELOPMENT_TEAM="+team)
+		_, _ = fmt.Fprintf(logFile, "xcodebuild: device build scheme %s, team %s, device %s (automatic signing)\n", scheme, team, deviceUDID)
+	} else {
+		_, _ = fmt.Fprintf(logFile, "xcodebuild: device build scheme %s, device %s (team auto-detected)\n", scheme, deviceUDID)
+	}
+
+	build := exec.Command("xcodebuild", args...)
+	build.Dir = iosDir
+	build.Env = expoCommandEnv(job)
+	flushBuild := attachRedactedCommandLog(build, logFile)
+	if err := runCommandWithTimeoutAndCancellation(build, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
+		flushBuild()
+		return fmt.Errorf("xcodebuild device build (scheme %s): %w", scheme, err)
+	}
+	flushBuild()
+
+	appPath, err := findBuiltDeviceApp(derivedData)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(logFile, "devicectl: installing %s onto %s\n", filepath.Base(appPath), deviceUDID)
+	install := exec.Command(options.xcrunPath, "devicectl", "device", "install", "app", "--device", deviceUDID, appPath)
+	install.Env = expoCommandEnv(job)
+	flushInstall := attachRedactedCommandLog(install, logFile)
+	if err := runCommandWithTimeoutAndCancellation(install, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
+		flushInstall()
+		return fmt.Errorf("devicectl install %s: %w", filepath.Base(appPath), err)
+	}
+	flushInstall()
+	return nil
+}
+
+// findBuiltDeviceApp locates the .app xcodebuild wrote for a physical device.
+func findBuiltDeviceApp(derivedDataPath string) (string, error) {
+	productsDir := filepath.Join(derivedDataPath, "Build", "Products", "Debug-iphoneos")
+	entries, err := os.ReadDir(productsDir)
+	if err != nil {
+		return "", fmt.Errorf("read build products %s: %w", productsDir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(entry.Name(), ".app") {
+			return filepath.Join(productsDir, entry.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("no .app under %s after xcodebuild", productsDir)
+}
+
+var signingTeamIDPattern = regexp.MustCompile(`OU\s*=\s*([A-Z0-9]{10})`)
+
+// fleetSigningTeamID returns the Apple Developer team id (the OU of the signing
+// cert) for the identity Preflight distributed, so device builds can set
+// DEVELOPMENT_TEAM explicitly. An env override wins; otherwise it reads the OU
+// from the imported "Apple Development" cert. Returns "" when it can't be
+// determined (xcodebuild then falls back to its own auto-detection).
+func fleetSigningTeamID() string {
+	if env := strings.TrimSpace(os.Getenv("PREFLIGHT_SIGNING_TEAM_ID")); env != "" {
+		return env
+	}
+	out, err := exec.Command("security", "find-certificate", "-a", "-c", "Apple Development", "-p").Output()
+	if err != nil {
+		return ""
+	}
+	for _, block := range strings.SplitAfter(string(out), "-----END CERTIFICATE-----\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		subj := exec.Command("openssl", "x509", "-noout", "-subject")
+		subj.Stdin = strings.NewReader(block + "\n")
+		subjOut, err := subj.Output()
+		if err != nil {
+			continue
+		}
+		if m := signingTeamIDPattern.FindStringSubmatch(string(subjOut)); len(m) == 2 {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// expandHomePath resolves a leading ~/ against the current user's home dir.
+func expandHomePath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 func canContinueAfterExpoIOSOpenFailure(logPath string, options runnerOnceOptions, providerIdentity string, job apiRunnerJob) bool {
