@@ -10659,18 +10659,131 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 			return logPath, err
 		}
 	}
-	if err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
+	if platform == "ios" && shouldBootIOSSimulator(job) {
+		// `expo run:ios` resolves --device through devicectl (physical devices)
+		// and auto-selects a paired physical iPhone even for a simulator target,
+		// demanding a signing identity the runner Macs don't have ("No code
+		// signing certificates are available to use."). Build for the simulator
+		// directly with xcodebuild (signing off — a simulator never needs it) and
+		// install via simctl, bypassing expo's device resolution entirely. The
+		// dev-client launch below (openExpoDevelopmentClient) is unchanged.
 		flushExpoRunLog()
-		if !canContinueAfterExpoIOSOpenFailure(logPath, options, providerIdentity, job) {
-			return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
+		if err := buildAndInstallIOSSimulatorApp(logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
+			return logPath, fmt.Errorf("build/install iOS simulator app: %w", err)
 		}
-		_, _ = fmt.Fprintf(logFile, "warning: expo run:ios reported a development-client open failure after installing the app; continuing with Preflight simctl openurl fallback: %v\n", err)
+	} else {
+		if err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
+			flushExpoRunLog()
+			if !canContinueAfterExpoIOSOpenFailure(logPath, options, providerIdentity, job) {
+				return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
+			}
+			_, _ = fmt.Fprintf(logFile, "warning: expo run:ios reported a development-client open failure after installing the app; continuing with Preflight simctl openurl fallback: %v\n", err)
+		}
+		flushExpoRunLog()
 	}
-	flushExpoRunLog()
 	if err := openExpoDevelopmentClient(logFile, options, platform, providerIdentity, port, job, cancellationCheck); err != nil {
 		return logPath, err
 	}
 	return logPath, nil
+}
+
+// buildAndInstallIOSSimulatorApp builds the prebuilt iOS app for a specific
+// simulator with xcodebuild (code signing forced off — a simulator never needs
+// it) and installs the resulting .app with simctl. This replaces `expo run:ios`
+// for the simulator lane: expo resolves --device through devicectl and
+// auto-selects a paired physical iPhone even for a simulator target, demanding a
+// signing identity the runner Macs lack. Building directly + installing via
+// simctl sidesteps expo's device resolution; the caller launches the dev client
+// afterwards via openExpoDevelopmentClient. Prebuild (which runs `pod install`)
+// has already run, so ios/<App>.xcworkspace exists.
+func buildAndInstallIOSSimulatorApp(
+	logFile *os.File,
+	options runnerOnceOptions,
+	appDir string,
+	simulatorUDID string,
+	job apiRunnerJob,
+	cancellationCheck func() (bool, error),
+) error {
+	iosDir := filepath.Join(appDir, "ios")
+	workspace, err := findIOSAppWorkspace(iosDir)
+	if err != nil {
+		return err
+	}
+	scheme := strings.TrimSuffix(filepath.Base(workspace), ".xcworkspace")
+	derivedData := filepath.Join(appDir, ".preflight", "ios-sim-deriveddata")
+	_, _ = fmt.Fprintf(
+		logFile,
+		"xcodebuild: building scheme %s for simulator %s (code signing off)\n",
+		scheme, simulatorUDID,
+	)
+	build := exec.Command(
+		"xcodebuild",
+		"-workspace", workspace,
+		"-scheme", scheme,
+		"-configuration", "Debug",
+		"-sdk", "iphonesimulator",
+		"-destination", "id="+simulatorUDID,
+		"-derivedDataPath", derivedData,
+		"build",
+		"CODE_SIGNING_ALLOWED=NO",
+		"CODE_SIGNING_REQUIRED=NO",
+		"CODE_SIGN_IDENTITY=",
+		"CODE_SIGN_ENTITLEMENTS=",
+	)
+	build.Dir = iosDir
+	build.Env = expoCommandEnv(job)
+	flushBuild := attachRedactedCommandLog(build, logFile)
+	if err := runCommandWithTimeoutAndCancellation(build, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
+		flushBuild()
+		return fmt.Errorf("xcodebuild simulator build (scheme %s): %w", scheme, err)
+	}
+	flushBuild()
+
+	appPath, err := findBuiltSimulatorApp(derivedData)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(logFile, "simctl: installing %s onto %s\n", filepath.Base(appPath), simulatorUDID)
+	install := exec.Command(options.xcrunPath, "simctl", "install", simulatorUDID, appPath)
+	install.Env = expoCommandEnv(job)
+	flushInstall := attachRedactedCommandLog(install, logFile)
+	if err := runCommandWithTimeoutAndCancellation(install, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
+		flushInstall()
+		return fmt.Errorf("simctl install %s: %w", filepath.Base(appPath), err)
+	}
+	flushInstall()
+	return nil
+}
+
+// findIOSAppWorkspace returns the app's .xcworkspace under ios/ (the CocoaPods
+// workspace `expo prebuild` generates), ignoring project.xcworkspace nested in
+// an .xcodeproj.
+func findIOSAppWorkspace(iosDir string) (string, error) {
+	entries, err := os.ReadDir(iosDir)
+	if err != nil {
+		return "", fmt.Errorf("read ios dir %s: %w", iosDir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(entry.Name(), ".xcworkspace") {
+			return filepath.Join(iosDir, entry.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("no .xcworkspace under %s (expo prebuild + pod install expected)", iosDir)
+}
+
+// findBuiltSimulatorApp locates the .app xcodebuild wrote for the simulator.
+func findBuiltSimulatorApp(derivedDataPath string) (string, error) {
+	productsDir := filepath.Join(derivedDataPath, "Build", "Products", "Debug-iphonesimulator")
+	entries, err := os.ReadDir(productsDir)
+	if err != nil {
+		return "", fmt.Errorf("read build products %s: %w", productsDir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasSuffix(entry.Name(), ".app") {
+			return filepath.Join(productsDir, entry.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("no .app under %s after xcodebuild", productsDir)
 }
 
 func canContinueAfterExpoIOSOpenFailure(logPath string, options runnerOnceOptions, providerIdentity string, job apiRunnerJob) bool {
