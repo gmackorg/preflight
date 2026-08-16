@@ -5241,6 +5241,10 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	}
 	fmt.Fprintf(stdout, "registered runner %s\n", registration.Runner.ID)
 
+	// Pull the fleet's shared signing identity into a dedicated keychain so
+	// device/TestFlight builds sign without per-machine manual provisioning.
+	installFleetSigningIdentity(client, options, registration, stdout)
+
 	if err := heartbeatRunner(client, options, registration, capabilities); err != nil {
 		return err
 	}
@@ -5807,6 +5811,152 @@ func registerRunner(client *http.Client, options runnerOnceOptions, capabilities
 		return runnerRegistrationData{}, fmt.Errorf("runner registration response did not include runner ID and token")
 	}
 	return registration, nil
+}
+
+type fleetSigningCert struct {
+	P12Base64 string `json:"p12Base64"`
+	Password  string `json:"password"`
+	Version   string `json:"version"`
+}
+
+// installFleetSigningIdentity fetches the shared iOS signing identity that
+// Preflight distributes to the whole build farm and imports it into a dedicated
+// keychain so device / TestFlight builds sign non-interactively. It is
+// best-effort and never fatal: the simulator lane never signs, and a runner
+// with no identity is still useful — so any failure (404 "no cert configured",
+// non-macOS, keychain hiccup) just logs and returns.
+func installFleetSigningIdentity(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	endpoint := runnerEndpoint(
+		options.apiURL,
+		fmt.Sprintf("/api/preflight/v1/runners/%s/signing-cert", registration.Runner.ID),
+	)
+	data, err := getPreflightJSON(client, endpoint, registration.Token)
+	if err != nil {
+		// 404 when no fleet cert is configured yet — expected, stay quiet.
+		return
+	}
+	var cert fleetSigningCert
+	if err := json.Unmarshal(data, &cert); err != nil {
+		return
+	}
+	if cert.P12Base64 == "" || cert.Password == "" {
+		return
+	}
+	if cert.Version == "" {
+		cert.Version = "1"
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	keychain := filepath.Join(home, "Library", "Keychains", "preflight-signing.keychain-db")
+	markerPath := filepath.Join(home, "Library", "Keychains", ".preflight-signing.version")
+
+	// Skip the (slow) re-import when the distributed cert version is unchanged
+	// AND a codesigning identity is actually present — a wiped keychain still
+	// forces a re-import even if the marker matches.
+	if existing, err := os.ReadFile(markerPath); err == nil &&
+		strings.TrimSpace(string(existing)) == cert.Version &&
+		fleetSigningIdentityPresent() {
+		return
+	}
+
+	if err := importFleetSigningP12(cert, keychain, stdout); err != nil {
+		fmt.Fprintf(stdout, "fleet signing identity install failed: %v\n", err)
+		return
+	}
+	_ = os.WriteFile(markerPath, []byte(cert.Version), 0o600)
+}
+
+// importFleetSigningP12 writes the .p12 to a temp file and imports it into a
+// dedicated login-independent keychain with the codesign/security tools
+// allow-listed and the partition list set so headless codesign never hits the
+// "allow access?" GUI prompt that would hang a build.
+func importFleetSigningP12(cert fleetSigningCert, keychain string, stdout io.Writer) error {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cert.P12Base64))
+	if err != nil {
+		return fmt.Errorf("decode p12: %w", err)
+	}
+	tmp, err := os.CreateTemp("", "preflight-signing-*.p12")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	// The keychain password is Preflight-managed (the keychain only protects a
+	// cert we already distribute); reuse the .p12 password to avoid a second
+	// secret. create-keychain is not idempotent, so ignore its error and rely on
+	// the unlock below to surface a genuinely broken keychain.
+	kcpw := cert.Password
+	_ = exec.Command("security", "create-keychain", "-p", kcpw, keychain).Run()
+	_ = exec.Command("security", "set-keychain-settings", "-lut", "72000", keychain).Run()
+	if out, err := exec.Command("security", "unlock-keychain", "-p", kcpw, keychain).CombinedOutput(); err != nil {
+		return fmt.Errorf("unlock keychain: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command(
+		"security", "import", tmpPath, "-k", keychain, "-P", cert.Password,
+		"-T", "/usr/bin/codesign", "-T", "/usr/bin/security",
+	).CombinedOutput(); err != nil {
+		if !strings.Contains(string(out), "already exists") {
+			return fmt.Errorf("import p12: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+	_ = exec.Command(
+		"security", "set-key-partition-list",
+		"-S", "apple-tool:,apple:,codesign:", "-s", "-k", kcpw, keychain,
+	).Run()
+
+	// Add our keychain to the user search list without dropping the existing
+	// entries (login.keychain must stay so other credentials still resolve).
+	existing := currentUserKeychains()
+	if !containsString(existing, keychain) {
+		args := append([]string{"list-keychains", "-d", "user", "-s", keychain}, existing...)
+		_ = exec.Command("security", args...).Run()
+	}
+
+	fmt.Fprintf(stdout, "imported fleet signing identity into %s\n", keychain)
+	return nil
+}
+
+func fleetSigningIdentityPresent() bool {
+	out, err := exec.Command("security", "find-identity", "-v", "-p", "codesigning").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	text := string(out)
+	return strings.Contains(text, "Apple Development") ||
+		strings.Contains(text, "Apple Distribution") ||
+		strings.Contains(text, "iPhone Developer") ||
+		strings.Contains(text, "iPhone Distribution")
+}
+
+func currentUserKeychains() []string {
+	out, err := exec.Command("security", "list-keychains", "-d", "user").Output()
+	if err != nil {
+		return nil
+	}
+	var list []string
+	for _, line := range strings.Split(string(out), "\n") {
+		s := strings.TrimSpace(line)
+		s = strings.Trim(s, "\"")
+		s = strings.TrimSpace(s)
+		if s != "" {
+			list = append(list, s)
+		}
+	}
+	return list
 }
 
 func heartbeatRunner(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, capabilities map[string]any) error {
