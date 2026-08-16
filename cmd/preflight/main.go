@@ -118,6 +118,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runTargets(args[1:], stdout, stderr, client)
 	case "credentials":
 		return runCredentials(args[1:], stdout, stderr, client)
+	case "signing-cert":
+		return runSigningCert(args[1:], stdout, stderr, client)
 	case "providers":
 		return runProviders(args[1:], stdout, stderr, client)
 	case "sentry":
@@ -2867,6 +2869,229 @@ func parseAppStoreConnectPrivateKey(privateKeyPEM string) (*ecdsa.PrivateKey, er
 		return nil, fmt.Errorf("App Store Connect private key must use the P-256 curve")
 	}
 	return privateKey, nil
+}
+
+// runSigningCert mints (or lists) the shared iOS signing certificate through the
+// App Store Connect API, so Preflight owns ONE identity to distribute to every
+// build-farm Mac (instead of xcodebuild auto-minting a cert per machine and
+// hitting Apple's per-account cert cap). It generates a keypair + CSR, POSTs it
+// to /v1/certificates, and assembles a .p12 (cert + private key) to store as a
+// Preflight secret. Runs on a Mac with openssl + the ASC .p8 key.
+func runSigningCert(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(stdout, "Usage: preflight signing-cert <list|create> [flags]")
+		fmt.Fprintln(stdout, "  Mint or list the shared iOS signing cert via App Store Connect.")
+		fmt.Fprintln(stdout, "  ASC creds default to $PREFLIGHT_ASC_KEY_PATH / _KEY_ID / _ISSUER_ID.")
+		fmt.Fprintln(stdout, "  list")
+		fmt.Fprintln(stdout, "  create --type development|distribution --out <path.p12> [--p12-password <pw>] [--name <cn>]")
+		return 0
+	}
+	sub := args[0]
+	flags := signingCertFlags(args[1:])
+	keyPath := firstNonEmpty(flags["key-path"], os.Getenv("PREFLIGHT_ASC_KEY_PATH"))
+	keyID := firstNonEmpty(flags["key-id"], os.Getenv("PREFLIGHT_ASC_KEY_ID"))
+	issuerID := firstNonEmpty(flags["issuer-id"], os.Getenv("PREFLIGHT_ASC_ISSUER_ID"))
+	if keyPath == "" || keyID == "" || issuerID == "" {
+		fmt.Fprintln(stderr, "error: ASC credentials required (--key-path/--key-id/--issuer-id or PREFLIGHT_ASC_KEY_PATH/_KEY_ID/_ISSUER_ID)")
+		return 1
+	}
+	if strings.HasPrefix(keyPath, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			keyPath = filepath.Join(home, keyPath[2:])
+		}
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: read ASC key %q: %v\n", keyPath, err)
+		return 1
+	}
+
+	switch sub {
+	case "list":
+		certs, err := ascListCertificates(client, issuerID, keyID, string(keyPEM))
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%-40s %-24s %-14s %s\n", "ID", "NAME", "TYPE", "EXPIRES")
+		for _, c := range certs {
+			fmt.Fprintf(stdout, "%-40s %-24s %-14s %s\n", c.ID, truncateForTable(c.Name, 24), c.Type, c.Expiration)
+		}
+		fmt.Fprintf(stdout, "\n%d certificate(s). Apple caps active certs per account; revoke an old one if create fails at the limit.\n", len(certs))
+		return 0
+	case "create":
+		certType := strings.ToUpper(firstNonEmpty(flags["type"], "development"))
+		if certType != "DEVELOPMENT" && certType != "DISTRIBUTION" {
+			fmt.Fprintln(stderr, "error: --type must be development or distribution")
+			return 1
+		}
+		outPath := firstNonEmpty(flags["out"], "preflight-signing.p12")
+		p12Password := firstNonEmpty(flags["p12-password"], "preflight")
+		commonName := firstNonEmpty(flags["name"], "Preflight Fleet Signing")
+		if err := mintIOSSigningCert(client, stdout, issuerID, keyID, string(keyPEM), certType, commonName, outPath, p12Password); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown subcommand %q (want list|create)\n", sub)
+		return 1
+	}
+}
+
+func signingCertFlags(args []string) map[string]string {
+	out := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "--") {
+			continue
+		}
+		key := strings.TrimPrefix(args[i], "--")
+		if eq := strings.Index(key, "="); eq >= 0 {
+			out[key[:eq]] = key[eq+1:]
+			continue
+		}
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+			out[key] = args[i+1]
+			i++
+		} else {
+			out[key] = "true"
+		}
+	}
+	return out
+}
+
+type ascCertificate struct {
+	ID         string
+	Name       string
+	Type       string
+	Expiration string
+}
+
+func ascListCertificates(client *http.Client, issuerID string, keyID string, keyPEM string) ([]ascCertificate, error) {
+	jwt, err := appStoreConnectJWT(issuerID, keyID, keyPEM, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://api.appstoreconnect.apple.com/v1/certificates?limit=200", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list certificates -> %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var parsed struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				Name            string `json:"name"`
+				CertificateType string `json:"certificateType"`
+				ExpirationDate  string `json:"expirationDate"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parse certificates: %w", err)
+	}
+	certs := make([]ascCertificate, 0, len(parsed.Data))
+	for _, d := range parsed.Data {
+		certs = append(certs, ascCertificate{
+			ID: d.ID, Name: d.Attributes.Name, Type: d.Attributes.CertificateType, Expiration: d.Attributes.ExpirationDate,
+		})
+	}
+	return certs, nil
+}
+
+func mintIOSSigningCert(client *http.Client, stdout io.Writer, issuerID, keyID, keyPEM, certType, commonName, outP12, p12Password string) error {
+	tmp, err := os.MkdirTemp("", "preflight-cert-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	keyFile := filepath.Join(tmp, "key.pem")
+	csrFile := filepath.Join(tmp, "csr.pem")
+
+	fmt.Fprintf(stdout, "generating RSA key + CSR (CN=%s)\n", commonName)
+	gen := exec.Command("openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+		"-keyout", keyFile, "-out", csrFile, "-subj", "/CN="+commonName)
+	if out, err := gen.CombinedOutput(); err != nil {
+		return fmt.Errorf("openssl req: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	csr, err := os.ReadFile(csrFile)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(stdout, "requesting %s certificate from App Store Connect\n", certType)
+	reqBody, _ := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"type": "certificates",
+			"attributes": map[string]any{
+				"certificateType": certType,
+				"csrContent":      string(csr),
+			},
+		},
+	})
+	jwt, err := appStoreConnectJWT(issuerID, keyID, keyPEM, time.Now())
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://api.appstoreconnect.apple.com/v1/certificates", bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("create certificate -> %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var created struct {
+		Data struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				CertificateContent string `json:"certificateContent"`
+				Name               string `json:"name"`
+				ExpirationDate     string `json:"expirationDate"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		return fmt.Errorf("parse created certificate: %w", err)
+	}
+	der, err := base64.StdEncoding.DecodeString(strings.TrimSpace(created.Data.Attributes.CertificateContent))
+	if err != nil {
+		return fmt.Errorf("decode certificate content: %w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	certFile := filepath.Join(tmp, "cert.pem")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(stdout, "assembling %s\n", outP12)
+	p12 := exec.Command("openssl", "pkcs12", "-export",
+		"-inkey", keyFile, "-in", certFile,
+		"-out", outP12, "-passout", "pass:"+p12Password, "-name", commonName)
+	if out, err := p12.CombinedOutput(); err != nil {
+		return fmt.Errorf("openssl pkcs12: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	fmt.Fprintf(stdout, "\nMinted certificate:\n  id:      %s\n  name:    %s\n  expires: %s\n  p12:     %s (password: %s)\n",
+		created.Data.ID, created.Data.Attributes.Name, created.Data.Attributes.ExpirationDate, outP12, p12Password)
+	fmt.Fprintf(stdout, "\nNext: store base64(%s) + the password as Preflight secrets so the runner installs it into each builder's keychain.\n", filepath.Base(outP12))
+	return nil
 }
 
 func runProviderReadiness(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
