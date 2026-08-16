@@ -5819,10 +5819,13 @@ func registerRunner(client *http.Client, options runnerOnceOptions, capabilities
 }
 
 type fleetSigningCert struct {
-	P12Base64     string `json:"p12Base64"`
-	Password      string `json:"password"`
-	Version       string `json:"version"`
-	WWDRPemBase64 string `json:"wwdrPemBase64"`
+	P12Base64      string `json:"p12Base64"`
+	Password       string `json:"password"`
+	Version        string `json:"version"`
+	WWDRPemBase64  string `json:"wwdrPemBase64"`
+	ASCKeyP8Base64 string `json:"ascKeyP8Base64"`
+	ASCKeyID       string `json:"ascKeyId"`
+	ASCIssuerID    string `json:"ascIssuerId"`
 }
 
 // installFleetSigningIdentity fetches the shared iOS signing identity that
@@ -5862,6 +5865,11 @@ func installFleetSigningIdentity(client *http.Client, options runnerOnceOptions,
 	keychain := filepath.Join(home, "Library", "Keychains", "preflight-signing.keychain-db")
 	markerPath := filepath.Join(home, "Library", "Keychains", ".preflight-signing.version")
 
+	// Materialize the distributed ASC API key before the cert-skip check so a Mac
+	// that already has the identity but is missing the .p8 still gets it (the
+	// device-lane build needs it for -allowProvisioningUpdates).
+	ensureFleetASCKey(cert, stdout)
+
 	// Skip the (slow) re-import when the distributed cert version is unchanged
 	// AND a codesigning identity is actually present — a wiped keychain still
 	// forces a re-import even if the marker matches.
@@ -5876,6 +5884,45 @@ func installFleetSigningIdentity(client *http.Client, options runnerOnceOptions,
 		return
 	}
 	_ = os.WriteFile(markerPath, []byte(cert.Version), 0o600)
+}
+
+// ensureFleetASCKey writes the distributed App Store Connect .p8 to the path the
+// runner's ASC env points at (PREFLIGHT_ASC_KEY_PATH), or a conventional default
+// when that isn't set, so device-lane provisioning + fastlane/EAS all find it.
+// Only writes when the file is absent, so it's cheap to call every cycle and
+// never clobbers a hand-placed key.
+func ensureFleetASCKey(cert fleetSigningCert, stdout io.Writer) {
+	if strings.TrimSpace(cert.ASCKeyP8Base64) == "" {
+		return
+	}
+	keyPath := expandHomePath(strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_PATH")))
+	if keyPath == "" {
+		keyID := strings.TrimSpace(cert.ASCKeyID)
+		if keyID == "" {
+			return
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			keyPath = filepath.Join(home, ".appstoreconnect", "private_keys", "AuthKey_"+keyID+".p8")
+		}
+	}
+	if keyPath == "" {
+		return
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		return // already present — don't clobber
+	}
+	der, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cert.ASCKeyP8Base64))
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		return
+	}
+	if err := os.WriteFile(keyPath, der, 0o600); err != nil {
+		fmt.Fprintf(stdout, "fleet ASC key write warning: %v\n", err)
+		return
+	}
+	fmt.Fprintf(stdout, "wrote distributed ASC API key to %s\n", keyPath)
 }
 
 // importFleetSigningP12 writes the .p12 to a temp file and imports it into a
