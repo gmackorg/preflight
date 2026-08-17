@@ -6972,6 +6972,8 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		}
 	}
 	logPath, err := runExpoAppOpen(
+		client,
+		registration,
 		options,
 		platform,
 		appDir,
@@ -11060,10 +11062,10 @@ func shouldBootIOSSimulator(job apiRunnerJob) bool {
 }
 
 func runExpoIOSOpen(appDir string, providerIdentity string, port int) (string, error) {
-	return runExpoAppOpen(runnerOnceOptions{}, "ios", appDir, providerIdentity, port, apiRunnerJob{})
+	return runExpoAppOpen(nil, runnerRegistrationData{}, runnerOnceOptions{}, "ios", appDir, providerIdentity, port, apiRunnerJob{})
 }
 
-func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, providerIdentity string, port int, job apiRunnerJob, cancellationChecks ...func() (bool, error)) (string, error) {
+func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, options runnerOnceOptions, platform string, appDir string, providerIdentity string, port int, job apiRunnerJob, cancellationChecks ...func() (bool, error)) (string, error) {
 	logDir := filepath.Join(appDir, ".preflight")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return "", fmt.Errorf("create Preflight log directory: %w", err)
@@ -11132,7 +11134,7 @@ func runExpoAppOpen(options runnerOnceOptions, platform string, appDir string, p
 		// xcodebuild using the fleet identity Preflight distributed + the ASC key
 		// for automatic provisioning, then install with devicectl.
 		flushExpoRunLog()
-		if err := buildSignInstallIOSDeviceApp(logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
+		if err := buildSignInstallIOSDeviceApp(client, registration, logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
 			return logPath, fmt.Errorf("build/sign/install iOS device app: %w", err)
 		}
 	} else {
@@ -11259,6 +11261,8 @@ func findBuiltSimulatorApp(derivedDataPath string) (string, error) {
 // `expo run:ios --device`, which relies on an interactive Xcode signing account
 // the headless runner Macs don't have ("No code signing certificates ...").
 func buildSignInstallIOSDeviceApp(
+	client *http.Client,
+	registration runnerRegistrationData,
 	logFile *os.File,
 	options runnerOnceOptions,
 	appDir string,
@@ -11332,7 +11336,73 @@ func buildSignInstallIOSDeviceApp(
 		return fmt.Errorf("devicectl install %s: %w", filepath.Base(appPath), err)
 	}
 	flushInstall()
+
+	// Record what's now deployed on this device so the fleet cockpit can show it.
+	reportTargetInstallation(client, registration, options, job, appPath, logFile)
 	return nil
+}
+
+// reportTargetInstallation tells the control plane that a build of an app is now
+// installed on a device, so the fleet board can show "which build on which
+// device". Best-effort: a local device build has no pf_build row, so the install
+// is attributed by app + version (read from the .app's Info.plist) + commit.
+func reportTargetInstallation(
+	client *http.Client,
+	registration runnerRegistrationData,
+	options runnerOnceOptions,
+	job apiRunnerJob,
+	appPath string,
+	logFile *os.File,
+) {
+	if client == nil || registration.Runner.ID == "" {
+		return
+	}
+	targetID := strings.TrimSpace(job.TargetID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(job.Payload.TargetID)
+	}
+	appID := strings.TrimSpace(job.AppID)
+	if targetID == "" || appID == "" {
+		return
+	}
+	plist := filepath.Join(appPath, "Info.plist")
+	bundleID := readPlistRawValue(plist, "CFBundleIdentifier")
+	if bundleID == "" {
+		bundleID = strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
+	}
+	commitSha := strings.TrimSpace(job.Payload.SourceBinding.GitCommitSHA)
+	if commitSha == "" {
+		commitSha = strings.TrimSpace(job.Payload.GitCommitSha)
+	}
+	if _, err := postPreflightJSON(
+		client,
+		runnerEndpoint(options.apiURL, fmt.Sprintf(
+			"/api/preflight/v1/runners/%s/jobs/%s/targets/%s/installations",
+			registration.Runner.ID, job.ID, targetID)),
+		registration.Token,
+		map[string]any{
+			"appId":         appID,
+			"status":        "installed",
+			"bundleId":      bundleID,
+			"version":       readPlistRawValue(plist, "CFBundleShortVersionString"),
+			"commitSha":     commitSha,
+			"profile":       strings.TrimSpace(job.Payload.Lane),
+			"installSource": "device_lane",
+		},
+	); err != nil {
+		_, _ = fmt.Fprintf(logFile, "target installation report warning: %v\n", err)
+		return
+	}
+	_, _ = fmt.Fprintf(logFile, "reported install of %s on target %s\n", appID, targetID)
+}
+
+// readPlistRawValue extracts a single key from an Info.plist as a raw string.
+func readPlistRawValue(plistPath string, key string) string {
+	out, err := exec.Command("plutil", "-extract", key, "raw", "-o", "-", plistPath).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // findBuiltDeviceApp locates the .app xcodebuild wrote for a physical device.
