@@ -11138,12 +11138,13 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 			return logPath, fmt.Errorf("build/sign/install iOS device app: %w", err)
 		}
 	} else {
+		// Android. Both iOS lanes are handled above and never reach `expo run`,
+		// so the iOS development-client false-negative fallback that used to sit
+		// here could not fire: it needs `sourceBinding.iosBundleId`, which an
+		// android job does not carry, and it probed simctl for an app container.
 		if err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
 			flushExpoRunLog()
-			if !canContinueAfterExpoIOSOpenFailure(logPath, options, providerIdentity, job) {
-				return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
-			}
-			_, _ = fmt.Fprintf(logFile, "warning: expo run:ios reported a development-client open failure after installing the app; continuing with Preflight simctl openurl fallback: %v\n", err)
+			return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
 		}
 		flushExpoRunLog()
 	}
@@ -11461,32 +11462,6 @@ func expandHomePath(path string) string {
 		}
 	}
 	return path
-}
-
-func canContinueAfterExpoIOSOpenFailure(logPath string, options runnerOnceOptions, providerIdentity string, job apiRunnerJob) bool {
-	if strings.TrimSpace(options.xcrunPath) == "" {
-		return false
-	}
-	bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
-	if bundleID == "" {
-		return false
-	}
-	logOutput, err := os.ReadFile(logPath)
-	if err != nil || !strings.Contains(string(logOutput), "No development build") {
-		return false
-	}
-	openProviderIdentity := strings.TrimSpace(job.Payload.ProviderIdentity)
-	if openProviderIdentity == "" {
-		openProviderIdentity = strings.TrimSpace(job.TargetID)
-	}
-	if openProviderIdentity == "" {
-		openProviderIdentity = strings.TrimSpace(providerIdentity)
-	}
-	if openProviderIdentity == "" {
-		return false
-	}
-	command := exec.Command(options.xcrunPath, "simctl", "get_app_container", openProviderIdentity, bundleID, "app")
-	return command.Run() == nil
 }
 
 // ensureHeadlessOsascriptShim writes a tiny `osascript` shim into a dedicated

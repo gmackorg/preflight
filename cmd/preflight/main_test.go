@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -5304,6 +5305,14 @@ func TestProveAppWatchUsesPreflightToken(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// `runner once` probes for a fleet signing identity on darwin; no cert is
+		// configured for this fake, which is the 404 it treats as "nothing to
+		// install".
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
 			_, _ = w.Write(authenticatedCapabilitiesFixture(t))
@@ -5345,6 +5354,13 @@ func TestRunnerOnceUsesSavedPreflightLoginForRegistration(t *testing.T) {
 	var registeredWorkspaceID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// `runner once` probes for a fleet signing identity on darwin; no cert is
+		// configured for this fake, which is the 404 it treats as "nothing to install".
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/register":
 			if r.Header.Get("Authorization") != "Bearer runner_register_token_123" {
@@ -5462,6 +5478,14 @@ func TestRunnerOnceCleansExpiredLocalPreflightArtifactDirectories(t *testing.T) 
 	t.Setenv("PREFLIGHT_RECURSIVE_PROCESS_HANDLE_CLEANUP", "1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// `runner once` probes for a fleet signing identity on darwin; no cert is
+		// configured for this fake, which is the 404 it treats as "nothing to
+		// install".
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cleanup","workspaceId":"ws_cleanup","name":"Preflight Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"runnerJobStream":true}},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -5526,6 +5550,12 @@ func TestRunnerOnceCleansExpiredLocalPreflightArtifactDirectories(t *testing.T) 
 
 func TestProveAppIOSSimulatorProofLoopCoordinatesRunnerAndArtifacts(t *testing.T) {
 	workspaceRoot := t.TempDir()
+	// macOS puts TempDir under /var, a symlink to /private/var. The runner
+	// reports the resolved path, so the fixture has to hold the same one or
+	// every workspace-root comparison below fails on a Mac and passes on CI.
+	if resolved, err := filepath.EvalSymlinks(workspaceRoot); err == nil {
+		workspaceRoot = resolved
+	}
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
 	for name, content := range map[string]string{
 		"package.json":             `{"name":"forgegraph-root","private":true,"workspaces":["apps/*"]}`,
@@ -5642,6 +5672,14 @@ exit 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recordCall(r)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin; no cert is
+		// configured for this fake, which is the 404 it treats as "nothing to
+		// install".
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
@@ -5896,6 +5934,12 @@ exit 0
 
 func TestProveAppIOSDevelopmentProofLoopCoordinatesEASBuildQRAndOpenAttempt(t *testing.T) {
 	workspaceRoot := t.TempDir()
+	// macOS puts TempDir under /var, a symlink to /private/var. The runner
+	// reports the resolved path, so the fixture has to hold the same one or
+	// every workspace-root comparison below fails on a Mac and passes on CI.
+	if resolved, err := filepath.EvalSymlinks(workspaceRoot); err == nil {
+		workspaceRoot = resolved
+	}
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
 	for name, content := range map[string]string{
 		"package.json":             `{"name":"forgegraph-root","private":true,"workspaces":["apps/*"]}`,
@@ -6039,6 +6083,14 @@ exit 1
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recordCall(r)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin; no cert is
+		// configured for this fake, which is the 404 it treats as "nothing to
+		// install".
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
@@ -6328,6 +6380,12 @@ exit 1
 
 func TestProveAppAndroidDevelopmentProofLoopCoordinatesEASBuildADBInstallAndOpenAttempt(t *testing.T) {
 	workspaceRoot := t.TempDir()
+	// macOS puts TempDir under /var, a symlink to /private/var. The runner
+	// reports the resolved path, so the fixture has to hold the same one or
+	// every workspace-root comparison below fails on a Mac and passes on CI.
+	if resolved, err := filepath.EvalSymlinks(workspaceRoot); err == nil {
+		workspaceRoot = resolved
+	}
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
 	for name, content := range map[string]string{
 		"package.json":             `{"name":"forgegraph-root","private":true,"workspaces":["apps/*"]}`,
@@ -6512,6 +6570,14 @@ exit 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recordCall(r)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin; no cert is
+		// configured for this fake, which is the 404 it treats as "nothing to
+		// install".
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
@@ -7073,7 +7139,15 @@ func TestUploadMaestroArtifactsPostsArtifactMetadata(t *testing.T) {
 	}
 
 	var uploads []map[string]any
+	var blobPuts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The upload is two steps: POST the metadata, then PUT the bytes to the
+		// blob URL the first response names.
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/blob") {
+			blobPuts++
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		if r.Method+" "+r.URL.Path != "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_maestro/artifacts" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
 		}
@@ -7121,6 +7195,7 @@ func TestUploadMaestroArtifactsPostsArtifactMetadata(t *testing.T) {
 			CommandPaths:    nil,
 			VideoPaths:      nil,
 		},
+		io.Discard,
 	)
 
 	if err != nil {
@@ -7545,6 +7620,14 @@ exit 1
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["eas"],"adapters":["eas.development"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -7786,6 +7869,14 @@ exit 1
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -8966,6 +9057,14 @@ exit 42
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["android"],"localTools":["eas"],"adapters":["eas.development"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9167,6 +9266,14 @@ exit 42
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["android"],"localTools":["adb"],"adapters":["eas.development"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9282,6 +9389,14 @@ exit 42
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["android"],"localTools":["adb","eas"],"adapters":["eas.development"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9369,9 +9484,18 @@ printf '{"id":"build_ios_dev_1","platform":"ios","profile":"development-device",
 
 	var calls []string
 	completedCancelled := false
+	var startedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -9381,6 +9505,9 @@ printf '{"id":"build_ios_dev_1","platform":"ios","profile":"development-device",
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
+			if startedAt.IsZero() {
+				startedAt = time.Now()
+			}
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_build","kind":"eas.build.dev","status":"running","runnerId":"pfrun_cli","payload":{"easProfileName":"development-device","targetClass":"device","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile"},"readiness":{"ready":true}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_build"}}`, workspaceRoot)
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/heartbeat":
 			if r.Method != http.MethodPost {
@@ -9420,7 +9547,7 @@ printf '{"id":"build_ios_dev_1","platform":"ios","profile":"development-device",
 	}))
 	t.Cleanup(server.Close)
 
-	startedAt := time.Now()
+	// startedAt is stamped by the claim handler below.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -9478,6 +9605,14 @@ exit 1
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -9589,6 +9724,14 @@ exit 42
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["eas"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9670,6 +9813,7 @@ sleep 1
 	t.Setenv("PREFLIGHT_RUNNER_POLL_INTERVAL", "20ms")
 
 	metroStartedAt := time.Now()
+	var startedAt time.Time
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
@@ -9689,6 +9833,14 @@ sleep 1
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"],"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9697,6 +9849,9 @@ sleep 1
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
+			if startedAt.IsZero() {
+				startedAt = time.Now()
+			}
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli","payload":{"lane":"development","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile","appScheme":"forgegraph","expoSlug":"forgegraf"},"devBuild":{"buildId":"build_ios_dev_1","installUrl":"https://expo.dev/runtime-artifacts/ios-dev.ipa"}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_devsession"}}`, workspaceRoot)
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
 			if r.Method != http.MethodGet {
@@ -9727,7 +9882,7 @@ sleep 1
 	}))
 	t.Cleanup(server.Close)
 
-	startedAt := time.Now()
+	// startedAt is stamped by the claim handler below.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -9800,6 +9955,14 @@ func TestRunnerOnceStopsPreflightOwnedDevSession(t *testing.T) {
 	completedStop := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"],"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9897,6 +10060,7 @@ sleep 1
 	t.Setenv("PREFLIGHT_EXPO_START_TIMEOUT", "80ms")
 	t.Setenv("PREFLIGHT_RUNNER_POLL_INTERVAL", "20ms")
 
+	var startedAt time.Time
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
@@ -9912,6 +10076,14 @@ sleep 1
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -9920,6 +10092,9 @@ sleep 1
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
+			if startedAt.IsZero() {
+				startedAt = time.Now()
+			}
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli","payload":{"sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile","appScheme":"forgegraph","expoSlug":"forgegraf"},"targetId":"pftgt_cli","providerIdentity":"6BA8F38E-BF97-4830-98A6-E459E4312F29"}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_devsession"}}`, workspaceRoot)
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession/heartbeat":
 			if r.Method != http.MethodPost {
@@ -9960,7 +10135,7 @@ sleep 1
 	}))
 	t.Cleanup(server.Close)
 
-	startedAt := time.Now()
+	// startedAt is stamped by the claim handler below.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -10002,7 +10177,11 @@ exit 0
 	if countCalls(calls, "POST /api/preflight/v1/runners/pfrun_cli/jobs/claim") > 1 {
 		t.Fatalf("expected timeout to stop before follow-on claims, got %v", calls)
 	}
-	if elapsed := time.Since(startedAt); elapsed > 700*time.Millisecond {
+	// Generous relative to the 20ms dev-session timeout under test: this runs
+	// alongside the rest of the suite, and the assertion is "the timeout fired"
+	// rather than "the machine was fast". The follow-on-claim check above is
+	// what catches a timeout that did not stop the lane.
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
 		t.Fatalf("expected timeout to stop dev session promptly, elapsed %s", elapsed)
 	}
 }
@@ -10025,6 +10204,14 @@ exit 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -10115,6 +10302,14 @@ exit 42
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -10294,6 +10489,14 @@ exit 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -10603,6 +10806,14 @@ exit 0
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			var body map[string]any
@@ -10818,6 +11029,12 @@ func TestSimulatorDeepLinkURLUsesAndroidEmulatorHostFallback(t *testing.T) {
 
 func TestRunnerOnceRegistersClaimsDiscoversAndLocksIOSSimulator(t *testing.T) {
 	workspaceRoot := t.TempDir()
+	// macOS puts TempDir under /var, a symlink to /private/var. The runner
+	// reports the resolved path, so the fixture has to hold the same one or
+	// every workspace-root comparison below fails on a Mac and passes on CI.
+	if resolved, err := filepath.EvalSymlinks(workspaceRoot); err == nil {
+		workspaceRoot = resolved
+	}
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
 	if err := os.MkdirAll(appDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -10929,6 +11146,14 @@ exit 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -11221,6 +11446,14 @@ exit 42
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["expo"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -11282,86 +11515,6 @@ exit 42
 	}
 	if !completedFailed {
 		t.Fatalf("expected runner to complete failed simulator open job, got calls %v", calls)
-	}
-}
-
-func TestRunExpoAppOpenContinuesAfterIOSDevelopmentClientFalseNegative(t *testing.T) {
-	workspaceRoot := t.TempDir()
-	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
-	if err := os.MkdirAll(appDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeBin := t.TempDir()
-	npxLog := filepath.Join(t.TempDir(), "npx.log")
-	xcrunLog := filepath.Join(t.TempDir(), "xcrun.log")
-	t.Setenv("NPX_LOG", npxLog)
-	t.Setenv("XCRUN_LOG", xcrunLog)
-	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
-printf '%s\n' "$*" >> "$NPX_LOG"
-case "$*" in
-  "expo prebuild"*) exit 0 ;;
-  "expo run:ios"*)
-    printf 'CommandError: No development build (com.gmacko.forgegraph.dev) for this project is installed.\n' >&2
-    exit 1
-    ;;
-esac
-exit 0
-`), 0o755); err != nil {
-		t.Fatalf("write fake npx: %v", err)
-	}
-	xcrunPath := writeFakeExecutable(t, "xcrun", `#!/usr/bin/env sh
-printf '%s\n' "$*" >> "$XCRUN_LOG"
-case "$*" in
-  "simctl get_app_container"*) printf '/tmp/LatchFlowDev.app\n'; exit 0 ;;
-esac
-exit 0
-`)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	job := apiRunnerJob{
-		TargetID: "pftgt_cli",
-		Payload: runnerJobPayload{
-			ProviderIdentity: "6BA8F38E-BF97-4830-98A6-E459E4312F29",
-			SourceBinding: runnerJobSourceBinding{
-				AppScheme:   "forgegraph",
-				ExpoSlug:    "forgegraf",
-				IOSBundleID: "com.gmacko.forgegraph.dev",
-			},
-			DevSession: runnerJobDevSession{
-				URL:  "http://127.0.0.1:19000",
-				Port: 19000,
-			},
-		},
-	}
-
-	logPath, err := runExpoAppOpen(
-		runnerOnceOptions{xcrunPath: xcrunPath},
-		"ios",
-		appDir,
-		"6BA8F38E-BF97-4830-98A6-E459E4312F29",
-		19000,
-		job,
-	)
-	if err != nil {
-		t.Fatalf("expected Preflight simctl open fallback after Expo false negative, got %v", err)
-	}
-	logOutput, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read expo log: %v", err)
-	}
-	if !strings.Contains(string(logOutput), "continuing with Preflight simctl openurl fallback") {
-		t.Fatalf("expected fallback warning in expo log, got %q", string(logOutput))
-	}
-	xcrunOutput, err := os.ReadFile(xcrunLog)
-	if err != nil {
-		t.Fatalf("read xcrun log: %v", err)
-	}
-	if !strings.Contains(string(xcrunOutput), "simctl get_app_container 6BA8F38E-BF97-4830-98A6-E459E4312F29 com.gmacko.forgegraph.dev app") {
-		t.Fatalf("expected installed-app probe, got %q", string(xcrunOutput))
-	}
-	if !strings.Contains(string(xcrunOutput), "simctl openurl 6BA8F38E-BF97-4830-98A6-E459E4312F29 forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000") {
-		t.Fatalf("expected Preflight simctl openurl fallback, got %q", string(xcrunOutput))
 	}
 }
 
@@ -11462,11 +11615,31 @@ esac
 	t.Setenv("PREFLIGHT_RUNNER_POLL_INTERVAL", "20ms")
 	t.Setenv("PREFLIGHT_SIMULATOR_OPEN_TIMEOUT", "2s")
 
+	// A fake xcrun: without it the lane shells out to the real simulator
+	// subsystem to shut down, boot and query a UDID that does not exist on this
+	// machine, which costs seconds and makes the promptness assertion below
+	// measure the host rather than the runner.
+	xcrunPath := filepath.Join(fakeBin, "xcrun")
+	if err := os.WriteFile(xcrunPath, []byte(`#!/usr/bin/env sh
+exit 0
+`), 0o755); err != nil {
+		t.Fatalf("write fake xcrun: %v", err)
+	}
+
 	var calls []string
 	completedCancelled := false
+	var startedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -11478,6 +11651,12 @@ esac
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_open","kind":"simulator.open","status":"running","runnerId":"pfrun_cli","targetId":"pftgt_cli","payload":{"targetId":"pftgt_cli","providerIdentity":"6BA8F38E-BF97-4830-98A6-E459E4312F29","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile","appScheme":"forgegraph","expoSlug":"forgegraf"},"devSession":{"url":"http://127.0.0.1:19000","port":19000}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_open"}}`, workspaceRoot)
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_open":
+			// The runner learns the job is cancelled here; promptness is measured
+			// from this point, not from process start (registration probes the
+			// host for installed tooling, which is not what this asserts).
+			if startedAt.IsZero() {
+				startedAt = time.Now()
+			}
 			if r.Method != http.MethodGet {
 				t.Fatalf("unexpected method for job read: %s", r.Method)
 			}
@@ -11505,13 +11684,18 @@ esac
 			}
 			completedCancelled = true
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_open","kind":"simulator.open","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_open"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/signing-cert":
+			// No fleet signing identity configured for this runner. The runner
+			// treats 404 as the normal "nothing to install" case; the lane under
+			// test never signs anything.
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	t.Cleanup(server.Close)
 
-	startedAt := time.Now()
+	// startedAt is stamped by the claim handler below.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -11528,6 +11712,8 @@ esac
 			"macbook.local",
 			"--name",
 			"CLI Runner",
+			"--xcrun-path",
+			xcrunPath,
 		},
 		&stdout,
 		&stderr,
@@ -11570,9 +11756,18 @@ printf 'maestro finished\n'
 
 	var calls []string
 	completedCancelled := false
+	var startedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
+
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
@@ -11584,6 +11779,12 @@ printf 'maestro finished\n'
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
 			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_maestro","kind":"maestro.run","status":"running","runnerId":"pfrun_cli","targetId":"pftgt_cli","payload":{"targetId":"pftgt_cli","providerIdentity":"6BA8F38E-BF97-4830-98A6-E459E4312F29","flowPath":"apps/mobile/.maestro/01-app-launches.yaml","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile"},"devSession":{"url":"http://127.0.0.1:19000","port":19000}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_maestro"}}`, workspaceRoot)
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_maestro/heartbeat":
+			// This fake reports the cancellation on the job heartbeat, which is
+			// where the runner learns of it — promptness is measured from here,
+			// not from process start (registration probes the host for tooling).
+			if startedAt.IsZero() {
+				startedAt = time.Now()
+			}
 			if r.Method != http.MethodPost {
 				t.Fatalf("unexpected method for job heartbeat: %s", r.Method)
 			}
@@ -11615,13 +11816,18 @@ printf 'maestro finished\n'
 			}
 			completedCancelled = true
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_maestro","kind":"maestro.run","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_maestro"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/signing-cert":
+			// No fleet signing identity configured for this runner. The runner
+			// treats 404 as the normal "nothing to install" case; the lane under
+			// test never signs anything.
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	t.Cleanup(server.Close)
 
-	startedAt := time.Now()
+	// startedAt is stamped by the claim handler below.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -11682,6 +11888,14 @@ exit 42
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
+		// `runner once` probes for a fleet signing identity on darwin. No cert is
+		// configured for these fakes, which is the 404 the runner treats as the
+		// normal "nothing to install" case.
+		if strings.HasSuffix(r.URL.Path, "/signing-cert") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
 		switch r.URL.Path {
 		case "/api/preflight/v1/runners/register":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"macbook.local","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["ios"],"localTools":["maestro"]},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
@@ -11710,6 +11924,11 @@ exit 42
 			}
 			completedFailed = true
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_maestro","kind":"maestro.run","status":"failed","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_maestro"}}`))
+		case "/api/preflight/v1/runners/pfrun_cli/signing-cert":
+			// No fleet signing identity configured for this runner. The runner
+			// treats 404 as the normal "nothing to install" case; the lane under
+			// test never signs anything.
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
 		}
