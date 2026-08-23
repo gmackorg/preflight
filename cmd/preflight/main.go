@@ -4848,6 +4848,108 @@ func (writer *redactingCommandWriter) Flush() {
 	writer.pending = ""
 }
 
+// Bounds for commandLogExcerpt. Only the tail of a log is scanned (build logs
+// reach tens of MB) and the excerpt has to survive as a control-plane
+// blocker_message, so it stays short enough to read in a table cell.
+const (
+	commandLogScanBytes    = 64 * 1024
+	commandLogExcerptMax   = 400
+	commandLogExcerptLines = 3
+)
+
+var (
+	ansiEscapeSequence = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+	// Markers that identify the operative line in Expo, CocoaPods, and
+	// xcodebuild output. Matched case-sensitively where the tools are
+	// consistent, and anchored loosely because each tool decorates
+	// differently ("✖ Prebuild failed", "error: ...", "** BUILD FAILED **").
+	commandLogErrorMarkers = regexp.MustCompile(`(^|\s)(Error:|error:|fatal error:|✖|\[!\]|\*\* BUILD FAILED \*\*|The following build commands failed)`)
+)
+
+// commandLogExcerpt returns a short excerpt of the operative error lines from a
+// command log, formatted for appending to a wrapped exec error.
+//
+// The runner streams every command's stdout+stderr into a per-job log file and
+// then reports only the exec error, so a failure reaches the control plane as a
+// bare "exit status 1". That collapses unrelated app-level breakages into one
+// opaque bucket: 348 workflows across 12 apps shared just four distinct
+// blocker messages, and root-causing any one of them meant finding which Mac
+// ran the job and reading the log off its disk. Lifting the operative lines
+// into the error makes the failure self-describing at the control plane.
+//
+// The log is written through redactingCommandWriter, so what is read back here
+// has already been redacted; this adds no new path for secrets to escape.
+func commandLogExcerpt(logFile *os.File) string {
+	if logFile == nil {
+		return ""
+	}
+	path := logFile.Name()
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return ""
+	}
+	offset := int64(0)
+	length := info.Size()
+	if length > commandLogScanBytes {
+		offset = length - commandLogScanBytes
+		length = commandLogScanBytes
+	}
+	handle, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = handle.Close() }()
+	buffer := make([]byte, length)
+	if _, err := handle.ReadAt(buffer, offset); err != nil && err != io.EOF {
+		return ""
+	}
+
+	var errorLines []string
+	var lastLines []string
+	for _, raw := range strings.Split(string(buffer), "\n") {
+		line := strings.TrimSpace(ansiEscapeSequence.ReplaceAllString(raw, ""))
+		if line == "" {
+			continue
+		}
+		lastLines = append(lastLines, line)
+		if commandLogErrorMarkers.MatchString(line) {
+			errorLines = append(errorLines, line)
+		}
+	}
+
+	// Prefer marker lines closest to the failure; fall back to the tail so a
+	// tool that fails without a recognised marker still says something.
+	chosen := errorLines
+	if len(chosen) == 0 {
+		chosen = lastLines
+	}
+	if len(chosen) > commandLogExcerptLines {
+		chosen = chosen[len(chosen)-commandLogExcerptLines:]
+	}
+
+	seen := make(map[string]bool, len(chosen))
+	unique := make([]string, 0, len(chosen))
+	for _, line := range chosen {
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		unique = append(unique, line)
+	}
+	if len(unique) == 0 {
+		return ""
+	}
+
+	excerpt := strings.Join(unique, "; ")
+	if len(excerpt) > commandLogExcerptMax {
+		excerpt = excerpt[:commandLogExcerptMax] + "…"
+	}
+	return " — " + excerpt
+}
+
 func recordSetupTranscript(
 	client *http.Client,
 	options setupOptions,
@@ -11126,7 +11228,7 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		// dev-client launch below (openExpoDevelopmentClient) is unchanged.
 		flushExpoRunLog()
 		if err := buildAndInstallIOSSimulatorApp(logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
-			return logPath, fmt.Errorf("build/install iOS simulator app: %w", err)
+			return logPath, fmt.Errorf("build/install iOS simulator app: %w%s", err, commandLogExcerpt(logFile))
 		}
 	} else if platform == "ios" {
 		// Physical-device lane: `expo run:ios --device` signs via an interactive
@@ -11135,7 +11237,7 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		// for automatic provisioning, then install with devicectl.
 		flushExpoRunLog()
 		if err := buildSignInstallIOSDeviceApp(client, registration, logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
-			return logPath, fmt.Errorf("build/sign/install iOS device app: %w", err)
+			return logPath, fmt.Errorf("build/sign/install iOS device app: %w%s", err, commandLogExcerpt(logFile))
 		}
 	} else {
 		// Android. Both iOS lanes are handled above and never reach `expo run`,
@@ -11144,7 +11246,7 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		// android job does not carry, and it probed simctl for an app container.
 		if err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
 			flushExpoRunLog()
-			return logPath, fmt.Errorf("run Expo %s install/open: %w", platform, err)
+			return logPath, fmt.Errorf("run Expo %s install/open: %w%s", platform, err, commandLogExcerpt(logFile))
 		}
 		flushExpoRunLog()
 	}
@@ -11202,7 +11304,7 @@ func buildAndInstallIOSSimulatorApp(
 	flushBuild := attachRedactedCommandLog(build, logFile)
 	if err := runCommandWithTimeoutAndCancellation(build, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval()); err != nil {
 		flushBuild()
-		return fmt.Errorf("xcodebuild simulator build (scheme %s): %w", scheme, err)
+		return fmt.Errorf("xcodebuild simulator build (scheme %s): %w%s", scheme, err, commandLogExcerpt(logFile))
 	}
 	flushBuild()
 
@@ -11711,7 +11813,7 @@ func runExpoPrebuild(logFile *os.File, appDir string, platform string, job apiRu
 	err := runCommandWithTimeoutAndCancellation(command, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval())
 	flushLog()
 	if err != nil {
-		return fmt.Errorf("run Expo %s prebuild: %w", platform, err)
+		return fmt.Errorf("run Expo %s prebuild: %w%s", platform, err, commandLogExcerpt(logFile))
 	}
 	return nil
 }

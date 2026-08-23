@@ -12932,3 +12932,84 @@ func TestExpoTunnelDevServerURLFromManifestIgnoresLocalHostURI(t *testing.T) {
 		t.Fatalf("loopback hostUri must be rejected, got %q", got)
 	}
 }
+
+// The runner used to report only the exec error ("exit status 1") for a failed
+// build command, leaving the operative error in a log file on whichever Mac ran
+// the job. 348 workflows across 12 apps collapsed into four indistinguishable
+// blocker messages as a result. commandLogExcerpt lifts the real error into the
+// message; these cases pin that behaviour.
+func TestCommandLogExcerptSurfacesOperativeError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "expo-run-ios.log")
+	// Shaped after a real failure: ANSI colour, noisy progress lines, and the
+	// operative error well above the end of the file.
+	contents := "$ npx expo prebuild --platform ios\n" +
+		"- Creating native directory (./ios)\n" +
+		"\x1b[33m› \x1b[1m[@sentry/react-native/expo]\x1b[22m sentry-xcode.sh already exists.\x1b[0m\n" +
+		"✖ Prebuild failed\n" +
+		"Error: [ios.podfile]: withIosPodfileBaseMod: Failed to find Podfile anchor for forgegraph-fmt-consteval-helper\n" +
+		"    at insertGeneratedBlock (/x/plugins/with-ios-fmt-consteval.js:23:11)\n" +
+		"    at async compileModsAsync (/x/node_modules/@expo/config-plugins/build/plugins/mod-compiler.js:120:10)\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	handle, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	excerpt := commandLogExcerpt(handle)
+	if !strings.Contains(excerpt, "Failed to find Podfile anchor for forgegraph-fmt-consteval-helper") {
+		t.Fatalf("excerpt must carry the operative error, got %q", excerpt)
+	}
+	if strings.Contains(excerpt, "\x1b[") {
+		t.Fatalf("excerpt must strip ANSI escapes, got %q", excerpt)
+	}
+	if len(excerpt) > commandLogExcerptMax+len(" — ")+len("…") {
+		t.Fatalf("excerpt must stay bounded, got %d chars", len(excerpt))
+	}
+
+	// A wrapped failure has to read as one sentence naming the real cause.
+	wrapped := fmt.Errorf("run Expo %s prebuild: %w%s", "ios", errors.New("exit status 1"), excerpt)
+	if !strings.Contains(wrapped.Error(), "exit status 1") ||
+		!strings.Contains(wrapped.Error(), "Podfile anchor") {
+		t.Fatalf("wrapped error lost information: %q", wrapped.Error())
+	}
+}
+
+func TestCommandLogExcerptFallsBackAndDegradesSafely(t *testing.T) {
+	dir := t.TempDir()
+
+	// No recognised marker: still say something rather than nothing.
+	plain := filepath.Join(dir, "plain.log")
+	if err := os.WriteFile(plain, []byte("building\nsomething went sideways\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	handle, err := os.Open(plain)
+	if err != nil {
+		t.Fatalf("open log: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+	if got := commandLogExcerpt(handle); !strings.Contains(got, "something went sideways") {
+		t.Fatalf("expected tail fallback, got %q", got)
+	}
+
+	// Empty log and nil handle must contribute nothing, never panic — a failure
+	// path must not become a second failure.
+	empty := filepath.Join(dir, "empty.log")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatalf("write empty log: %v", err)
+	}
+	emptyHandle, err := os.Open(empty)
+	if err != nil {
+		t.Fatalf("open empty log: %v", err)
+	}
+	defer func() { _ = emptyHandle.Close() }()
+	if got := commandLogExcerpt(emptyHandle); got != "" {
+		t.Fatalf("empty log must yield no excerpt, got %q", got)
+	}
+	if got := commandLogExcerpt(nil); got != "" {
+		t.Fatalf("nil log must yield no excerpt, got %q", got)
+	}
+}
