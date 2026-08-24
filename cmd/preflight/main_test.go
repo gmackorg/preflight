@@ -13105,3 +13105,83 @@ func TestSymlinkedChildCoversResolvedCheckoutPath(t *testing.T) {
 		t.Fatalf("a root with no symlinked child must not match")
 	}
 }
+
+// Two runner agents on the same Mac used to prebuild the same CI checkout at
+// once and race Expo's atomic writes, producing
+// "[ios.podfileProperties]: ENOENT ... rename '<tmp>' -> 'Podfile.properties.json'".
+// The pre-existing ps-scraping guard cannot prevent that: it only matches
+// `expo run:ios`/`xcodebuild`, and a bool check lets two callers both proceed.
+func TestAcquireCheckoutLockSerialisesOneCheckout(t *testing.T) {
+	lockDir := filepath.Join(t.TempDir(), ".preflight")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	release, err := acquireCheckoutLock(lockDir, time.Second)
+	if err != nil {
+		t.Fatalf("first acquire must succeed: %v", err)
+	}
+
+	// A second holder, standing in for another agent on the same host, must be
+	// refused rather than allowed to race.
+	blocked := make(chan error, 1)
+	go func() {
+		second, secondErr := acquireCheckoutLock(lockDir, 300*time.Millisecond)
+		if secondErr == nil {
+			second()
+		}
+		blocked <- secondErr
+	}()
+	select {
+	case secondErr := <-blocked:
+		if secondErr == nil {
+			t.Fatalf("a second agent must not enter a checkout already held")
+		}
+		if !strings.Contains(secondErr.Error(), "another runner on this host") {
+			t.Fatalf("error must name the real cause, got %q", secondErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("second acquire neither succeeded nor timed out")
+	}
+
+	// After release the checkout is usable again, or one stuck build would wedge
+	// that app permanently.
+	release()
+	again, err := acquireCheckoutLock(lockDir, 2*time.Second)
+	if err != nil {
+		t.Fatalf("must be acquirable after release: %v", err)
+	}
+	again()
+}
+
+func TestAcquireCheckoutLockKeyedPerAppDirectory(t *testing.T) {
+	base := t.TempDir()
+	first := filepath.Join(base, "appA", ".preflight")
+	second := filepath.Join(base, "appB", ".preflight")
+	for _, d := range []string{first, second} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	releaseA, err := acquireCheckoutLock(first, time.Second)
+	if err != nil {
+		t.Fatalf("appA: %v", err)
+	}
+	defer releaseA()
+	// Unrelated apps must still build in parallel; a host-wide lock would halve
+	// farm throughput for no reason.
+	releaseB, err := acquireCheckoutLock(second, time.Second)
+	if err != nil {
+		t.Fatalf("a different app must not be blocked by appA's lock: %v", err)
+	}
+	releaseB()
+}
+
+func TestAcquireCheckoutLockProceedsWhenUnlockable(t *testing.T) {
+	// A lock file that cannot be created must not take the runner offline.
+	release, err := acquireCheckoutLock(filepath.Join(t.TempDir(), "does", "not", "exist"), time.Second)
+	if err != nil {
+		t.Fatalf("must degrade to unlocked, got %v", err)
+	}
+	release()
+}

@@ -10993,6 +10993,60 @@ func terminateExpoDevServer(process *expoDevServerProcess) {
 
 // preflightCiCheckoutSegment extracts the "<repo>" name that follows
 // "/.preflight-ci/" in a path or process command line, or "" if absent.
+// How long to wait for another agent to finish with a checkout before giving
+// up. Long enough to ride out a prebuild, short enough that the job fails with
+// a readable reason instead of sitting on a lease until it expires.
+const checkoutLockWait = 90 * time.Second
+
+// acquireCheckoutLock takes an exclusive, host-wide lock on one CI checkout and
+// returns the release function.
+//
+// concurrentPreflightBuildActive and cleanupStaleCiBuildProcesses already guard
+// host-level Xcode contention, but they scan `ps` for `expo run:ios`/`xcodebuild`
+// and rest on the comment's premise that "simulator.open runs serially per
+// runner host". That premise does not hold: labtop runs five runner agents and
+// gmacko-mini three, each claiming jobs independently, and none of them appear
+// in that scan while `expo prebuild` is the running command. Two agents then
+// prebuild the same tree at once and race Expo's atomic writes — observed in
+// production as
+//
+//	[ios.podfileProperties]: ENOENT: no such file or directory, rename
+//	'.../ios/Podfile.properties.json.<random>' -> '.../ios/Podfile.properties.json'
+//
+// where the loser's temp file was gone by the time it renamed. A bool "is
+// anything running" check cannot fix that; two callers can both observe "clear"
+// and proceed. This is a real mutex, held for the whole mutate-the-checkout
+// span, keyed per app directory so unrelated apps still build in parallel.
+//
+// If the lock file cannot be created at all the work proceeds unlocked: a
+// read-only or unusual filesystem should not take the farm offline, and the
+// pre-existing behaviour was unlocked anyway.
+func acquireCheckoutLock(lockDir string, wait time.Duration) (func(), error) {
+	lockPath := filepath.Join(lockDir, "checkout.lock")
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return func() {}, nil
+	}
+	release := func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if flockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); flockErr == nil {
+			return release, nil
+		}
+		if !time.Now().Before(deadline) {
+			_ = file.Close()
+			return nil, fmt.Errorf(
+				"another runner on this host is already working in %s (waited %s); retry once it finishes",
+				filepath.Dir(lockDir), wait,
+			)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func preflightCiCheckoutSegment(s string) string {
 	const marker = "/.preflight-ci/"
 	idx := strings.Index(s, marker)
@@ -11221,6 +11275,13 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return "", fmt.Errorf("create Preflight log directory: %w", err)
 	}
+	// Everything below mutates the checkout, so only one runner agent on this
+	// host may be inside it at a time. See acquireCheckoutLock.
+	releaseCheckout, err := acquireCheckoutLock(logDir, checkoutLockWait)
+	if err != nil {
+		return "", err
+	}
+	defer releaseCheckout()
 	logPath := filepath.Join(logDir, fmt.Sprintf("expo-run-%s.log", platform))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
