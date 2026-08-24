@@ -13013,3 +13013,47 @@ func TestCommandLogExcerptFallsBackAndDegradesSafely(t *testing.T) {
 		t.Fatalf("nil log must yield no excerpt, got %q", got)
 	}
 }
+
+// launchd starts the runner with no locale, so Ruby (and therefore CocoaPods)
+// defaults to US-ASCII and every `pod install` raises
+// Encoding::CompatibilityError. `expo prebuild` runs pod install, so the whole
+// class of failures surfaced only as "run Expo ios prebuild: exit status 1".
+func TestExpoCommandEnvForcesUTF8LocaleWhenUnset(t *testing.T) {
+	for _, key := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+	var lang string
+	for _, entry := range expoCommandEnv(apiRunnerJob{}) {
+		if strings.HasPrefix(entry, "LANG=") {
+			lang = strings.TrimPrefix(entry, "LANG=")
+		}
+	}
+	if !strings.Contains(strings.ToUpper(lang), "UTF-8") {
+		t.Fatalf("expected a UTF-8 LANG so CocoaPods can normalise paths, got %q", lang)
+	}
+}
+
+func TestExpoCommandEnvKeepsOperatorLocale(t *testing.T) {
+	for _, key := range []string{"LC_ALL", "LC_CTYPE"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+	t.Setenv("LANG", "en_GB.UTF-8")
+	found := false
+	for _, entry := range expoCommandEnv(apiRunnerJob{}) {
+		if entry == "LANG=en_GB.UTF-8" {
+			found = true
+		}
+		if entry == "LANG=en_US.UTF-8" {
+			t.Fatalf("must not override an operator-configured locale")
+		}
+	}
+	if !found {
+		t.Fatalf("operator locale missing from env")
+	}
+}

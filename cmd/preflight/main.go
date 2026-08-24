@@ -12171,6 +12171,21 @@ func runOptionalLoggedXcrunCommand(logFile *os.File, options runnerOnceOptions, 
 func expoCommandEnv(job apiRunnerJob) []string {
 	env := append([]string{}, os.Environ()...)
 	env = upsertEnv(env, "EXPO_NO_INTERACTIVE", "1")
+	// CocoaPods calls String#unicode_normalize on its installation root, which
+	// raises Encoding::CompatibilityError ("Unicode Normalization not
+	// appropriate for ASCII-8BIT") unless Ruby's default external encoding is
+	// UTF-8. launchd starts the runner with no locale at all, so the daemon
+	// inherits US-ASCII and every `pod install` it runs dies — including the one
+	// at the end of `expo prebuild`, which surfaces only as the opaque
+	// "run Expo ios prebuild: exit status 1". Verified on gmacko-mini: the live
+	// runner process carried no LANG/LC_*, `pod --version` warned that CocoaPods
+	// requires UTF-8, and Ruby reported Encoding.default_external = US-ASCII.
+	//
+	// Only fill in when the operator set nothing, so a deliberately configured
+	// locale still wins.
+	if os.Getenv("LANG") == "" && os.Getenv("LC_ALL") == "" && os.Getenv("LC_CTYPE") == "" {
+		env = upsertEnv(env, "LANG", "en_US.UTF-8")
+	}
 	if expoDevelopmentVariant(job) {
 		env = upsertEnv(env, "APP_VARIANT", "development")
 	}
