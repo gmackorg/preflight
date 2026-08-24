@@ -5131,6 +5131,13 @@ func runRunnerOnce(args []string, stdout io.Writer, stderr io.Writer, client *ht
 	}
 
 	if err := executeRunnerOnce(options, stdout, client); err != nil {
+		// Losing a job to another agent on this host is a normal race, not a
+		// failure of this runner. Report it as such and exit cleanly so the
+		// supervising loop goes straight back to polling for other work.
+		if jobLeaseLost(err) {
+			fmt.Fprintf(stdout, "job lease lost to another runner on this host; releasing and polling again: %v\n", err)
+			return 0
+		}
 		fmt.Fprintf(stderr, "runner once failed: %v\n", err)
 		return 1
 	}
@@ -13807,14 +13814,51 @@ func doPreflightJSONOnce(
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if envelope.Error != nil {
-			return nil, response.StatusCode, fmt.Errorf("Preflight API returned HTTP %d (%s): %s", response.StatusCode, envelope.Error.Code, envelope.Error.Message)
+			return nil, response.StatusCode, &preflightAPIError{
+				status:  response.StatusCode,
+				code:    envelope.Error.Code,
+				message: envelope.Error.Message,
+			}
 		}
-		return nil, response.StatusCode, fmt.Errorf("Preflight API returned HTTP %d", response.StatusCode)
+		return nil, response.StatusCode, &preflightAPIError{status: response.StatusCode}
 	}
 	if envelope.Error != nil {
 		return nil, response.StatusCode, fmt.Errorf("Preflight API error (%s): %s", envelope.Error.Code, envelope.Error.Message)
 	}
 	return envelope.Data, response.StatusCode, nil
+}
+
+// preflightAPIError carries the response envelope's machine-readable error code
+// so callers can branch on it instead of matching message text. Error()
+// reproduces the previous message verbatim, so anything that only prints it is
+// unaffected.
+type preflightAPIError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *preflightAPIError) Error() string {
+	if e.code != "" {
+		return fmt.Sprintf("Preflight API returned HTTP %d (%s): %s", e.status, e.code, e.message)
+	}
+	return fmt.Sprintf("Preflight API returned HTTP %d", e.status)
+}
+
+// jobLeaseLost reports whether err means this runner no longer holds the job's
+// lease, because another agent claimed it or the control plane reclaimed it.
+//
+// Several runner agents share each Mac and poll independently, so losing a race
+// for one job is routine, not a crash. Treating it as a failure made a lost race
+// look identical to a broken runner in the logs (28 such lines in 400 on
+// gmacko-mini) and ended the invocation instead of letting it pick up other
+// work.
+func jobLeaseLost(err error) bool {
+	var apiErr *preflightAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.code == "runner_job_lease_denied" || apiErr.code == "runner_job_lease_expired"
 }
 
 func decodeEnvelopeData(data json.RawMessage, output any) error {

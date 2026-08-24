@@ -13185,3 +13185,42 @@ func TestAcquireCheckoutLockProceedsWhenUnlockable(t *testing.T) {
 	}
 	release()
 }
+
+// Several runner agents share each Mac and poll independently, so losing a race
+// for a job is routine. It used to end the invocation as "runner once failed",
+// which made a lost race indistinguishable from a broken runner (28 such lines
+// in 400 on gmacko-mini).
+func TestJobLeaseLostRecognisesLeaseErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"denied", &preflightAPIError{status: 403, code: "runner_job_lease_denied", message: "Runner does not own this job lease."}, true},
+		{"expired", &preflightAPIError{status: 409, code: "runner_job_lease_expired", message: "Runner job lease expired before the runner write."}, true},
+		{"wrapped", fmt.Errorf("complete job: %w", &preflightAPIError{status: 403, code: "runner_job_lease_denied"}), true},
+		{"other api error", &preflightAPIError{status: 500, code: "internal_error", message: "boom"}, false},
+		{"unauthorised is still fatal", &preflightAPIError{status: 401, code: "unauthorized", message: "bad token"}, false},
+		{"plain error", errors.New("runner_job_lease_denied"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := jobLeaseLost(c.err); got != c.want {
+			t.Fatalf("%s: jobLeaseLost = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The typed error must print exactly as before, or every log line and every
+// blocker_message built from an API failure changes shape.
+func TestPreflightAPIErrorMessageUnchanged(t *testing.T) {
+	withCode := &preflightAPIError{status: 403, code: "runner_job_lease_denied", message: "Runner does not own this job lease."}
+	wantWithCode := "Preflight API returned HTTP 403 (runner_job_lease_denied): Runner does not own this job lease."
+	if withCode.Error() != wantWithCode {
+		t.Fatalf("with code:\n got %q\nwant %q", withCode.Error(), wantWithCode)
+	}
+	bare := &preflightAPIError{status: 502}
+	if bare.Error() != "Preflight API returned HTTP 502" {
+		t.Fatalf("bare: got %q", bare.Error())
+	}
+}
