@@ -13057,3 +13057,51 @@ func TestExpoCommandEnvKeepsOperatorLocale(t *testing.T) {
 		t.Fatalf("operator locale missing from env")
 	}
 }
+
+// The labtop runner's CI checkout area is a symlink onto another volume
+// (/Volumes/dev/.preflight-ci -> /Volumes/dev-ssd/preflight-ci, from the SSD
+// node_modules offload). Source bindings therefore recorded the resolved
+// /Volumes/dev-ssd/... path while the runner advertises --workspace-root
+// /Volumes/dev, so containment failed, every claim was released as a
+// source-binding mismatch, and the workflow thrashed between target_discovered
+// and runner_job_expired indefinitely.
+func TestSymlinkedChildCoversResolvedCheckoutPath(t *testing.T) {
+	base := t.TempDir()
+	// Stand in for the two volumes.
+	devRoot := filepath.Join(base, "dev")
+	ssdRoot := filepath.Join(base, "dev-ssd")
+	realCheckout := filepath.Join(ssdRoot, "preflight-ci")
+	appDir := filepath.Join(realCheckout, "ForgeGraph", "apps", "mobile")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatalf("mkdir app: %v", err)
+	}
+	if err := os.MkdirAll(devRoot, 0o755); err != nil {
+		t.Fatalf("mkdir dev: %v", err)
+	}
+	if err := os.Symlink(realCheckout, filepath.Join(devRoot, ".preflight-ci")); err != nil {
+		t.Fatalf("symlink checkout: %v", err)
+	}
+
+	// The exact shape that wedged the farm: runner root on one volume, binding
+	// path resolved onto the other.
+	if pathWithin(devRoot, appDir) {
+		t.Fatalf("precondition: the resolved app dir must NOT be lexically inside the runner root")
+	}
+	if !symlinkedChildCovers(devRoot, appDir) {
+		t.Fatalf("runner root %q must cover %q through its symlinked child", devRoot, appDir)
+	}
+
+	// An unrelated tree on the same volume must still be rejected, or the check
+	// would accept any job and defeat the point of workspace-root matching.
+	outside := filepath.Join(ssdRoot, "somewhere-else", "apps", "mobile")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if symlinkedChildCovers(devRoot, outside) {
+		t.Fatalf("must not cover %q, which no symlinked child reaches", outside)
+	}
+	// A root with no symlinked children covers nothing.
+	if symlinkedChildCovers(ssdRoot, appDir) {
+		t.Fatalf("a root with no symlinked child must not match")
+	}
+}

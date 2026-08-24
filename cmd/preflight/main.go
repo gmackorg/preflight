@@ -10428,7 +10428,8 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		}
 		if !pathWithin(absoluteRunnerRoot, absoluteAppDir) &&
 			!pathWithin(absoluteAppDir, absoluteRunnerRoot) &&
-			!lexicalWorkspaceRootCovers(options.workspaceRoot, appDir) {
+			!lexicalWorkspaceRootCovers(options.workspaceRoot, appDir) &&
+			!symlinkedChildCovers(options.workspaceRoot, absoluteAppDir) {
 			return sourceBindingMismatch("runnerWorkspaceRoot", "covering "+absoluteAppDir, absoluteRunnerRoot)
 		}
 	}
@@ -10695,6 +10696,54 @@ func lexicalWorkspaceRootCovers(workspaceRoot string, appDir string) bool {
 		return false
 	}
 	return pathWithin(root, app) || pathWithin(app, root)
+}
+
+// symlinkedChildCovers reports whether appDir lives under a directory that is
+// reachable from workspaceRoot by following a symlinked child of that root.
+//
+// lexicalWorkspaceRootCovers handles a binding that records the path INSIDE the
+// root and is then relocated by EvalSymlinks. This is the mirror case: the
+// binding already stores the resolved path, so no lexical comparison can
+// recover it. On the labtop runner the CI checkout area is itself a symlink —
+// /Volumes/dev/.preflight-ci -> /Volumes/dev-ssd/preflight-ci, from the SSD
+// node_modules offload — so every binding under it was recorded as
+// /Volumes/dev-ssd/preflight-ci/<app>/... while the runner advertises
+// --workspace-root /Volumes/dev. Containment failed, the runner released the
+// job as a source-binding mismatch, the control plane requeued it, and the
+// workflow thrashed between target_discovered and runner_job_expired forever.
+//
+// Only the root's immediate children are examined, and only after the cheaper
+// checks have already failed, so this costs one directory read on a path that
+// was about to be rejected anyway.
+func symlinkedChildCovers(workspaceRoot string, appDir string) bool {
+	root, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	app, err := filepath.Abs(appDir)
+	if err != nil {
+		return false
+	}
+	if resolvedApp, resolveErr := filepath.EvalSymlinks(app); resolveErr == nil {
+		app = resolvedApp
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if pathWithin(resolved, app) {
+			return true
+		}
+	}
+	return false
 }
 
 func expoConfigDigest(appDir string) string {
