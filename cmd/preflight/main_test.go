@@ -11678,12 +11678,15 @@ func TestRunnerOnceCancelsInFlightSimulatorOpenWhenJobStatusTurnsCancelled(t *te
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
 case "$*" in
-  "expo prebuild --platform ios") exit 0 ;;
-  "expo run:ios"*) sleep 1; exit 0 ;;
-  *) printf 'unexpected npx args: %s\n' "$*" >&2; exit 44 ;;
+	"expo prebuild --platform ios") mkdir -p ios/ForgeGraph.xcworkspace; exit 0 ;;
+	"expo run:ios"*) sleep 1; exit 0 ;;
+	*) printf 'unexpected npx args: %s\n' "$*" >&2; exit 44 ;;
 esac
 `), 0o755); err != nil {
 		t.Fatalf("write fake npx: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "xcodebuild"), []byte("#!/usr/bin/env sh\nsleep 1\n"), 0o755); err != nil {
+		t.Fatalf("write fake xcodebuild: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PREFLIGHT_RUNNER_POLL_INTERVAL", "20ms")
