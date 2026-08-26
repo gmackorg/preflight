@@ -7120,6 +7120,80 @@ func TestRunnerJobCancellationCheckHeartbeatsRunningJobLease(t *testing.T) {
 	}
 }
 
+func TestDeviceDiscoveryHeartbeatsJobWhileDiscoveryIsInProgress(t *testing.T) {
+	t.Setenv("PREFLIGHT_RUNNER_JOB_HEARTBEAT_INTERVAL", "10ms")
+
+	simctlPath := filepath.Join(t.TempDir(), "simctl.json")
+	if err := os.WriteFile(simctlPath, []byte(`{"devices":{}}`), 0o644); err != nil {
+		t.Fatalf("write simctl fixture: %v", err)
+	}
+	xcrunPath := writeFakeExecutable(t, "xcrun", "#!/usr/bin/env sh\nexit 1\n")
+
+	heartbeatSeen := make(chan struct{})
+	var heartbeatOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_discover/heartbeat":
+			heartbeatOnce.Do(func() { close(heartbeatSeen) })
+			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_discover","kind":"device.discover","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_job_heartbeat"}}`))
+		case "POST /api/preflight/v1/runners/pfrun_cli/targets/ios-simulators":
+			select {
+			case <-heartbeatSeen:
+				_, _ = w.Write([]byte(`{"data":{"targets":[{"id":"pftgt_iphone","displayName":"iPhone 17","providerIdentity":"SIM-UDID","availability":"available"}]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_targets"}}`))
+			case <-time.After(250 * time.Millisecond):
+				// The configured 10ms heartbeat has 25 opportunities to arrive;
+				// this timeout proves the lifecycle is absent rather than racing one tick.
+				_, _ = w.Write([]byte(`{"data":{"targets":[{"id":"pftgt_iphone","displayName":"iPhone 17","providerIdentity":"SIM-UDID","availability":"available"}]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_targets_without_heartbeat"}}`))
+			}
+		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_discover/targets/pftgt_iphone/lock":
+			_, _ = w.Write([]byte(`{"data":{"target":{"id":"pftgt_iphone","displayName":"iPhone 17","providerIdentity":"SIM-UDID","availability":"available"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_lock"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	err := handleDeviceDiscoveryJob(
+		server.Client(),
+		runnerOnceOptions{
+			apiURL:        server.URL,
+			workspaceRoot: t.TempDir(),
+			simctlJSON:    simctlPath,
+			xcrunPath:     xcrunPath,
+		},
+		runnerRegistrationData{
+			Runner: apiRunner{
+				ID: "pfrun_cli",
+				Capabilities: map[string]any{
+					"runnerJobHeartbeat": true,
+				},
+			},
+			Token: "runner_token",
+		},
+		apiRunnerJob{
+			ID:     "pfjob_discover",
+			Kind:   "device.discover",
+			Status: "running",
+			Payload: runnerJobPayload{
+				Platform: "ios",
+				Lane:     "simulator",
+			},
+		},
+		&stdout,
+	)
+
+	if err != nil {
+		t.Fatalf("device discovery should keep its job lease alive: %v", err)
+	}
+	select {
+	case <-heartbeatSeen:
+	default:
+		t.Fatal("expected device discovery to heartbeat its running job")
+	}
+}
+
 func TestUploadMaestroArtifactsPostsArtifactMetadata(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	reportPath := filepath.Join(workspaceRoot, ".preflight", "maestro", "pfjob_maestro", "junit.xml")

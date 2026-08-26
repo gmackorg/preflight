@@ -9820,6 +9820,7 @@ func easBuildSetupRequired(err error, job apiRunnerJob, profileName string) map[
 }
 
 func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
