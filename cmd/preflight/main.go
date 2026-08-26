@@ -9831,8 +9831,11 @@ func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, re
 	}
 	fmt.Fprintf(stdout, "reported %d %s target(s)\n", len(targets.Targets), discoveryTargetLabel(job))
 
-	target := preferredSimulatorTarget(options, job.Payload.Platform, targets.Targets)
+	target := automaticDiscoveryTarget(options, job, targets.Targets)
 	if target == nil {
+		if isPhysicalIOSDeviceDiscovery(job) {
+			return nil
+		}
 		return fmt.Errorf("no available %s targets reported", discoveryTargetLabel(job))
 	}
 
@@ -9884,6 +9887,26 @@ func reportDiscoveryTargets(client *http.Client, options runnerOnceOptions, regi
 		var targets runnerTargetsData
 		if err := decodeEnvelopeData(data, &targets); err != nil {
 			return runnerTargetsData{}, fmt.Errorf("decode Android emulator targets: %w", err)
+		}
+		return targets, nil
+	}
+	if isPhysicalIOSDeviceDiscovery(job) {
+		devicectlOutput, err := loadDevicectlDevices(options)
+		if err != nil {
+			return runnerTargetsData{}, err
+		}
+		data, err := postPreflightJSON(
+			client,
+			runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/targets/ios-devices", registration.Runner.ID)),
+			registration.Token,
+			map[string]any{"devicectlOutput": devicectlOutput},
+		)
+		if err != nil {
+			return runnerTargetsData{}, err
+		}
+		var targets runnerTargetsData
+		if err := decodeEnvelopeData(data, &targets); err != nil {
+			return runnerTargetsData{}, fmt.Errorf("decode physical iOS targets: %w", err)
 		}
 		return targets, nil
 	}
@@ -9943,7 +9966,23 @@ func discoveryTargetLabel(job apiRunnerJob) string {
 	if job.Payload.Platform == "android" {
 		return "Android emulator"
 	}
+	if isPhysicalIOSDeviceDiscovery(job) {
+		return "iOS physical device"
+	}
 	return "iOS simulator"
+}
+
+func isPhysicalIOSDeviceDiscovery(job apiRunnerJob) bool {
+	return job.Payload.Platform == "ios" &&
+		job.Payload.Lane != "simulator" &&
+		normalizeTargetClass(job.Payload.TargetClass) == "device"
+}
+
+func automaticDiscoveryTarget(options runnerOnceOptions, job apiRunnerJob, targets []apiTarget) *apiTarget {
+	if isPhysicalIOSDeviceDiscovery(job) {
+		return nil
+	}
+	return preferredSimulatorTarget(options, job.Payload.Platform, targets)
 }
 
 // shutdownOtherBootedIOSSimulators shuts down every booted simulator except the
