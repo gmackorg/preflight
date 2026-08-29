@@ -6485,6 +6485,9 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	var startedDevServer *expoDevServerProcess
 	if !preflightOwnedMetroReady(client, appDir, statusURL) {
 		sessionStatus = "started"
+		if err := requireAppDirectory(appDir); err != nil {
+			return false, err
+		}
 		startedDevServer, err = startExpoDevServer(options, appDir, job)
 		if err != nil {
 			return false, err
@@ -10187,6 +10190,30 @@ func appDirectoryForJob(options runnerOnceOptions, job apiRunnerJob) string {
 		return root
 	}
 	return filepath.Join(root, packagePath)
+}
+
+// requireAppDirectory rejects an app directory that is not an app.
+//
+// appDirectoryForJob falls back to the agent's --workspace-root when the job
+// carries no sourceBinding.workspaceRoot, and that root is a CONTAINER of
+// repositories, not a repository. Joining a package path onto it drops the
+// repo name: a release-candidate gate for streamConductor resolved to
+// /Volumes/T9-APFS/apps + apps/mobile = /Volumes/T9-APFS/apps/apps/mobile.
+// Nothing was there, so startExpoDevServer's MkdirAll happily created it, Expo
+// died on "The expected package.json path ... does not exist" writing into a
+// log nobody would think to read, and the workflow spent its whole eight-minute
+// window waiting for a Metro that was never going to start.
+//
+// Failing here costs one poll and names the directory.
+func requireAppDirectory(appDir string) error {
+	manifest := filepath.Join(appDir, "package.json")
+	if _, err := os.Stat(manifest); err != nil {
+		return fmt.Errorf(
+			"app directory %s has no package.json — the job supplied no sourceBinding.workspaceRoot, so it was resolved against this runner's --workspace-root",
+			appDir,
+		)
+	}
+	return nil
 }
 
 type sourceBindingMismatchError struct {
