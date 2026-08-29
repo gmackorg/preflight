@@ -10667,6 +10667,26 @@ func compareSourceBindingValue(field string, expected string, actual string) err
 		return nil
 	}
 	actual = strings.TrimSpace(actual)
+	// An empty local value means this runner could not determine the field, not
+	// that the checkout disagrees. Only app.json is parsed structurally; a
+	// dynamic app.config.js falls back to scraping the source for a quoted
+	// literal, so the idiomatic Expo pattern
+	//
+	//	bundleIdentifier: variant.iosBundleIdentifier
+	//
+	// scrapes to "" and every identity field with it. Treating that as a
+	// mismatch made source-binding validation unsatisfiable for any app with a
+	// variant-driven config: the runner claimed the development-lane
+	// device.discover job, failed with "iosBundleId expected
+	// com.gmacko.streamconductor.expo but local value was empty", released it,
+	// and the workflow sat in discovering_targets forever.
+	//
+	// The binding is still anchored: workspaceRoot pins the checkout and
+	// expoConfigDigest hashes the config file itself, so a genuinely different
+	// config is caught by the digest rather than by a text scrape.
+	if actual == "" {
+		return nil
+	}
 	if expected != actual {
 		return sourceBindingMismatch(field, expected, actual)
 	}
