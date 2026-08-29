@@ -41,7 +41,16 @@ const defaultMaestroSmokeTimeout = 10 * time.Minute
 const defaultEASReadinessTimeout = 2 * time.Minute
 const defaultEASBuildTimeout = 45 * time.Minute
 const defaultExpoConfigTimeout = 30 * time.Second
-const defaultExpoDevSessionStartTimeout = 2 * time.Minute
+
+// A cold Metro bundle for a real Expo app outruns two minutes. streamConductor
+// measured 136,813 ms to bundle on a warm-toolchain runner, so the old 120s
+// ceiling passed only when the Metro cache happened to be warm and otherwise
+// failed the release-candidate simulator gate with metro_start_timeout while
+// Metro was still working. Kept in step with the dev_session.start contract
+// timeoutSeconds in preflight-app, which derives the server-side lease: a
+// shorter value there expires the job out from under a runner still waiting.
+// Override per host with PREFLIGHT_EXPO_START_TIMEOUT.
+const defaultExpoDevSessionStartTimeout = 6 * time.Minute
 const defaultSimulatorOpenTimeout = 10 * time.Minute
 const defaultUnityBuildTimeout = 60 * time.Minute
 const defaultAndroidDevelopmentOpenTimeout = 5 * time.Minute
