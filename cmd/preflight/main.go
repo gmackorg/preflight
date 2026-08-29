@@ -10998,7 +10998,7 @@ func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJ
 		return nil, fmt.Errorf("open Expo dev session log: %w", err)
 	}
 
-	command := exec.Command("npx", "expo", "start", "--dev-client", "--host", expoHostArg(options.hostMode), "--port", strconv.Itoa(options.metroPort))
+	command := exec.Command("npx", "expo", "start", "--dev-client", "--host", expoHostArgForJob(options.hostMode, job), "--port", strconv.Itoa(options.metroPort))
 	command.Dir = appDir
 	command.Env = expoCommandEnv(job)
 	command.Stdout = logFile
@@ -13185,6 +13185,32 @@ func expoHostArg(hostMode string) string {
 		return "lan"
 	}
 	return hostMode
+}
+
+// expoHostArgForJob picks the --host Expo is started with.
+//
+// The agent's --host-mode says what this host CAN do; the job says what it
+// NEEDS. Only a physical-device development session requires a tunnel — the
+// control plane marks those with networkPolicy.tunnelRequired and routes them
+// to runners advertising expo.dev_server.tunnel. A simulator or emulator
+// session is served over lan and gains nothing from a tunnel.
+//
+// Reading the agent flag for every session made a tunnel-capable runner start
+// `expo start --host tunnel` for simulator work too, so each gate waited on
+// ngrok before Metro answered /status and timed out with metro_start_timeout.
+// Switching one host to tunnel mode for a device build therefore broke its
+// simulator gates.
+func expoHostArgForJob(hostMode string, job apiRunnerJob) string {
+	if job.Payload.NetworkPolicy.TunnelRequired {
+		if hostMode == "tailscale" {
+			return "lan"
+		}
+		return "tunnel"
+	}
+	if hostMode == "tunnel" {
+		return "lan"
+	}
+	return expoHostArg(hostMode)
 }
 
 func tailscaleHost() (string, error) {
