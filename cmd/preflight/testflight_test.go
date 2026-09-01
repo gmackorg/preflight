@@ -120,6 +120,40 @@ func TestTestFlightGroupsCreatePostsInternalGroup(t *testing.T) {
 	}
 }
 
+func TestTestFlightGroupsCreateFallsBackToExplicitRegistryID(t *testing.T) {
+	t.Setenv("PREFLIGHT_TOKEN", "token-123")
+	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/preflight/v1/release-status":
+			// The app is registered but not on the release-status fleet.
+			_, _ = w.Write([]byte(`{"data":{"apps":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req-1"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_offfleet/testflight/groups":
+			_, _ = w.Write([]byte(`{"data":{"group":{"id":"group-2","name":"Internal Testers","isInternal":true,"publicLinkEnabled":false,"publicLink":null}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req-2"}}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"testflight", "groups", "create", "pfapp_offfleet",
+		"--internal",
+		"--api-url", server.URL,
+	}, &stdout, &stderr, server.Client())
+
+	if code != 0 {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "group-2") {
+		t.Fatalf("stdout missing created group: %s", stdout.String())
+	}
+}
+
 func TestTestFlightGroupsCreateRequiresNameForExternalGroups(t *testing.T) {
 	t.Setenv("PREFLIGHT_TOKEN", "token-123")
 	var stdout bytes.Buffer

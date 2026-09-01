@@ -246,6 +246,18 @@ func testFlightGroupsEndpoint(apiURL string, appID string) string {
 		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/testflight/groups"
 }
 
+// resolveTestFlightAppID resolves an app reference via the fleet endpoint, but
+// lets an explicit registry id (pfapp_…) through even when the app is not on
+// the release-status fleet — some registered apps (no release program row) are
+// enrollable yet invisible there, and the server 404s on an unknown id anyway.
+func resolveTestFlightAppID(client *http.Client, options releaseStatusCLIOptions, ref string) (string, error) {
+	appID, err := resolveReleaseAppID(client, options, ref)
+	if err != nil && strings.HasPrefix(strings.TrimSpace(ref), "pfapp") {
+		return strings.TrimSpace(ref), nil
+	}
+	return appID, err
+}
+
 func runTestFlightGroupsList(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	options, ok := parseReleaseStatusCLIOptions(args, stderr)
 	if !ok {
@@ -255,7 +267,7 @@ func runTestFlightGroupsList(args []string, stdout io.Writer, stderr io.Writer, 
 		fmt.Fprintln(stderr, "Usage: preflight testflight groups list <app-id|slug|name> [--json]")
 		return 2
 	}
-	appID, err := resolveReleaseAppID(client, options, options.rest[0])
+	appID, err := resolveTestFlightAppID(client, options, options.rest[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
 		return 1
@@ -373,7 +385,7 @@ func runTestFlightGroupsCreate(args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintln(stderr, "not signed in; run `preflight login` or set PREFLIGHT_TOKEN")
 		return 2
 	}
-	appID, err := resolveReleaseAppID(client, options, appRef)
+	appID, err := resolveTestFlightAppID(client, options, appRef)
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
 		return 1
