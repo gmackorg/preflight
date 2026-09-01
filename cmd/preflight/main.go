@@ -625,11 +625,19 @@ type providerSetupRequirementSummary struct {
 }
 
 type oauthClientSummary struct {
-	ID          string `json:"id"`
-	Provider    string `json:"provider"`
-	ClientKind  string `json:"clientKind"`
-	DisplayName string `json:"displayName"`
-	Status      string `json:"status"`
+	ID                 string   `json:"id"`
+	AppID              string   `json:"appId"`
+	Provider           string   `json:"provider"`
+	ClientKind         string   `json:"clientKind"`
+	DisplayName        string   `json:"displayName"`
+	Status             string   `json:"status"`
+	ExternalClientID   string   `json:"externalClientId"`
+	BundleID           string   `json:"bundleId"`
+	AppleTeamID        string   `json:"appleTeamId"`
+	AppleServicesID    string   `json:"appleServicesId"`
+	RedirectURIs       []string `json:"redirectUris"`
+	JavascriptOrigins  []string `json:"javascriptOrigins"`
+	SecretReferenceIDs []string `json:"secretReferenceIds"`
 }
 
 type oauthClientsEnvelopeData struct {
@@ -3593,6 +3601,8 @@ func runOAuthClients(args []string, stdout io.Writer, stderr io.Writer, client *
 		return runOAuthClientsConfigure(args[1:], stdout, stderr, client)
 	case "list":
 		return runOAuthClientsList(args[1:], stdout, stderr, client)
+	case "describe":
+		return runOAuthClientsDescribe(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown oauth-clients command %q\n", args[0])
 		printOAuthClientsHelp(stderr)
@@ -3606,7 +3616,8 @@ func printOAuthClientsHelp(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  upsert  Create or update a Google/Apple OAuth client record")
 	fmt.Fprintln(w, "  configure  Configure OAuth provider account, setup flow, and client record")
-	fmt.Fprintln(w, "  list    List Google/Apple OAuth client records")
+	fmt.Fprintln(w, "  list    List Google/Apple OAuth client records ([--json] for full records)")
+	fmt.Fprintln(w, "  describe  Show one OAuth client record: external client id, Apple Services ID, credential refs")
 }
 
 func runOAuthClientsConfigure(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -3999,6 +4010,7 @@ func runOAuthClientsList(args []string, stdout io.Writer, stderr io.Writer, clie
 		"apiURL":      os.Getenv("PREFLIGHT_API_URL"),
 		"workspaceId": "local",
 	}
+	jsonOut := false
 	for index := 0; index < len(args); index += 1 {
 		switch args[index] {
 		case "--api-url":
@@ -4025,6 +4037,8 @@ func runOAuthClientsList(args []string, stdout io.Writer, stderr io.Writer, clie
 			if !readFlagValue(args, &index, options, "status", stderr) {
 				return 2
 			}
+		case "--json":
+			jsonOut = true
 		default:
 			fmt.Fprintf(stderr, "unknown oauth-clients list flag %q\n", args[index])
 			return 2
@@ -4049,10 +4063,120 @@ func runOAuthClientsList(args []string, stdout io.Writer, stderr io.Writer, clie
 		fmt.Fprintf(stderr, "decode oauth client list failed: %v\n", err)
 		return 1
 	}
+	if jsonOut {
+		content, err := json.MarshalIndent(listed.OAuthClients, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "encode oauth client list failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, string(content))
+		return 0
+	}
 	for _, oauthClient := range listed.OAuthClients {
 		fmt.Fprintf(stdout, "%s %s %s %s %s\n", oauthClient.ID, oauthClient.Provider, oauthClient.ClientKind, oauthClient.Status, oauthClient.DisplayName)
 	}
 	return 0
+}
+
+func runOAuthClientsDescribe(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	options := map[string]string{
+		"apiURL":      os.Getenv("PREFLIGHT_API_URL"),
+		"workspaceId": "local",
+	}
+	jsonOut := false
+	id := ""
+	for index := 0; index < len(args); index += 1 {
+		switch args[index] {
+		case "--api-url":
+			if !readFlagValue(args, &index, options, "apiURL", stderr) {
+				return 2
+			}
+		case "--workspace-id":
+			if !readFlagValue(args, &index, options, "workspaceId", stderr) {
+				return 2
+			}
+		case "--json":
+			jsonOut = true
+		case "--help", "-h":
+			fmt.Fprintln(stdout, "Usage: preflight oauth-clients describe <pfoauth-id> [--workspace-id <id>] [--json]")
+			return 0
+		default:
+			if strings.HasPrefix(args[index], "-") {
+				fmt.Fprintf(stderr, "unknown oauth-clients describe flag %q\n", args[index])
+				return 2
+			}
+			if id != "" {
+				fmt.Fprintln(stderr, "oauth-clients describe takes a single client id")
+				return 2
+			}
+			id = args[index]
+		}
+	}
+	if id == "" {
+		fmt.Fprintln(stderr, "Usage: preflight oauth-clients describe <pfoauth-id> [--workspace-id <id>] [--json]")
+		return 2
+	}
+	if err := resolvePreflightAPIOptions(options); err != nil {
+		fmt.Fprintf(stderr, "load Preflight CLI config failed: %v\n", err)
+		return 1
+	}
+	if missing := requireOptions(options, "apiURL", "workspaceId"); missing != "" {
+		fmt.Fprintf(stderr, "missing %s\n", missing)
+		return 2
+	}
+	endpoint := runnerEndpoint(options["apiURL"], "/api/preflight/v1/oauth-clients") + queryString(options, "workspaceId")
+	data, err := getPreflightJSON(client, endpoint, options["token"])
+	if err != nil {
+		fmt.Fprintf(stderr, "oauth client describe failed: %v\n", err)
+		return 1
+	}
+	var listed oauthClientsEnvelopeData
+	if err := decodeEnvelopeData(data, &listed); err != nil {
+		fmt.Fprintf(stderr, "decode oauth client describe failed: %v\n", err)
+		return 1
+	}
+	for _, oauthClient := range listed.OAuthClients {
+		if oauthClient.ID != id {
+			continue
+		}
+		if jsonOut {
+			content, err := json.MarshalIndent(oauthClient, "", "  ")
+			if err != nil {
+				fmt.Fprintf(stderr, "encode oauth client failed: %v\n", err)
+				return 1
+			}
+			fmt.Fprintln(stdout, string(content))
+			return 0
+		}
+		printOAuthClientDetail(stdout, oauthClient)
+		return 0
+	}
+	fmt.Fprintf(stderr, "no oauth client %q in workspace %s (try `preflight oauth-clients list`)\n", id, options["workspaceId"])
+	return 1
+}
+
+// printOAuthClientDetail shows the record an operator needs to finish a manual
+// OAuth integration: the external client id (Google client id / Apple Services
+// ID) and the Preflight credential refs holding the matching secret material.
+func printOAuthClientDetail(stdout io.Writer, oauthClient oauthClientSummary) {
+	writer := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
+	row := func(label string, value string) {
+		fmt.Fprintf(writer, "%s\t%s\n", label, emptyDash(value))
+	}
+	row("id", oauthClient.ID)
+	row("app", oauthClient.AppID)
+	row("provider", oauthClient.Provider)
+	row("client_kind", oauthClient.ClientKind)
+	row("display_name", oauthClient.DisplayName)
+	row("status", oauthClient.Status)
+	row("external_client_id", oauthClient.ExternalClientID)
+	row("bundle_id", oauthClient.BundleID)
+	row("apple_team_id", oauthClient.AppleTeamID)
+	row("apple_services_id", oauthClient.AppleServicesID)
+	row("redirect_uris", strings.Join(oauthClient.RedirectURIs, ", "))
+	row("javascript_origins", strings.Join(oauthClient.JavascriptOrigins, ", "))
+	row("credential_refs", strings.Join(oauthClient.SecretReferenceIDs, ", "))
+	writer.Flush()
 }
 
 func readFlagValue(args []string, index *int, options map[string]string, key string, stderr io.Writer) bool {

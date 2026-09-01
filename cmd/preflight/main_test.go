@@ -1959,6 +1959,102 @@ func TestOAuthClientsUseSavedPreflightLoginConfig(t *testing.T) {
 	}
 }
 
+func TestOAuthClientsDescribePrintsExternalClientDetail(t *testing.T) {
+	t.Setenv("PREFLIGHT_TOKEN", "token-123")
+	t.Setenv("PREFLIGHT_WORKSPACE_ID", "")
+	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/preflight/v1/oauth-clients" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"oauthClients":[` +
+			`{"id":"pfoauth_other","appId":"pfapp_other","provider":"google_oauth","clientKind":"google_web","displayName":"Other","status":"configured","externalClientId":"other.apps.googleusercontent.com"},` +
+			`{"id":"pfoauth_playtrek","appId":"playtrek","provider":"apple_oauth","clientKind":"apple_services_id","displayName":"PlayTrek — Sign in with Apple","status":"configured","externalClientId":"com.gmacko.playtrek.signin","appleTeamId":"P4SWQXAB5H","appleServicesId":"com.gmacko.playtrek.signin","redirectUris":["https://playtrek.ai/api/auth/callback/apple"],"secretReferenceIds":["pfsecret_apple_key"]}` +
+			`]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_oauth_describe"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run(
+		[]string{"oauth-clients", "describe", "pfoauth_playtrek", "--workspace-id", "ws-1", "--api-url", server.URL},
+		&stdout,
+		&stderr,
+		server.Client(),
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{
+		"com.gmacko.playtrek.signin",
+		"P4SWQXAB5H",
+		"pfsecret_apple_key",
+		"https://playtrek.ai/api/auth/callback/apple",
+	} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("stdout missing %q: %s", expected, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "pfoauth_other") {
+		t.Fatalf("stdout should only describe the requested client: %s", stdout.String())
+	}
+}
+
+func TestOAuthClientsDescribeUnknownIDFails(t *testing.T) {
+	t.Setenv("PREFLIGHT_TOKEN", "token-123")
+	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"oauthClients":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_oauth_missing"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run(
+		[]string{"oauth-clients", "describe", "pfoauth_nope", "--workspace-id", "ws-1", "--api-url", server.URL},
+		&stdout,
+		&stderr,
+		server.Client(),
+	)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "pfoauth_nope") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestOAuthClientsListJSONPrintsFullRecords(t *testing.T) {
+	t.Setenv("PREFLIGHT_TOKEN", "token-123")
+	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"oauthClients":[{"id":"pfoauth_playtrek","appId":"playtrek","provider":"apple_oauth","clientKind":"apple_services_id","displayName":"PlayTrek","status":"configured","externalClientId":"com.gmacko.playtrek.signin","secretReferenceIds":["pfsecret_apple_key"]}]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_oauth_json"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run(
+		[]string{"oauth-clients", "list", "--workspace-id", "ws-1", "--api-url", server.URL, "--json"},
+		&stdout,
+		&stderr,
+		server.Client(),
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d\nstderr: %s", code, stderr.String())
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(decoded) != 1 || decoded[0]["externalClientId"] != "com.gmacko.playtrek.signin" {
+		t.Fatalf("decoded = %#v", decoded)
+	}
+}
+
 func TestOAuthClientsConfigureUsesPreflightAPI(t *testing.T) {
 	var configureBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
