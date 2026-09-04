@@ -6286,7 +6286,10 @@ func heartbeatRunner(client *http.Client, options runnerOnceOptions, registratio
 		"status":       "online",
 		"capabilities": capabilities,
 	}
-	if free, err := freeBytesForPath(options.workspaceRoot); err == nil {
+	// The tightest of the volumes a build touches, not just the workspace's —
+	// see buildVolumePaths for why reporting one volume let a full host look
+	// healthy on the board.
+	if free, ok := tightestFreeBytes(buildVolumePaths(options.workspaceRoot), nil); ok {
 		payload["freeDiskGb"] = float64(free) / float64(bytesPerGiB)
 	}
 	_, err := postPreflightJSON(

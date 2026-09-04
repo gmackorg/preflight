@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -182,5 +183,60 @@ func TestHostCacheRootsStayNarrow(t *testing.T) {
 	}
 	if !strings.HasSuffix(roots[0], filepath.Join("Library", "Developer", "Xcode")) {
 		t.Fatalf("unexpected host cache root: %s", roots[0])
+	}
+}
+
+func TestTightestFreeBytes(t *testing.T) {
+	// The incident this exists for: the runner reported its workspace volume
+	// only. That workspace sat on an external SSD with 572 GB free while every
+	// xcodebuild wrote DerivedData to an internal volume down to 7 GB, so the
+	// fleet board showed the node healthy through a disk-full outage.
+	free := map[string]uint64{
+		"/Volumes/dev-ssd/checkout": 572 << 30,
+		"/Users/someone":            7 << 30,
+	}
+	fn := func(path string) (uint64, error) {
+		v, ok := free[path]
+		if !ok {
+			return 0, errors.New("no such volume")
+		}
+		return v, nil
+	}
+
+	got, ok := tightestFreeBytes([]string{"/Volumes/dev-ssd/checkout", "/Users/someone"}, fn)
+	if !ok || got != 7<<30 {
+		t.Fatalf("want the tightest volume (7GiB), got %d ok=%v", got, ok)
+	}
+
+	// A path that cannot be stat'd is skipped, not counted as zero — otherwise
+	// a stale workspace root would raise a permanent false alarm.
+	got, ok = tightestFreeBytes([]string{"/gone", "/Volumes/dev-ssd/checkout"}, fn)
+	if !ok || got != 572<<30 {
+		t.Fatalf("want unreadable paths skipped, got %d ok=%v", got, ok)
+	}
+
+	if _, ok = tightestFreeBytes([]string{"/gone"}, fn); ok {
+		t.Fatal("want ok=false when nothing could be read")
+	}
+	if _, ok = tightestFreeBytes(nil, fn); ok {
+		t.Fatal("want ok=false for no paths")
+	}
+}
+
+func TestBuildVolumePathsIncludesHome(t *testing.T) {
+	// Home is where DerivedData, simulator runtimes and toolchain caches live,
+	// and it is routinely a different volume from the checkout.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory in this environment")
+	}
+	paths := buildVolumePaths("/some/workspace")
+	if len(paths) != 2 || paths[0] != "/some/workspace" || paths[1] != home {
+		t.Fatalf("want [workspace, home], got %v", paths)
+	}
+
+	// A runner with no workspace root still reports something useful.
+	if paths = buildVolumePaths(""); len(paths) != 1 || paths[0] != home {
+		t.Fatalf("want [home] when there is no workspace root, got %v", paths)
 	}
 }

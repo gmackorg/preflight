@@ -125,6 +125,50 @@ func freeBytesForPath(path string) (uint64, error) {
 	return uint64(st.Bavail) * uint64(st.Bsize), nil
 }
 
+// buildVolumePaths lists the locations a native build actually consumes space
+// in. The workspace root is only half the story on macOS: DerivedData, the
+// simulator runtimes and every toolchain cache live under the home directory,
+// which is routinely a different volume from the checkout.
+//
+// This matters because the heartbeat's freeDiskGb is what the fleet board
+// alarms on. A host reported 572 GB free — its workspace sits on an external
+// SSD — while the internal volume every xcodebuild wrote to was down to 7 GB,
+// and the board called the node healthy straight through the resulting outage.
+func buildVolumePaths(workspaceRoot string) []string {
+	paths := make([]string, 0, 2)
+	if workspaceRoot != "" {
+		paths = append(paths, workspaceRoot)
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, home)
+	}
+	return paths
+}
+
+// tightestFreeBytes reports the smallest free space across the given paths; a
+// host is constrained by whichever of its volumes fills first. Paths that
+// cannot be stat'd are skipped rather than treated as empty, so a bad path
+// cannot fake an alarm. freeFn is injectable for tests; pass nil for the real
+// statfs probe.
+func tightestFreeBytes(paths []string, freeFn func(string) (uint64, error)) (uint64, bool) {
+	if freeFn == nil {
+		freeFn = freeBytesForPath
+	}
+	var tightest uint64
+	found := false
+	for _, path := range paths {
+		free, err := freeFn(path)
+		if err != nil {
+			continue
+		}
+		if !found || free < tightest {
+			tightest = free
+			found = true
+		}
+	}
+	return tightest, found
+}
+
 // cleanupBuildStorageUnderPressure sweeps stale managed caches only when free
 // space on the root's volume is at or below minFreeBytes. freeFn is injectable
 // for tests; pass nil for the real statfs probe.
