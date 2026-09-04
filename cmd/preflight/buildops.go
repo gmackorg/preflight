@@ -385,18 +385,20 @@ func printBuildHelp(w io.Writer) {
 
 func runQueue(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: preflight queue [--status <s>] [--app <id>] [--watch] [--json]")
+		fmt.Fprintln(stdout, "Usage: preflight queue [--status <s>] [--app <id>] [--all] [--watch] [--json]")
 		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "Show the build-farm work-order queue.")
+		fmt.Fprintln(stdout, "Show what the build farm is working on. Finished and cancelled")
+		fmt.Fprintln(stdout, "orders are hidden unless you ask for them.")
 		fmt.Fprintln(stdout, "  --status <s>  filter: queued|planning|waiting_for_resource|running|blocked|succeeded|failed|cancelled")
 		fmt.Fprintln(stdout, "  --app <id>    filter to one app")
+		fmt.Fprintln(stdout, "  --all         include finished, failed and cancelled orders")
 		fmt.Fprintln(stdout, "  --watch       refresh every 5s until interrupted")
 		fmt.Fprintln(stdout, "  --json        machine-readable output")
 		return 0
 	}
 	ctx := newBuildOpsContext()
 	status, appID := "", ""
-	watch, jsonOut := false, false
+	watch, jsonOut, showAll := false, false, false
 	for i := 0; i < len(args); i++ {
 		next := func(dst *string) {
 			if value, ok := nextFlagValue(args, &i); ok {
@@ -412,13 +414,15 @@ func runQueue(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 			watch = true
 		case "--json":
 			jsonOut = true
+		case "--all":
+			showAll = true
 		}
 	}
 	if !ctx.requireWorkspace(stderr) {
 		return 2
 	}
 	for {
-		code := printQueueOnce(ctx, client, status, appID, jsonOut, stdout, stderr)
+		code := printQueueOnce(ctx, client, status, appID, showAll, jsonOut, stdout, stderr)
 		if !watch || jsonOut || code != 0 {
 			return code
 		}
@@ -427,7 +431,7 @@ func runQueue(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	}
 }
 
-func printQueueOnce(ctx buildOpsContext, client *http.Client, status, appID string, jsonOut bool, stdout, stderr io.Writer) int {
+func printQueueOnce(ctx buildOpsContext, client *http.Client, status, appID string, showAll, jsonOut bool, stdout, stderr io.Writer) int {
 	query := url.Values{}
 	query.Set("workspaceId", ctx.workspaceID)
 	if status != "" {
@@ -448,31 +452,65 @@ func printQueueOnce(ctx buildOpsContext, client *http.Client, status, appID stri
 		fmt.Fprintf(stderr, "decode work orders: %v\n", err)
 		return 1
 	}
-	if jsonOut {
-		return writeJSON(stdout, response)
+	// A work order that finished is history, not queue. Showing them by default
+	// buried the handful of live rows under pages of `cancelled` — after the
+	// fleet-hygiene reaper terminalised a backlog, the first screen of this
+	// command was entirely corpses.
+	orders := response.WorkOrders
+	hidden := 0
+	if !showAll && status == "" {
+		live := make([]workOrder, 0, len(orders))
+		for _, order := range orders {
+			if workOrderIsTerminal(order.Status) {
+				hidden++
+				continue
+			}
+			live = append(live, order)
+		}
+		orders = live
 	}
-	if len(response.WorkOrders) == 0 {
-		fmt.Fprintln(stdout, "Queue is empty.")
+
+	if jsonOut {
+		return writeJSON(stdout, struct {
+			WorkOrders []workOrder `json:"workOrders"`
+		}{WorkOrders: orders})
+	}
+	if len(orders) == 0 {
+		fmt.Fprintln(stdout, "Nothing queued or running.")
+		if hidden > 0 {
+			fmt.Fprintf(stdout, "%d finished order(s) hidden — `preflight queue --all` to see them.\n", hidden)
+		}
 		return 0
 	}
 
+	// Oldest first: the thing that has been waiting longest is the thing worth
+	// looking at, and age is the signal the board was missing entirely while a
+	// 42-day-old build sat in the queue unnoticed.
+	sort.SliceStable(orders, func(left, right int) bool {
+		return orders[left].CreatedAt < orders[right].CreatedAt
+	})
+
 	byStatus := map[string]int{}
-	for _, order := range response.WorkOrders {
+	for _, order := range orders {
 		byStatus[order.Status]++
 	}
-	fmt.Fprintf(stdout, "%-26s %-18s %-9s %-22s %s\n", "WORK ORDER", "APP", "PLATFORM", "STATUS", "KIND")
-	for _, order := range response.WorkOrders {
+	fmt.Fprintf(stdout, "%-26s %-18s %-9s %-22s %-18s %s\n", "WORK ORDER", "APP", "PLATFORM", "STATUS", "KIND", "AGE")
+	for _, order := range orders {
 		statusCell := order.Status
 		// Blocked orders never run; surface the reason inline so the queue
 		// explains itself instead of prompting a second lookup.
 		if order.Status == "blocked" && order.BlockedReason != "" {
 			statusCell = "blocked: " + truncate(order.BlockedReason, 40)
 		}
-		fmt.Fprintf(stdout, "%-26s %-18s %-9s %-22s %s\n",
+		fmt.Fprintf(stdout, "%-26s %-18s %-9s %-22s %-18s %s\n",
 			truncate(order.ID, 26), truncate(order.AppID, 18),
-			order.Platform, truncate(statusCell, 22), order.Kind)
+			order.Platform, truncate(statusCell, 22), truncate(order.Kind, 18),
+			workOrderAge(order.CreatedAt))
 	}
-	fmt.Fprintf(stdout, "\n%d work order(s): %s\n", len(response.WorkOrders), summarizeCounts(byStatus))
+	fmt.Fprintf(stdout, "\n%d work order(s): %s\n", len(orders), summarizeCounts(byStatus))
+	if hidden > 0 {
+		fmt.Fprintf(stdout, "%d finished order(s) hidden — `preflight queue --all` to see them.\n", hidden)
+	}
 
 	// The queue alone cannot tell you a build is stuck for lack of a host, so
 	// pull runner state whenever anything is actually waiting.
@@ -483,6 +521,39 @@ func printQueueOnce(ctx buildOpsContext, client *http.Client, status, appID stri
 		}
 	}
 	return 0
+}
+
+// workOrderIsTerminal reports whether an order has finished, one way or another.
+func workOrderIsTerminal(status string) bool {
+	switch status {
+	case "succeeded", "failed", "cancelled":
+		return true
+	}
+	return false
+}
+
+// workOrderAge renders how long an order has existed, compactly. Returns "-"
+// for a timestamp the server did not send or that will not parse, rather than
+// inventing an age.
+func workOrderAge(createdAt string) string {
+	if strings.TrimSpace(createdAt) == "" {
+		return "-"
+	}
+	created, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return "-"
+	}
+	elapsed := time.Since(created)
+	switch {
+	case elapsed < time.Minute:
+		return "just now"
+	case elapsed < time.Hour:
+		return fmt.Sprintf("%dm", int(elapsed.Minutes()))
+	case elapsed < 24*time.Hour:
+		return fmt.Sprintf("%.1fh", elapsed.Hours())
+	default:
+		return fmt.Sprintf("%.1fd", elapsed.Hours()/24)
+	}
 }
 
 func summarizeCounts(counts map[string]int) string {
