@@ -4963,7 +4963,11 @@ func (writer *redactingCommandWriter) Write(chunk []byte) (int, error) {
 		}
 		line := writer.pending[:newlineIndex+1]
 		writer.pending = writer.pending[newlineIndex+1:]
-		if _, err := io.WriteString(writer.destination, redactSetupTranscriptText(line)); err != nil {
+		redacted := redactSetupTranscriptText(line)
+		// Every logged command funnels through here, so this one tee ships all
+		// of them to the server — see joblog.go for why that had never happened.
+		teeRedactedLogLine(redacted)
+		if _, err := io.WriteString(writer.destination, redacted); err != nil {
 			return 0, err
 		}
 	}
@@ -5585,6 +5589,13 @@ func handleRunnerClaim(
 	markRunnerJobActive(client, options, registration, job)
 	defer clearRunnerJobActive()
 
+	// Stream this job's command output to the server for as long as it runs.
+	// Deferred stop flushes the tail, which on a failing build is the part
+	// anyone actually wants.
+	if jobLogUploadEnabled(registration) {
+		defer startJobLogShipping(client, options, registration, job)()
+	}
+
 	switch job.Kind {
 	case "runner.capabilities.probe":
 		if err := completeCapabilityProbe(client, options, registration, job, capabilities); err != nil {
@@ -5698,6 +5709,7 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 		"runnerContractVersion": contractVersion,
 		"runnerJobStream":       true,
 		"runnerJobHeartbeat":    true,
+		"runnerJobLogs":         true,
 		"runnerArtifactUpload":  true,
 	}
 }

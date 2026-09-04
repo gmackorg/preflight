@@ -5732,6 +5732,13 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. That is not what this test asserts, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -6598,6 +6605,13 @@ exit 0
 	t.Setenv("PREFLIGHT_LAN_HOST", "192.168.4.10")
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. That is not what this test asserts, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -9985,6 +9999,13 @@ sleep 1
 	metroStartedAt := time.Now()
 	var startedAt time.Time
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. That is not what this test asserts, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -10232,6 +10253,13 @@ sleep 1
 
 	var startedAt time.Time
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. That is not what this test asserts, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -11305,6 +11333,13 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. That is not what this test asserts, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -11613,6 +11648,13 @@ exit 42
 	var calls []string
 	completedFailed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. That is not what this test asserts, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -12056,8 +12098,25 @@ exit 42
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var calls []string
+	var logMu sync.Mutex
+	var shippedLogs string
 	completedFailed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams this job's command output here while it runs. The
+		// server has had this endpoint (with redaction, a byte budget and a read
+		// API) for a long time and the runner never called it — across 6,788
+		// production jobs the fleet had stored zero bytes — so the assertion at
+		// the end of this test is what keeps the producer wired up.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			chunk, _ := body["chunk"].(string)
+			logMu.Lock()
+			shippedLogs += chunk
+			logMu.Unlock()
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -12135,6 +12194,15 @@ exit 42
 	}
 	if !completedFailed {
 		t.Fatalf("expected runner to complete failed Maestro job, got calls %v", calls)
+	}
+
+	// The failing command's own output has to reach the server, or "why did
+	// this build fail?" is only answerable by sshing to the machine that ran it.
+	logMu.Lock()
+	shipped := shippedLogs
+	logMu.Unlock()
+	if !strings.Contains(shipped, "maestro failed") {
+		t.Fatalf("expected the failing command's output to be shipped to /logs, got %q", shipped)
 	}
 }
 
