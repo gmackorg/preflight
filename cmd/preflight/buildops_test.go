@@ -48,3 +48,37 @@ func TestWorkOrderAgeScalesWithElapsedTime(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeBuildProviderPreferenceMapsShortNames(t *testing.T) {
+	// `--provider cloud` used to reach the API verbatim, where
+	// decideBuildProvider recognised only local_first/cloud_only/local_only and
+	// defaulted everything else to local_first. The order came back
+	// buildProvider=local_runner, reason=local_runner_ready — a cloud build that
+	// silently was not one. Observed 2026-09-04 on a store build for bob.
+	for input, want := range map[string]string{
+		"":            "",
+		"local":       "local_first",
+		"cloud":       "cloud_only",
+		"local_first": "local_first",
+		"cloud_only":  "cloud_only",
+		"local_only":  "local_only",
+	} {
+		got, ok := normalizeBuildProviderPreference(input)
+		if !ok {
+			t.Fatalf("normalizeBuildProviderPreference(%q) rejected a valid value", input)
+		}
+		if got != want {
+			t.Fatalf("normalizeBuildProviderPreference(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestNormalizeBuildProviderPreferenceRejectsUnknownNames(t *testing.T) {
+	// Refusing beats defaulting: a typo that silently builds locally costs a
+	// full build cycle before anyone notices the provider was wrong.
+	for _, input := range []string{"cloud-only", "eas", "eas_cloud", "remote", "CLOUD"} {
+		if _, ok := normalizeBuildProviderPreference(input); ok {
+			t.Fatalf("normalizeBuildProviderPreference(%q) should have been rejected", input)
+		}
+	}
+}
