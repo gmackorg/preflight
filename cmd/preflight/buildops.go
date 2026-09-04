@@ -170,6 +170,17 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		fmt.Fprintf(stderr, "unknown --kind %q; expected one of: %s\n", kind, strings.Join(workOrderKinds, ", "))
 		return 2
 	}
+	// The server's decideBuildProvider only recognises local_first, cloud_only
+	// and local_only; anything else falls through to the local_first default.
+	// The help text advertised "local/cloud", so `--provider cloud` was accepted,
+	// silently ignored, and the order still went to a local runner with reason
+	// local_runner_ready — a cloud build that quietly was not one.
+	normalized, ok := normalizeBuildProviderPreference(preference)
+	if !ok {
+		fmt.Fprintf(stderr, "unknown --provider %q; expected one of: local, cloud, local_first, cloud_only, local_only\n", preference)
+		return 2
+	}
+	preference = normalized
 	if platform != "ios" && platform != "android" {
 		fmt.Fprintf(stderr, "--platform must be ios or android, got %q\n", platform)
 		return 2
@@ -369,7 +380,7 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --kind <kind>          default build; one of:")
 	fmt.Fprintf(w, "                         %s\n", strings.Join(workOrderKinds, ", "))
 	fmt.Fprintln(w, "  --priority-class <c>   background|normal|… default normal")
-	fmt.Fprintln(w, "  --provider <p>         build provider preference (local/cloud)")
+	fmt.Fprintln(w, "  --provider <p>         build provider preference: local (= local_first),\n                         cloud (= cloud_only), or local_first|cloud_only|local_only")
 	fmt.Fprintln(w, "  --idempotency-key <k>  reuse an existing order instead of duplicating")
 	fmt.Fprintln(w, "  --app-dir <dir>        the Expo app package (default \".\"); its workspace")
 	fmt.Fprintln(w, "                         root is what the runner matches jobs against")
@@ -895,4 +906,24 @@ func commitIsOnRemote(sha string) bool {
 		return true
 	}
 	return strings.TrimSpace(string(out)) != ""
+}
+
+// normalizeBuildProviderPreference maps the short provider names the CLI
+// advertises onto the values the API actually understands. The API silently
+// defaults anything unrecognised to local_first, so an unmapped name produces a
+// local build that the caller believes is a cloud build; returning ok=false lets
+// the caller refuse instead.
+func normalizeBuildProviderPreference(preference string) (string, bool) {
+	switch strings.TrimSpace(preference) {
+	case "":
+		return "", true
+	case "local":
+		return "local_first", true
+	case "cloud":
+		return "cloud_only", true
+	case "local_first", "cloud_only", "local_only":
+		return strings.TrimSpace(preference), true
+	default:
+		return "", false
+	}
 }
