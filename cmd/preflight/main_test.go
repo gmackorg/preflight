@@ -68,6 +68,13 @@ func TestCapabilitiesProbePrintsSharedContractFixture(t *testing.T) {
 	fixture := readCapabilitiesFixture(t)
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/api/preflight/v1/capabilities" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -101,6 +108,13 @@ func TestLoginStoresTokenInCLIConfigAndProveAppUsesSavedAuth(t *testing.T) {
 	var workflowRequest map[string]any
 	var sawWorkflow bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer user_token_123" {
 			t.Fatalf("expected saved Preflight auth token, got %q for %s %s", r.Header.Get("Authorization"), r.Method, r.URL.Path)
 		}
@@ -175,6 +189,13 @@ func TestProveAppRequiresAuthBeforeRunnerCapacityOrWorkflowMutation(t *testing.T
 
 	mutated := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
@@ -217,6 +238,13 @@ func TestConfigBindWorkspacePersistsWorkspaceForAppPath(t *testing.T) {
 	var capacityWorkspaceID string
 	var workflowRequest map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer user_token_456" {
 			t.Fatalf("expected Preflight auth token, got %q for %s %s", r.Header.Get("Authorization"), r.Method, r.URL.Path)
 		}
@@ -303,6 +331,13 @@ func TestProveAppDoesNotUseSavedWorkspaceForDifferentExplicitAPIURL(t *testing.T
 	var capacityWorkspaceID string
 	var workflowRequest map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer explicit_api_token" {
 			t.Fatalf("expected explicit Preflight auth token, got %q for %s %s", r.Header.Get("Authorization"), r.Method, r.URL.Path)
 		}
@@ -351,6 +386,13 @@ func TestCredentialsCreateReadsSecretFromEnvAndDoesNotPrintValue(t *testing.T) {
 	var requestBody map[string]any
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/secret-refs" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
 		}
@@ -411,6 +453,13 @@ func TestManagementCommandsUseSavedPreflightLoginConfig(t *testing.T) {
 
 	var workspaces []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer management_token_123" {
 			t.Fatalf("expected saved Preflight auth token, got %q for %s %s", r.Header.Get("Authorization"), r.Method, r.URL.Path)
 		}
@@ -493,6 +542,13 @@ func TestProvidersUpsertAndListUsePreflightAPI(t *testing.T) {
 	var calls []string
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -586,6 +642,13 @@ func TestOAuthClientsUpsertAndListUsePreflightAPI(t *testing.T) {
 	var upsertBody map[string]any
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -685,6 +748,13 @@ func TestTargetsUpsertAndListUseStandalonePreflightAPI(t *testing.T) {
 	var upsertBody map[string]any
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		if r.Header.Get("Authorization") != "Bearer target_token" {
 			t.Fatalf("expected bearer token, got %q", r.Header.Get("Authorization"))
@@ -805,6 +875,13 @@ func TestProveAppStandaloneSimulatorPlanUsesDerivedAppAndPreflightAPI(t *testing
 
 	var planBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/apps/pfapp_forgegraph_mobile/simulator-proof-plans" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -900,6 +977,13 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 	var targetRunBodies []map[string]any
 	var artifactBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		if r.Header.Get("Authorization") != "Bearer standalone_run_token" {
 			t.Fatalf("expected bearer token, got %q", r.Header.Get("Authorization"))
@@ -1054,6 +1138,13 @@ printf 'mp4\n' > "$output_dir/video-1.mp4"
 	var targetRunBodies []map[string]any
 	var artifactBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/simulator-proof-plans":
@@ -1228,6 +1319,13 @@ sleep 30
 	var targetSessionBody map[string]any
 	var artifactBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer standalone_dev_token" {
 			t.Fatalf("expected bearer token, got %q", r.Header.Get("Authorization"))
 		}
@@ -1484,6 +1582,13 @@ esac
 	sessionPlanCalls := 0
 	resultPosted := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-build-plans":
@@ -1644,6 +1749,13 @@ sleep 30
 	var sessionPlanBody map[string]any
 	var artifactBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-build-plans":
@@ -1781,6 +1893,13 @@ func TestProveAppStandaloneDevelopmentPlanUsesDerivedEASProfile(t *testing.T) {
 	var iosPlanBody map[string]any
 	var androidPlanBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/apps/pfapp_forgegraph_mobile/development-build-plans" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
@@ -1887,6 +2006,13 @@ func TestOAuthClientsUseSavedPreflightLoginConfig(t *testing.T) {
 	var configureBody map[string]any
 	var listWorkspaceID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer oauth_token_123" {
 			t.Fatalf("expected saved Preflight auth token, got %q for %s %s", r.Header.Get("Authorization"), r.Method, r.URL.Path)
 		}
@@ -1964,6 +2090,13 @@ func TestOAuthClientsDescribePrintsExternalClientDetail(t *testing.T) {
 	t.Setenv("PREFLIGHT_WORKSPACE_ID", "")
 	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/preflight/v1/oauth-clients" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -2005,6 +2138,13 @@ func TestOAuthClientsDescribeUnknownIDFails(t *testing.T) {
 	t.Setenv("PREFLIGHT_TOKEN", "token-123")
 	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"oauthClients":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_oauth_missing"}}`))
 	}))
@@ -2030,6 +2170,13 @@ func TestOAuthClientsListJSONPrintsFullRecords(t *testing.T) {
 	t.Setenv("PREFLIGHT_TOKEN", "token-123")
 	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"oauthClients":[{"id":"pfoauth_playtrek","appId":"playtrek","provider":"apple_oauth","clientKind":"apple_services_id","displayName":"PlayTrek","status":"configured","externalClientId":"com.gmacko.playtrek.signin","secretReferenceIds":["pfsecret_apple_key"]}]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_oauth_json"}}`))
 	}))
@@ -2058,6 +2205,13 @@ func TestOAuthClientsListJSONPrintsFullRecords(t *testing.T) {
 func TestOAuthClientsConfigureUsesPreflightAPI(t *testing.T) {
 	var configureBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/oauth-clients/configure" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -2148,6 +2302,13 @@ func TestOAuthClientsConfigureDerivesGoogleAndroidAppDefaultsFromExpoApp(t *test
 
 	var configureBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/oauth-clients/configure" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -2205,6 +2366,13 @@ func TestOAuthClientsConfigureDerivesAppleIOSAppDefaultsFromExpoApp(t *testing.T
 
 	var configureBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/oauth-clients/configure" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -2258,6 +2426,13 @@ func TestOAuthClientsConfigureAllRequiredDerivesExpoClients(t *testing.T) {
 
 	var configureBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/preflight/v1/oauth-clients/configure" {
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -2380,6 +2555,13 @@ func TestProvidersVerifyAppStoreConnectCallsAPIAndRecordsReadiness(t *testing.T)
 	var credentialFlowBody map[string]any
 	var sawASCRequest bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
@@ -2509,6 +2691,13 @@ printf 'Pixel_6_API_35\n'
 	var readinessBodies []map[string]any
 	var credentialFlowBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/provider-accounts":
@@ -2674,6 +2863,13 @@ esac
 	var readinessBodies []map[string]any
 	var credentialFlowBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/provider-accounts":
@@ -2884,6 +3080,13 @@ esac
 	var credentialFlowBodies []map[string]any
 	var sawBundleIDs bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/bundleIds":
@@ -3103,6 +3306,13 @@ func TestProvidersVerifyGooglePlayUsesServiceAccountAndRecordsReadiness(t *testi
 
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/token":
@@ -3252,6 +3462,13 @@ func TestProvidersVerifySentryUsesBearerTokenAndRecordsSourceMapReadiness(t *tes
 	var credentialFlowBody map[string]any
 	var sawProjectRequest bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/0/projects/gmacko/forgegraph-mobile/":
@@ -3362,6 +3579,13 @@ func TestProvidersVerifySentryUsesBearerTokenAndRecordsSourceMapReadiness(t *tes
 func TestProviderReadinessRecordAndListUseAppScopedAPI(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -3467,6 +3691,13 @@ func TestProviderReadinessRecordAndListUseAppScopedAPI(t *testing.T) {
 func TestProviderReadinessPlanUsesAppScopedSetupPlanAPI(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -3523,6 +3754,13 @@ func TestProviderReadinessPlanUsesAppScopedSetupPlanAPI(t *testing.T) {
 func TestCredentialFlowsListUsesProviderAccountScopedAPI(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -3579,6 +3817,13 @@ func TestCredentialFlowsListUsesProviderAccountScopedAPI(t *testing.T) {
 func TestCredentialFlowsCreateUsesProviderAccountScopedAPI(t *testing.T) {
 	var credentialFlowBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/provider-accounts/pfprov_google_oauth/credential-flows":
@@ -3770,6 +4015,13 @@ func TestSetupUsesSavedPreflightLoginConfig(t *testing.T) {
 	t.Setenv("PREFLIGHT_CONFIG_PATH", configPath)
 	workspaceRoot := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer setup_token_123" {
 			http.Error(w, "missing auth", http.StatusUnauthorized)
 			return
@@ -3831,6 +4083,13 @@ exit 0
 	var transcriptID string
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -3933,6 +4192,13 @@ exit 0
 
 	var changedFiles []any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
@@ -4012,6 +4278,13 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
@@ -4076,6 +4349,13 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/preflight/v1/workflows/pfw_setup_stream":
@@ -4231,6 +4511,13 @@ func TestProveAppDiscoversExpoPackageAndCreatesWorkflow(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -4281,6 +4568,13 @@ func TestProveAppProbesCapabilitiesBeforeCreatingWorkflow(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
@@ -4319,6 +4613,13 @@ func TestProveAppRequiresRunnerCapacityBeforeCreatingWorkflow(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	createdWorkflow := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "GET /api/preflight/v1/capabilities":
@@ -4373,6 +4674,13 @@ func TestProveAppCanExplicitlyWaitForRunnerCapacity(t *testing.T) {
 	var calls []string
 	var workflowRequest map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
@@ -4421,6 +4729,13 @@ func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -4488,6 +4803,13 @@ func TestProveAppSendsSecretReferenceIdsForDevelopmentLane(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -4778,6 +5100,13 @@ func TestProveAppSourceBindingRecordsDirtyWorkspaceAndChangedSetupFiles(t *testi
 
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -4875,6 +5204,13 @@ func TestProveAppSourceBindingSerializesEmptyChangedSetupFilesWhenDirtyOutsideSe
 
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -4978,6 +5314,13 @@ exit 42
 
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -5107,6 +5450,13 @@ exit 42
 
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if serveCapabilitiesFixture(t, w, r) {
 			return
 		}
@@ -5253,6 +5603,13 @@ func TestProveAppWatchPollsWorkflowUntilTerminal(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -5318,6 +5675,13 @@ func TestProveAppWatchPrefersSSEWorkflowEvents(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 
 		switch r.Method + " " + r.URL.Path {
@@ -5395,6 +5759,13 @@ func TestProveAppWatchUsesPreflightToken(t *testing.T) {
 	t.Setenv("PREFLIGHT_TOKEN", "watch_token_123")
 	var missingAuth []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer watch_token_123" {
 			missingAuth = append(missingAuth, r.Method+" "+r.URL.Path)
 			http.Error(w, "missing auth", http.StatusUnauthorized)
@@ -5449,6 +5820,13 @@ func TestRunnerOnceUsesSavedPreflightLoginForRegistration(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	var registeredWorkspaceID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// `runner once` probes for a fleet signing identity on darwin; no cert is
 		// configured for this fake, which is the 404 it treats as "nothing to install".
@@ -5573,6 +5951,13 @@ func TestRunnerOnceCleansExpiredLocalPreflightArtifactDirectories(t *testing.T) 
 	// must opt into the recursive walk explicitly.
 	t.Setenv("PREFLIGHT_RECURSIVE_PROCESS_HANDLE_CLEANUP", "1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// `runner once` probes for a fleet signing identity on darwin; no cert is
 		// configured for this fake, which is the 404 it treats as "nothing to
@@ -5773,6 +6158,13 @@ exit 0
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		recordCall(r)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -6118,6 +6510,13 @@ exit 1
 	t.Setenv("PREFLIGHT_LAN_HOST", "192.168.4.10")
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -6184,6 +6583,13 @@ exit 1
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		recordCall(r)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -6678,6 +7084,13 @@ exit 0
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		recordCall(r)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -7059,6 +7472,13 @@ func TestProveAppRejectsNonExpoPackageBeforeCallingAPI(t *testing.T) {
 	}
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		called = true
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -7082,6 +7502,13 @@ func TestProveAppRejectsNonExpoPackageBeforeCallingAPI(t *testing.T) {
 func TestClaimRunnerJobPrefersStreamBeforeClaimingLease(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 
 		switch r.Method + " " + r.URL.Path {
@@ -7140,6 +7567,13 @@ func TestClaimRunnerJobPrefersStreamBeforeClaimingLease(t *testing.T) {
 func TestClaimRunnerJobFallsBackToClaimWhenStreamUnavailable(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 
 		switch r.Method + " " + r.URL.Path {
@@ -7187,6 +7621,13 @@ func TestClaimRunnerJobFallsBackToClaimWhenStreamUnavailable(t *testing.T) {
 func TestRunnerJobCancellationCheckHeartbeatsRunningJobLease(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -7242,6 +7683,13 @@ func TestDeviceDiscoveryHeartbeatsJobWhileDiscoveryIsInProgress(t *testing.T) {
 	heartbeatSeen := make(chan struct{})
 	var heartbeatOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_discover/heartbeat":
@@ -7325,6 +7773,13 @@ func TestUploadMaestroArtifactsPostsArtifactMetadata(t *testing.T) {
 	var uploads []map[string]any
 	var blobPuts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		// The upload is two steps: POST the metadata, then PUT the bytes to the
 		// blob URL the first response names.
 		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/blob") {
@@ -7436,6 +7891,13 @@ exit 0
 
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/complete":
@@ -7562,6 +8024,13 @@ exit 0
 
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/complete":
@@ -7792,6 +8261,13 @@ exit 1
 	t.Setenv("PREFLIGHT_LAN_HOST", "192.168.4.10")
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -7801,6 +8277,13 @@ exit 1
 
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -8042,6 +8525,13 @@ exit 1
 	t.Setenv("PREFLIGHT_LAN_HOST", "192.168.4.10")
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -8051,6 +8541,13 @@ exit 1
 
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -8169,6 +8666,13 @@ exit 1
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -8185,6 +8689,13 @@ exit 1
 	expectedQRURL := "https://qr.expo.dev/development-client?appScheme=forgegraph&url=https%3A%2F%2Fpreflight-tunnel.ngrok-free.app"
 	completed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method+" "+r.URL.Path == "GET /api/preflight/v1/runners/pfrun_tunnel/jobs/pfjob_tunnel" {
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_tunnel","kind":"dev_session.start","status":"running","runnerId":"pfrun_tunnel"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read_tunnel"}}`))
@@ -8282,6 +8793,13 @@ exit 1
 	t.Setenv("PREFLIGHT_LAN_HOST", "192.168.4.10")
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -8292,6 +8810,13 @@ exit 1
 	var artifactUploads []map[string]any
 	var completedDevSession map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/preflight/v1/runners/pfrun_qr/jobs/pfjob_devsession":
@@ -8554,6 +9079,13 @@ printf '{"id":"build_ios_dev_1","artifacts":{"buildUrl":"https://expo.dev/runtim
 	revealCalled := false
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/secrets/pfsec_expo/reveal":
@@ -8666,6 +9198,13 @@ func TestEASBuildRefusesProductionProfileOutsideCI(t *testing.T) {
 
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/complete":
@@ -8746,6 +9285,13 @@ printf '{"id":"build_ios_prod","artifacts":{"buildUrl":"https://expo.dev/artifac
 
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/artifacts":
@@ -8823,6 +9369,13 @@ printf '{"id":"build_ios_dev_artifacts","artifacts":{"buildUrl":"https://expo.de
 	var artifactBodies []map[string]any
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_build/secrets/pfsec_expo/reveal":
@@ -8935,6 +9488,13 @@ exit 55
 
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/preflight/v1/runners/pfrun_cli/jobs/pfjob_readiness/complete":
@@ -9049,6 +9609,13 @@ func TestRunnerClaimDecodesRequiredSecretReferencesWithoutValues(t *testing.T) {
 func TestDevSessionStartFailsWhenMetroPortBelongsToAnotherProject(t *testing.T) {
 	appDir := writeExpoFixture(t)
 	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		_, _ = w.Write([]byte("packager-status:running"))
 	}))
 	t.Cleanup(statusServer.Close)
@@ -9065,6 +9632,13 @@ exit 0
 
 	var completed map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path == "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_read"}}`))
@@ -9229,6 +9803,13 @@ exit 42
 	t.Setenv("ADB_LOG", adbLog)
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -9238,6 +9819,13 @@ exit 42
 
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -9447,6 +10035,13 @@ exit 42
 	var calls []string
 	var openAttempt map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -9571,6 +10166,13 @@ exit 42
 
 	var openAttempt map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		// `runner once` probes for a fleet signing identity on darwin. No cert is
@@ -9670,6 +10272,13 @@ printf '{"id":"build_ios_dev_1","platform":"ios","profile":"development-device",
 	completedCancelled := false
 	var startedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -9787,6 +10396,13 @@ exit 1
 	var calls []string
 	completedSetupRequired := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -9905,6 +10521,13 @@ exit 42
 	var calls []string
 	completedFailed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -9987,6 +10610,7 @@ func TestRunnerOnceCancelsDevSessionStartWhileWaitingForMetro(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeExpoConfigIdentity(t, appDir)
+	writeAppPackageJSON(t, appDir)
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
 sleep 1
@@ -10021,6 +10645,13 @@ sleep 1
 	var calls []string
 	completedCancelled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -10145,6 +10776,13 @@ func TestRunnerOnceStopsPreflightOwnedDevSession(t *testing.T) {
 
 	completedStop := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// `runner once` probes for a fleet signing identity on darwin. No cert is
 		// configured for these fakes, which is the 404 the runner treats as the
@@ -10241,6 +10879,7 @@ func TestRunnerOnceReportsDevSessionStartTimeoutAsFailedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeExpoConfigIdentity(t, appDir)
+	writeAppPackageJSON(t, appDir)
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
 sleep 1
@@ -10271,6 +10910,13 @@ sleep 1
 	var calls []string
 	completedFailed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -10400,6 +11046,13 @@ exit 0
 	var calls []string
 	completedFailed := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -10498,6 +11151,13 @@ exit 42
 
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -10673,6 +11333,13 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.URL.Path != "/status" {
 			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
 		}
@@ -10685,6 +11352,13 @@ exit 0
 	var simulatorOpenResult map[string]any
 	var maestroResult map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -11001,6 +11675,13 @@ exit 0
 	var artifactBodies []map[string]any
 	var completeResult map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -11349,6 +12030,13 @@ exit 0
 
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -11845,6 +12533,13 @@ exit 0
 	completedCancelled := false
 	var startedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -11973,6 +12668,13 @@ printf 'maestro finished\n'
 	completedCancelled := false
 	var startedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -12644,6 +13346,13 @@ printf 'forgegraph-bot\n'
 func TestPreflightOwnedMetroRequiresLivePid(t *testing.T) {
 	appDir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		_, _ = w.Write([]byte("packager-status:running"))
 	}))
 	t.Cleanup(server.Close)
@@ -12675,6 +13384,13 @@ func TestPreflightOwnedMetroRemovesStalePidHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		_, _ = w.Write([]byte("packager-status:running"))
 	}))
 	t.Cleanup(server.Close)
@@ -12766,6 +13482,17 @@ func writeExpoFixture(t *testing.T) string {
 	}
 
 	return appDir
+}
+
+// writeAppPackageJSON makes a fixture directory look like an app. The runner
+// refuses a directory with no package.json (it is how a mis-resolved workspace
+// root used to present as a confusing mid-build failure), so a test that
+// exercises anything past that check needs one.
+func writeAppPackageJSON(t *testing.T, appDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(appDir, "package.json"), []byte(`{"name":"@gmacko/expo","version":"0.0.0"}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
 }
 
 func writeExpoConfigIdentity(t *testing.T, appDir string) {
@@ -13134,6 +13861,13 @@ func TestExpoTunnelDevServerURLFromLogContentRejectsNgrokStatusPage(t *testing.T
 
 func TestExpoTunnelDevServerURLFromManifestReadsHostURI(t *testing.T) {
 	manifestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The runner streams command output to /logs for whatever job is in
+		// flight. Not what these tests assert, but it must not read as an
+		// unexpected route either.
+		if strings.HasSuffix(r.URL.Path, "/logs") {
+			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+			return
+		}
 		if r.Header.Get("expo-platform") != "ios" {
 			t.Errorf("expected expo-platform header, got %q", r.Header.Get("expo-platform"))
 		}
