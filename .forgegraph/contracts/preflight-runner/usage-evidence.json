@@ -1,0 +1,554 @@
+{
+  "version": 1,
+  "app": "preflight-runner",
+  "sourceRevision": "2997d2f896b5cb6a8924a061e526a2ae1f917e48",
+  "manifestSha256": "9c909a26ed00d648d89ef1887bf07504d294318b9917befd10bc639470582f8c",
+  "runtime": {
+    "status": "unobserved",
+    "reason": "No authenticated operation-level runtime observations supplied. No traffic does not prove absence."
+  },
+  "coverage": "partial",
+  "groups": [
+    {
+      "index": 0,
+      "service": "github",
+      "operations": [
+        "GET /repos/{owner}/{repo}/releases/latest"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/update.go",
+          "line": 168,
+          "note": "Release lookup",
+          "status": "pinned",
+          "sha256": "2406136828da416d1daca9a99ed68b8ca67b7f53806ab4ca57c96a8ceb2a03cd"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 1,
+      "service": "preflight-app",
+      "operations": [
+        "registerManualTarget",
+        "listManualTargets",
+        "postApiPreflightV1SecretRefs",
+        "getApiPreflightV1SecretRefs",
+        "postApiPreflightV1ProviderAccounts",
+        "getApiPreflightV1ProviderAccounts",
+        "postApiPreflightV1AppsIdProviderReadiness",
+        "getApiPreflightV1AppsIdProviderReadiness",
+        "getApiPreflightV1AppsIdProviderSetupPlan",
+        "postApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows",
+        "getApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows",
+        "postApiPreflightV1OauthClientsConfigure",
+        "postApiPreflightV1OauthClients",
+        "getApiPreflightV1OauthClients",
+        "postApiPreflightV1SetupTranscripts",
+        "postApiPreflightV1WorkflowsWorkflowIdResumeSetup",
+        "getApiPreflightV1RunnersRunnerIdSigningCert",
+        "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdLock",
+        "postApiPreflightV1RunnersRunnerIdTargetsAndroidEmulators",
+        "postApiPreflightV1RunnersRunnerIdTargetsIosDevices",
+        "postApiPreflightV1RunnersRunnerIdTargetsIosSimulators",
+        "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdInstallations",
+        "postApiPreflightV1AppsIdSimulatorProofPlans",
+        "postApiPreflightV1AppsIdDevelopmentBuildPlans",
+        "postApiPreflightV1AppsIdDevelopmentBuildResults",
+        "postApiPreflightV1AppsIdDevelopmentSessionPlans",
+        "postApiPreflightV1AppsIdRuntimeArtifacts",
+        "postApiPreflightV1AppsIdDevSessions",
+        "postApiPreflightV1AppsIdTargetSessions",
+        "postApiPreflightV1AppsIdTargetRuns",
+        "getApiPreflightV1RunnersCapacity",
+        "postApiPreflightV1WorkOrders",
+        "getApiPreflightV1WorkOrdersId",
+        "getApiPreflightV1WorkOrders",
+        "getApiPreflightV1Nodes",
+        "getApiPreflightV1Health",
+        "postApiPreflightV1NodesNodeIdRetire",
+        "postApiPreflightV1TestflightEnroll",
+        "postApiPreflightV1AppsIdStoreListingPublish",
+        "getApiPreflightV1AppsIdScreenshotRecipe",
+        "getApiPreflightV1AppsIdErrorsAnalysisQueue",
+        "postApiPreflightV1AppsIdErrorsGroupIdAnalysis",
+        "postApiPreflightV1AppsIdSessionHealth",
+        "postApiPreflightV1AppsIdPerformance",
+        "postApiPreflightV1AppsIdErrors",
+        "postApiPreflightV1CrashesAlertsEvaluate",
+        "postApiPreflightV1AppsIdReviewNotes",
+        "postApiPreflightV1AppsIdDependencies",
+        "postApiPreflightV1AppsIdBuildHealth",
+        "getApiPreflightV1UptimeCheckQueue",
+        "postApiPreflightV1UptimeIdResult",
+        "postApiPreflightV1RunnersRegister",
+        "postApiPreflightV1RunnersRunnerIdHeartbeat",
+        "postApiPreflightV1RunnersRunnerIdReconcile",
+        "postApiPreflightV1RunnersRunnerIdJobsClaim",
+        "postApiPreflightV1RunnersRunnerIdJobsJobIdArtifacts",
+        "postApiPreflightV1RunnersRunnerIdJobsJobIdComplete",
+        "postApiPreflightV1RunnersRunnerIdJobsJobIdSecretsSecretRefIdReveal",
+        "postApiPreflightV1RunnersRunnerIdJobsJobIdHeartbeat",
+        "getApiPreflightV1RunnersRunnerIdJobsJobId",
+        "getApiPreflightV1WorkflowsWorkflowId",
+        "getApiPreflightV1ReleaseStatus",
+        "getApiPreflightV1AppsIdReleaseStatus",
+        "postApiPreflightV1AppsIdSubmitForReview",
+        "putApiPreflightV1AppsIdReleaseChecklist",
+        "getApiPreflightV1AppsIdTestflightBuilds"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13854,
+          "note": "JSON helper retry policy",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13895,
+          "note": "Per-attempt timeout",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13784,
+          "note": "runnerEndpoint concatenates without rewriting /api/v1 path",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 2,
+      "service": "preflight-app",
+      "operations": [
+        "postApiPreflightV1CliAuthDeviceStart",
+        "postApiPreflightV1AppsIdStoreListingScreenshots",
+        "putApiPreflightV1AppsIdScreenshotRecipe",
+        "putApiPreflightV1RunnersRunnerIdArtifactsArtifactIdBlob",
+        "postApiPreflightV1WorkflowsProveApp"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13854,
+          "note": "JSON helper retry policy",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13895,
+          "note": "Per-attempt timeout",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13784,
+          "note": "runnerEndpoint concatenates without rewriting /api/v1 path",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 3,
+      "service": "preflight-app",
+      "operations": [
+        "postApiPreflightV1CliAuthDeviceToken"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13854,
+          "note": "JSON helper retry policy",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13895,
+          "note": "Per-attempt timeout",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13784,
+          "note": "runnerEndpoint concatenates without rewriting /api/v1 path",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 4,
+      "service": "preflight-app",
+      "operations": [
+        "getApiPreflightV1RunnersRunnerIdJobsStream"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13854,
+          "note": "JSON helper retry policy",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13895,
+          "note": "Per-attempt timeout",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13784,
+          "note": "runnerEndpoint concatenates without rewriting /api/v1 path",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 5,
+      "service": "preflight-app",
+      "operations": [
+        "getApiPreflightV1WorkflowsWorkflowIdEvents"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13854,
+          "note": "JSON helper retry policy",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13895,
+          "note": "Per-attempt timeout",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13784,
+          "note": "runnerEndpoint concatenates without rewriting /api/v1 path",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 6,
+      "service": "preflight-app",
+      "operations": [
+        "getApiPreflightV1Capabilities"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13854,
+          "note": "JSON helper retry policy",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13895,
+          "note": "Per-attempt timeout",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 13784,
+          "note": "runnerEndpoint concatenates without rewriting /api/v1 path",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 7,
+      "service": "app-store-connect",
+      "operations": [
+        "GET /v1/apps",
+        "GET /v1/bundleIds",
+        "GET /v1/certificates",
+        "POST /v1/certificates"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 1350,
+          "note": "Provider verification invokes apps probe",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2536,
+          "note": "GETapps",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2583,
+          "note": "GETbundleIds",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2984,
+          "note": "Certificate list",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 3054,
+          "note": "Certificate create",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 8,
+      "service": "google-play",
+      "operations": [
+        "POST /androidpublisher/v3/applications/{packageName}/edits",
+        "GET /androidpublisher/v3/applications/{packageName}/edits/{editId}/tracks",
+        "DELETE /androidpublisher/v3/applications/{packageName}/edits/{editId}"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2388,
+          "note": "Probe invokes temporary-edit lifecycle",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2442,
+          "note": "Create edit",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2465,
+          "note": "Tracks query",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2494,
+          "note": "Delete edit",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 9,
+      "service": "google-oauth",
+      "operations": [
+        "POST {serviceAccount.token_uri}"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2296,
+          "note": "Service-account token exchange",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 10,
+      "service": "sentry",
+      "operations": [
+        "GET /api/0/projects/{orgSlug}/{projectSlug}/"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 1688,
+          "note": "Verification calls probe",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        },
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 2705,
+          "note": "Exact probeendpoint",
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 11,
+      "service": "sentry",
+      "operations": [
+        "GET /api/0/organizations/{orgSlug}/projects/",
+        "GET /api/0/projects/{orgSlug}/{projectSlug}/issues/",
+        "GET /api/0/issues/{issueId}/events/latest/",
+        "GET /api/0/organizations/{orgSlug}/sessions/",
+        "GET /api/0/organizations/{orgSlug}/events/"
+      ],
+      "activation": "unverified",
+      "conditions": [],
+      "sources": [
+        {
+          "path": "cmd/preflight/sentry_sync.go",
+          "line": 788,
+          "note": "sentryGet throttle/retry",
+          "status": "pinned",
+          "sha256": "4e7b1e2501e860e748be95d3d832380de056cd17dc6e8c9d47b20aaef2eb4317"
+        },
+        {
+          "path": "cmd/preflight/sentry_sync.go",
+          "line": 829,
+          "note": "Projects",
+          "status": "pinned",
+          "sha256": "4e7b1e2501e860e748be95d3d832380de056cd17dc6e8c9d47b20aaef2eb4317"
+        },
+        {
+          "path": "cmd/preflight/sentry_sync.go",
+          "line": 843,
+          "note": "Issues",
+          "status": "pinned",
+          "sha256": "4e7b1e2501e860e748be95d3d832380de056cd17dc6e8c9d47b20aaef2eb4317"
+        },
+        {
+          "path": "cmd/preflight/sentry_sync.go",
+          "line": 857,
+          "note": "Latestevent",
+          "status": "pinned",
+          "sha256": "4e7b1e2501e860e748be95d3d832380de056cd17dc6e8c9d47b20aaef2eb4317"
+        },
+        {
+          "path": "cmd/preflight/sentry_sync.go",
+          "line": 885,
+          "note": "Sessions",
+          "status": "pinned",
+          "sha256": "4e7b1e2501e860e748be95d3d832380de056cd17dc6e8c9d47b20aaef2eb4317"
+        },
+        {
+          "path": "cmd/preflight/sentry_sync.go",
+          "line": 942,
+          "note": "Performanceevents",
+          "status": "pinned",
+          "sha256": "4e7b1e2501e860e748be95d3d832380de056cd17dc6e8c9d47b20aaef2eb4317"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 12,
+      "service": "configured-uptime-target",
+      "operations": [
+        "configuredMonitorHttpProbe"
+      ],
+      "activation": "conditional",
+      "conditions": [
+        "Reviewed caller must be invoked with the configuration and credentials described in notes; production activation unverified."
+      ],
+      "sources": [
+        {
+          "path": "cmd/preflight/uptime.go",
+          "line": 50,
+          "status": "pinned",
+          "sha256": "549ee84c4bc6e66ee8a58e6dd587078395fb180de43d496b1979d3fceb009a96"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 13,
+      "service": "configured-screenshot-artifact",
+      "operations": [
+        "GET configuredScreenshotUrl"
+      ],
+      "activation": "conditional",
+      "conditions": [
+        "Reviewed caller must be invoked with the configuration and credentials described in notes; production activation unverified."
+      ],
+      "sources": [
+        {
+          "path": "cmd/preflight/main.go",
+          "line": 8578,
+          "status": "pinned",
+          "sha256": "412f811bbd9dd869c88611a9f3df70c4182570b627a54bbc1b710e7a63b7418f"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    },
+    {
+      "index": 14,
+      "service": "github-release-asset",
+      "operations": [
+        "GET configuredReleaseAssetUrl"
+      ],
+      "activation": "conditional",
+      "conditions": [
+        "Reviewed caller must be invoked with the configuration and credentials described in notes; production activation unverified."
+      ],
+      "sources": [
+        {
+          "path": "cmd/preflight/update.go",
+          "line": 241,
+          "status": "pinned",
+          "sha256": "2406136828da416d1daca9a99ed68b8ca67b7f53806ab4ca57c96a8ceb2a03cd"
+        }
+      ],
+      "interpretation": "File integrity and reviewer evidence only. Group evidence does not prove each operation is reachable; SDK identities may lack a wire-level contract."
+    }
+  ]
+}

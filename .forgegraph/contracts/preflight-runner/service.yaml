@@ -1,0 +1,5 @@
+apiVersion: forgegraph.dev/v1alpha1
+kind: Service
+service: preflight-runner
+coverage: partial
+provides: []

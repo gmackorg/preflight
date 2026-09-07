@@ -1,0 +1,3303 @@
+{
+  "policyVersion": "forgegraph.service-contracts/v1",
+  "services": [
+    {
+      "service": "preflight-runner",
+      "manifestPath": ".forgegraph/contracts/preflight-runner/service.yaml",
+      "provides": []
+    }
+  ],
+  "usages": [
+    {
+      "apiVersion": "forgegraph.dev/v1alpha1",
+      "service": "preflight-runner",
+      "coverage": "partial",
+      "kind": "ServiceUsage",
+      "uses": [
+        {
+          "service": "github",
+          "transport": "rest",
+          "notes": "Binary updater uses configurable PREFLIGHT_UPDATE_REPO and downloads release/checksum assets; build-time/user CLI execution, not deployment service dependency.\ncmd/preflight/update.go:168 — Release lookup",
+          "operations": [
+            "GET /repos/{owner}/{repo}/releases/latest"
+          ]
+        },
+        {
+          "service": "preflight-app",
+          "transport": "rest",
+          "notes": "20-second PER ATTEMPT deadline from PREFLIGHT_API_REQUEST_TIMEOUT override;4attempts total,network/5xx only;500/1000/2000ms exponential backoff.4xx immediate;success data envelope unwrapped. User or runner Bearer and workspace headers where workspace helper is used. Target origin PREFLIGHT_API_URL; provider operationIds unresolved.\ncmd/preflight/main.go:13854 — JSON helper retry policy\ncmd/preflight/main.go:13895 — Per-attempt timeout\ncmd/preflight/main.go:13784 — runnerEndpoint concatenates without rewriting /api/v1 path",
+          "operations": [
+            "registerManualTarget",
+            "listManualTargets",
+            "postApiPreflightV1SecretRefs",
+            "getApiPreflightV1SecretRefs",
+            "postApiPreflightV1ProviderAccounts",
+            "getApiPreflightV1ProviderAccounts",
+            "postApiPreflightV1AppsIdProviderReadiness",
+            "getApiPreflightV1AppsIdProviderReadiness",
+            "getApiPreflightV1AppsIdProviderSetupPlan",
+            "postApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows",
+            "getApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows",
+            "postApiPreflightV1OauthClientsConfigure",
+            "postApiPreflightV1OauthClients",
+            "getApiPreflightV1OauthClients",
+            "postApiPreflightV1SetupTranscripts",
+            "postApiPreflightV1WorkflowsWorkflowIdResumeSetup",
+            "getApiPreflightV1RunnersRunnerIdSigningCert",
+            "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdLock",
+            "postApiPreflightV1RunnersRunnerIdTargetsAndroidEmulators",
+            "postApiPreflightV1RunnersRunnerIdTargetsIosDevices",
+            "postApiPreflightV1RunnersRunnerIdTargetsIosSimulators",
+            "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdInstallations",
+            "postApiPreflightV1AppsIdSimulatorProofPlans",
+            "postApiPreflightV1AppsIdDevelopmentBuildPlans",
+            "postApiPreflightV1AppsIdDevelopmentBuildResults",
+            "postApiPreflightV1AppsIdDevelopmentSessionPlans",
+            "postApiPreflightV1AppsIdRuntimeArtifacts",
+            "postApiPreflightV1AppsIdDevSessions",
+            "postApiPreflightV1AppsIdTargetSessions",
+            "postApiPreflightV1AppsIdTargetRuns",
+            "getApiPreflightV1RunnersCapacity",
+            "postApiPreflightV1WorkOrders",
+            "getApiPreflightV1WorkOrdersId",
+            "getApiPreflightV1WorkOrders",
+            "getApiPreflightV1Nodes",
+            "getApiPreflightV1Health",
+            "postApiPreflightV1NodesNodeIdRetire",
+            "postApiPreflightV1TestflightEnroll",
+            "postApiPreflightV1AppsIdStoreListingPublish",
+            "getApiPreflightV1AppsIdScreenshotRecipe",
+            "getApiPreflightV1AppsIdErrorsAnalysisQueue",
+            "postApiPreflightV1AppsIdErrorsGroupIdAnalysis",
+            "postApiPreflightV1AppsIdSessionHealth",
+            "postApiPreflightV1AppsIdPerformance",
+            "postApiPreflightV1AppsIdErrors",
+            "postApiPreflightV1CrashesAlertsEvaluate",
+            "postApiPreflightV1AppsIdReviewNotes",
+            "postApiPreflightV1AppsIdDependencies",
+            "postApiPreflightV1AppsIdBuildHealth",
+            "getApiPreflightV1UptimeCheckQueue",
+            "postApiPreflightV1UptimeIdResult",
+            "postApiPreflightV1RunnersRegister",
+            "postApiPreflightV1RunnersRunnerIdHeartbeat",
+            "postApiPreflightV1RunnersRunnerIdReconcile",
+            "postApiPreflightV1RunnersRunnerIdJobsClaim",
+            "postApiPreflightV1RunnersRunnerIdJobsJobIdArtifacts",
+            "postApiPreflightV1RunnersRunnerIdJobsJobIdComplete",
+            "postApiPreflightV1RunnersRunnerIdJobsJobIdSecretsSecretRefIdReveal",
+            "postApiPreflightV1RunnersRunnerIdJobsJobIdHeartbeat",
+            "getApiPreflightV1RunnersRunnerIdJobsJobId",
+            "getApiPreflightV1WorkflowsWorkflowId",
+            "getApiPreflightV1ReleaseStatus",
+            "getApiPreflightV1AppsIdReleaseStatus",
+            "postApiPreflightV1AppsIdSubmitForReview",
+            "putApiPreflightV1AppsIdReleaseChecklist",
+            "getApiPreflightV1AppsIdTestflightBuilds"
+          ],
+          "client": {
+            "timeoutMs": 20000,
+            "retries": {
+              "maxAttempts": 4,
+              "backoff": "exponential"
+            }
+          }
+        },
+        {
+          "service": "preflight-app",
+          "transport": "rest",
+          "notes": "Raw client.Do path; main injects http.DefaultClient. No explicit deadline/retry at these callsites. Do not inherit JSON-helper defaults. Target origin PREFLIGHT_API_URL; provider operationIds unresolved.\ncmd/preflight/main.go:13854 — JSON helper retry policy\ncmd/preflight/main.go:13895 — Per-attempt timeout\ncmd/preflight/main.go:13784 — runnerEndpoint concatenates without rewriting /api/v1 path",
+          "operations": [
+            "postApiPreflightV1CliAuthDeviceStart",
+            "postApiPreflightV1AppsIdStoreListingScreenshots",
+            "putApiPreflightV1AppsIdScreenshotRecipe",
+            "putApiPreflightV1RunnersRunnerIdArtifactsArtifactIdBlob",
+            "postApiPreflightV1WorkflowsProveApp"
+          ]
+        },
+        {
+          "service": "preflight-app",
+          "transport": "rest",
+          "notes": "Device authorization poll interval default5s,expirydefault600s from serverresponse; raw request itself has no explicitdeadline. Poll retries are protocol behavior. Target origin PREFLIGHT_API_URL; provider operationIds unresolved.\ncmd/preflight/main.go:13854 — JSON helper retry policy\ncmd/preflight/main.go:13895 — Per-attempt timeout\ncmd/preflight/main.go:13784 — runnerEndpoint concatenates without rewriting /api/v1 path",
+          "operations": [
+            "postApiPreflightV1CliAuthDeviceToken"
+          ]
+        },
+        {
+          "service": "preflight-app",
+          "transport": "rest",
+          "notes": "GET SSE waits for job availability; no explicitrequestdeadline. Stream errors fall back to normal job-claim path; do not evaluate as ordinary REST p99. Target origin PREFLIGHT_API_URL; provider operationIds unresolved.\ncmd/preflight/main.go:13854 — JSON helper retry policy\ncmd/preflight/main.go:13895 — Per-attempt timeout\ncmd/preflight/main.go:13784 — runnerEndpoint concatenates without rewriting /api/v1 path",
+          "operations": [
+            "getApiPreflightV1RunnersRunnerIdJobsStream"
+          ]
+        },
+        {
+          "service": "preflight-app",
+          "transport": "rest",
+          "notes": "GET SSE bounded by options.watchTimeout(default10minutes) via requestcontext; ordinary JSON polling used as fallback. Watch duration is not per-operationSLA. Target origin PREFLIGHT_API_URL; provider operationIds unresolved.\ncmd/preflight/main.go:13854 — JSON helper retry policy\ncmd/preflight/main.go:13895 — Per-attempt timeout\ncmd/preflight/main.go:13784 — runnerEndpoint concatenates without rewriting /api/v1 path",
+          "operations": [
+            "getApiPreflightV1WorkflowsWorkflowIdEvents"
+          ]
+        },
+        {
+          "service": "preflight-app",
+          "transport": "rest",
+          "notes": "Capability compatibility helper uses20s/4attempts; standalone capabilities CLI atmain.go531 bypasses helper with raw client.Do. Separate callsite observations required. Target origin PREFLIGHT_API_URL; provider operationIds unresolved.\ncmd/preflight/main.go:13854 — JSON helper retry policy\ncmd/preflight/main.go:13895 — Per-attempt timeout\ncmd/preflight/main.go:13784 — runnerEndpoint concatenates without rewriting /api/v1 path",
+          "operations": [
+            "getApiPreflightV1Capabilities"
+          ]
+        },
+        {
+          "service": "app-store-connect",
+          "transport": "rest",
+          "notes": "Third-party provider verification/signing paths. JWT Bearer built with issuer/key/private key. apps probe limit1;bundleIds includes bundleIdCapabilities;certificate list limit200. Raw client.Do,does not inherit Preflight JSON helper20s/4attempts. Provider operationIds unresolved.\ncmd/preflight/main.go:1350 — Provider verification invokes apps probe\ncmd/preflight/main.go:2536 — GETapps\ncmd/preflight/main.go:2583 — GETbundleIds\ncmd/preflight/main.go:2984 — Certificate list\ncmd/preflight/main.go:3054 — Certificate create",
+          "operations": [
+            "GET /v1/apps",
+            "GET /v1/bundleIds",
+            "GET /v1/certificates",
+            "POST /v1/certificates"
+          ]
+        },
+        {
+          "service": "google-play",
+          "transport": "rest",
+          "notes": "Verification inserts temporary edit,lists tracks,then deletes edit;OAuth Bearer. Raw helper lacks per-request timeout/retry;source limit4096byte response read. Provider operationIds unresolved.\ncmd/preflight/main.go:2388 — Probe invokes temporary-edit lifecycle\ncmd/preflight/main.go:2442 — Create edit\ncmd/preflight/main.go:2465 — Tracks query\ncmd/preflight/main.go:2494 — Delete edit",
+          "operations": [
+            "POST /androidpublisher/v3/applications/{packageName}/edits",
+            "GET /androidpublisher/v3/applications/{packageName}/edits/{editId}/tracks",
+            "DELETE /androidpublisher/v3/applications/{packageName}/edits/{editId}"
+          ]
+        },
+        {
+          "service": "google-oauth",
+          "transport": "rest",
+          "notes": "JWT-bearer service-account grant;provider target comes from credential JSON token_uri,not guessed fixedhost. Form-urlencoded body. Raw client.Do.\ncmd/preflight/main.go:2296 — Service-account token exchange",
+          "operations": [
+            "POST {serviceAccount.token_uri}"
+          ]
+        },
+        {
+          "service": "sentry",
+          "transport": "rest",
+          "notes": "Provider credentials/readiness probe;Bearer,raw client.Do without JSON-helper retries.\ncmd/preflight/main.go:1688 — Verification calls probe\ncmd/preflight/main.go:2705 — Exact probeendpoint",
+          "operations": [
+            "GET /api/0/projects/{orgSlug}/{projectSlug}/"
+          ]
+        },
+        {
+          "service": "sentry",
+          "transport": "rest",
+          "notes": "Sentry-sync actual helper:Bearer,minimuminterval throttle,429only retries up to5attempts total,Retry-After seconds or1500ms fallback. No explicitrequestdeadline. This differs from Preflightcontrol-plane retries;do not average p95observations into SLA.\ncmd/preflight/sentry_sync.go:788 — sentryGet throttle/retry\ncmd/preflight/sentry_sync.go:829 — Projects\ncmd/preflight/sentry_sync.go:843 — Issues\ncmd/preflight/sentry_sync.go:857 — Latestevent\ncmd/preflight/sentry_sync.go:885 — Sessions\ncmd/preflight/sentry_sync.go:942 — Performanceevents",
+          "operations": [
+            "GET /api/0/organizations/{orgSlug}/projects/",
+            "GET /api/0/projects/{orgSlug}/{projectSlug}/issues/",
+            "GET /api/0/issues/{issueId}/events/latest/",
+            "GET /api/0/organizations/{orgSlug}/sessions/",
+            "GET /api/0/organizations/{orgSlug}/events/"
+          ]
+        },
+        {
+          "service": "configured-uptime-target",
+          "transport": "rest",
+          "notes": "preflight uptime check probes each monitor URL with configured Method (defaults GET), User-Agent preflight-uptime/1.0. No invented REST operationId/path or credentials; client is supplied by caller.\nSource activation: conditional. Reviewed caller must be invoked with the configuration and credentials described in notes; production activation unverified.\ncmd/preflight/uptime.go:50 — ",
+          "operations": [
+            "configuredMonitorHttpProbe"
+          ]
+        },
+        {
+          "service": "configured-screenshot-artifact",
+          "transport": "rest",
+          "notes": "Screenshot materialization downloads per-ref URL with dedicated60s HTTPclient, no API Bearer inherited.\nSource activation: conditional. Reviewed caller must be invoked with the configuration and credentials described in notes; production activation unverified.\ncmd/preflight/main.go:8578 — ",
+          "operations": [
+            "GET configuredScreenshotUrl"
+          ],
+          "client": {
+            "timeoutMs": 60000
+          }
+        },
+        {
+          "service": "github-release-asset",
+          "transport": "rest",
+          "notes": "Updater downloads selected release asset URL in addition to already-declared releases/latest metadata GET; not a fixed GitHub REST route.\nSource activation: conditional. Reviewed caller must be invoked with the configuration and credentials described in notes; production activation unverified.\ncmd/preflight/update.go:241 — ",
+          "operations": [
+            "GET configuredReleaseAssetUrl"
+          ]
+        }
+      ],
+      "manifestPath": ".forgegraph/contracts/preflight-runner/service-usage.yaml"
+    }
+  ],
+  "edges": [
+    {
+      "consumer": "preflight-runner",
+      "provider": "github",
+      "operation": "GET /repos/{owner}/{repo}/releases/latest",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider github resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "github",
+          "operation": "GET /repos/{owner}/{repo}/releases/latest"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "external-integrations",
+      "operation": "registerManualTarget",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "registerManualTarget"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "external-integrations",
+      "operation": "listManualTargets",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "listManualTargets"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1SecretRefs",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1SecretRefs"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1SecretRefs",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1SecretRefs"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1ProviderAccounts",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1ProviderAccounts"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1ProviderAccounts",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1ProviderAccounts"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdProviderReadiness",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdProviderReadiness"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1AppsIdProviderReadiness",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1AppsIdProviderReadiness"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1AppsIdProviderSetupPlan",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1AppsIdProviderSetupPlan"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1OauthClientsConfigure",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1OauthClientsConfigure"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1OauthClients",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1OauthClients"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1OauthClients",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1OauthClients"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1SetupTranscripts",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1SetupTranscripts"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1WorkflowsWorkflowIdResumeSetup",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1WorkflowsWorkflowIdResumeSetup"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1RunnersRunnerIdSigningCert",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1RunnersRunnerIdSigningCert"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdLock",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdLock"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdTargetsAndroidEmulators",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdTargetsAndroidEmulators"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdTargetsIosDevices",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdTargetsIosDevices"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdTargetsIosSimulators",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdTargetsIosSimulators"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdInstallations",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdInstallations"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdSimulatorProofPlans",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdSimulatorProofPlans"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdDevelopmentBuildPlans",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdDevelopmentBuildPlans"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdDevelopmentBuildResults",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdDevelopmentBuildResults"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdDevelopmentSessionPlans",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdDevelopmentSessionPlans"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdRuntimeArtifacts",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdRuntimeArtifacts"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdDevSessions",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdDevSessions"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdTargetSessions",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdTargetSessions"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdTargetRuns",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdTargetRuns"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1RunnersCapacity",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1RunnersCapacity"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1WorkOrders",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1WorkOrders"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1WorkOrdersId",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1WorkOrdersId"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1WorkOrders",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1WorkOrders"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1Nodes",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1Nodes"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1Health",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1Health"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1NodesNodeIdRetire",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1NodesNodeIdRetire"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1TestflightEnroll",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1TestflightEnroll"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdStoreListingPublish",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdStoreListingPublish"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1AppsIdScreenshotRecipe",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1AppsIdScreenshotRecipe"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1AppsIdErrorsAnalysisQueue",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1AppsIdErrorsAnalysisQueue"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdErrorsGroupIdAnalysis",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdErrorsGroupIdAnalysis"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdSessionHealth",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdSessionHealth"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdPerformance",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdPerformance"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdErrors",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdErrors"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1CrashesAlertsEvaluate",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1CrashesAlertsEvaluate"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdReviewNotes",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdReviewNotes"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdDependencies",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdDependencies"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdBuildHealth",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdBuildHealth"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1UptimeCheckQueue",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1UptimeCheckQueue"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1UptimeIdResult",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1UptimeIdResult"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRegister",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRegister"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdHeartbeat",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdHeartbeat"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdReconcile",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdReconcile"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsClaim",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsClaim"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdArtifacts",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdArtifacts"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdComplete",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdComplete"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdSecretsSecretRefIdReveal",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdSecretsSecretRefIdReveal"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdHeartbeat",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdHeartbeat"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1RunnersRunnerIdJobsJobId",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1RunnersRunnerIdJobsJobId"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1WorkflowsWorkflowId",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1WorkflowsWorkflowId"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1ReleaseStatus",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1ReleaseStatus"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1AppsIdReleaseStatus",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1AppsIdReleaseStatus"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdSubmitForReview",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdSubmitForReview"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "putApiPreflightV1AppsIdReleaseChecklist",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "putApiPreflightV1AppsIdReleaseChecklist"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1AppsIdTestflightBuilds",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1AppsIdTestflightBuilds"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1CliAuthDeviceStart",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1CliAuthDeviceStart"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1AppsIdStoreListingScreenshots",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1AppsIdStoreListingScreenshots"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "putApiPreflightV1AppsIdScreenshotRecipe",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "putApiPreflightV1AppsIdScreenshotRecipe"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "putApiPreflightV1RunnersRunnerIdArtifactsArtifactIdBlob",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "putApiPreflightV1RunnersRunnerIdArtifactsArtifactIdBlob"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1WorkflowsProveApp",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1WorkflowsProveApp"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "postApiPreflightV1CliAuthDeviceToken",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "postApiPreflightV1CliAuthDeviceToken"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1RunnersRunnerIdJobsStream",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1RunnersRunnerIdJobsStream"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1WorkflowsWorkflowIdEvents",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1WorkflowsWorkflowIdEvents"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "preflight-app",
+      "api": "rest",
+      "operation": "getApiPreflightV1Capabilities",
+      "contract": "valid",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unknown-objective",
+          "message": "No comparable provider commitment for every required objective",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "info",
+          "service": "preflight-runner",
+          "target": "preflight-app",
+          "operation": "getApiPreflightV1Capabilities"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "app-store-connect",
+      "operation": "GET /v1/apps",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider app-store-connect resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "app-store-connect",
+          "operation": "GET /v1/apps"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "app-store-connect",
+      "operation": "GET /v1/bundleIds",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider app-store-connect resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "app-store-connect",
+          "operation": "GET /v1/bundleIds"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "app-store-connect",
+      "operation": "GET /v1/certificates",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider app-store-connect resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "app-store-connect",
+          "operation": "GET /v1/certificates"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "app-store-connect",
+      "operation": "POST /v1/certificates",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider app-store-connect resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "app-store-connect",
+          "operation": "POST /v1/certificates"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "google-play",
+      "operation": "POST /androidpublisher/v3/applications/{packageName}/edits",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider google-play resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "google-play",
+          "operation": "POST /androidpublisher/v3/applications/{packageName}/edits"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "google-play",
+      "operation": "GET /androidpublisher/v3/applications/{packageName}/edits/{editId}/tracks",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider google-play resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "google-play",
+          "operation": "GET /androidpublisher/v3/applications/{packageName}/edits/{editId}/tracks"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "google-play",
+      "operation": "DELETE /androidpublisher/v3/applications/{packageName}/edits/{editId}",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider google-play resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "google-play",
+          "operation": "DELETE /androidpublisher/v3/applications/{packageName}/edits/{editId}"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "google-oauth",
+      "operation": "POST {serviceAccount.token_uri}",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider google-oauth resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "google-oauth",
+          "operation": "POST {serviceAccount.token_uri}"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "sentry",
+      "operation": "GET /api/0/projects/{orgSlug}/{projectSlug}/",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider sentry resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "sentry",
+          "operation": "GET /api/0/projects/{orgSlug}/{projectSlug}/"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "sentry",
+      "operation": "GET /api/0/organizations/{orgSlug}/projects/",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider sentry resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "sentry",
+          "operation": "GET /api/0/organizations/{orgSlug}/projects/"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "sentry",
+      "operation": "GET /api/0/projects/{orgSlug}/{projectSlug}/issues/",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider sentry resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "sentry",
+          "operation": "GET /api/0/projects/{orgSlug}/{projectSlug}/issues/"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "sentry",
+      "operation": "GET /api/0/issues/{issueId}/events/latest/",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider sentry resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "sentry",
+          "operation": "GET /api/0/issues/{issueId}/events/latest/"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "sentry",
+      "operation": "GET /api/0/organizations/{orgSlug}/sessions/",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider sentry resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "sentry",
+          "operation": "GET /api/0/organizations/{orgSlug}/sessions/"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "sentry",
+      "operation": "GET /api/0/organizations/{orgSlug}/events/",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider sentry resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "sentry",
+          "operation": "GET /api/0/organizations/{orgSlug}/events/"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "configured-uptime-target",
+      "operation": "configuredMonitorHttpProbe",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider configured-uptime-target resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "configured-uptime-target",
+          "operation": "configuredMonitorHttpProbe"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "configured-screenshot-artifact",
+      "operation": "GET configuredScreenshotUrl",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider configured-screenshot-artifact resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "configured-screenshot-artifact",
+          "operation": "GET configuredScreenshotUrl"
+        }
+      ]
+    },
+    {
+      "consumer": "preflight-runner",
+      "provider": "github-release-asset",
+      "operation": "GET configuredReleaseAssetUrl",
+      "contract": "unresolved",
+      "compatibility": "unknown",
+      "observed": "insufficient-data",
+      "requires": {
+        "window": "30d",
+        "measurement": "provider-request"
+      },
+      "findings": [
+        {
+          "code": "unresolved-service",
+          "message": "Provider github-release-asset resolves to 0 services",
+          "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+          "severity": "warning",
+          "service": "preflight-runner",
+          "target": "github-release-asset",
+          "operation": "GET configuredReleaseAssetUrl"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "code": "partial-usage",
+      "message": "Dependencies are partially discovered; empty uses does not establish no dependencies",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning"
+    },
+    {
+      "code": "retry-budget",
+      "message": "maxAttempts includes the initial attempt. Verify retry safety and allow for backoff in the total deadline.",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "registerManualTarget"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "listManualTargets"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1SecretRefs"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1SecretRefs"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1ProviderAccounts"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1ProviderAccounts"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdProviderReadiness"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1AppsIdProviderReadiness"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1AppsIdProviderSetupPlan"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1OauthClientsConfigure"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1OauthClients"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1OauthClients"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1SetupTranscripts"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1WorkflowsWorkflowIdResumeSetup"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1RunnersRunnerIdSigningCert"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdLock"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdTargetsAndroidEmulators"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdTargetsIosDevices"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdTargetsIosSimulators"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdInstallations"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdSimulatorProofPlans"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdDevelopmentBuildPlans"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdDevelopmentBuildResults"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdDevelopmentSessionPlans"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdRuntimeArtifacts"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdDevSessions"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdTargetSessions"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdTargetRuns"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1RunnersCapacity"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1WorkOrders"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1WorkOrdersId"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1WorkOrders"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1Nodes"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1Health"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1NodesNodeIdRetire"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1TestflightEnroll"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdStoreListingPublish"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1AppsIdScreenshotRecipe"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1AppsIdErrorsAnalysisQueue"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdErrorsGroupIdAnalysis"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdSessionHealth"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdPerformance"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdErrors"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1CrashesAlertsEvaluate"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdReviewNotes"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdDependencies"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdBuildHealth"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1UptimeCheckQueue"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1UptimeIdResult"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRegister"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdHeartbeat"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdReconcile"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsClaim"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdArtifacts"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdComplete"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdSecretsSecretRefIdReveal"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1RunnersRunnerIdJobsJobIdHeartbeat"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1RunnersRunnerIdJobsJobId"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1WorkflowsWorkflowId"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1ReleaseStatus"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1AppsIdReleaseStatus"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdSubmitForReview"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "putApiPreflightV1AppsIdReleaseChecklist"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1AppsIdTestflightBuilds"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1CliAuthDeviceStart"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1AppsIdStoreListingScreenshots"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "putApiPreflightV1AppsIdScreenshotRecipe"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "putApiPreflightV1RunnersRunnerIdArtifactsArtifactIdBlob"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1WorkflowsProveApp"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "postApiPreflightV1CliAuthDeviceToken"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1RunnersRunnerIdJobsStream"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1WorkflowsWorkflowIdEvents"
+    },
+    {
+      "code": "unknown-objective",
+      "message": "No comparable provider commitment for every required objective",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "info",
+      "service": "preflight-runner",
+      "target": "preflight-app",
+      "operation": "getApiPreflightV1Capabilities"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider app-store-connect resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "app-store-connect",
+      "operation": "GET /v1/apps"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider app-store-connect resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "app-store-connect",
+      "operation": "GET /v1/bundleIds"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider app-store-connect resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "app-store-connect",
+      "operation": "GET /v1/certificates"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider app-store-connect resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "app-store-connect",
+      "operation": "POST /v1/certificates"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider configured-screenshot-artifact resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "configured-screenshot-artifact",
+      "operation": "GET configuredScreenshotUrl"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider configured-uptime-target resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "configured-uptime-target",
+      "operation": "configuredMonitorHttpProbe"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider github resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "github",
+      "operation": "GET /repos/{owner}/{repo}/releases/latest"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider github-release-asset resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "github-release-asset",
+      "operation": "GET configuredReleaseAssetUrl"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider google-oauth resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "google-oauth",
+      "operation": "POST {serviceAccount.token_uri}"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider google-play resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "google-play",
+      "operation": "POST /androidpublisher/v3/applications/{packageName}/edits"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider google-play resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "google-play",
+      "operation": "GET /androidpublisher/v3/applications/{packageName}/edits/{editId}/tracks"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider google-play resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "google-play",
+      "operation": "DELETE /androidpublisher/v3/applications/{packageName}/edits/{editId}"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider sentry resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "sentry",
+      "operation": "GET /api/0/projects/{orgSlug}/{projectSlug}/"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider sentry resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "sentry",
+      "operation": "GET /api/0/organizations/{orgSlug}/projects/"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider sentry resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "sentry",
+      "operation": "GET /api/0/projects/{orgSlug}/{projectSlug}/issues/"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider sentry resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "sentry",
+      "operation": "GET /api/0/issues/{issueId}/events/latest/"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider sentry resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "sentry",
+      "operation": "GET /api/0/organizations/{orgSlug}/sessions/"
+    },
+    {
+      "code": "unresolved-service",
+      "message": "Provider sentry resolves to 0 services",
+      "path": ".forgegraph/contracts/preflight-runner/service-usage.yaml",
+      "severity": "warning",
+      "service": "preflight-runner",
+      "target": "sentry",
+      "operation": "GET /api/0/organizations/{orgSlug}/events/"
+    },
+    {
+      "code": "partial-contract",
+      "message": "API inventory is partially discovered; schema coverage is not established",
+      "path": ".forgegraph/contracts/preflight-runner/service.yaml",
+      "severity": "warning"
+    }
+  ],
+  "reportOnly": true
+}

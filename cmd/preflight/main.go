@@ -17606,7 +17606,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
 	fmt.Fprintln(w, "  preflight apps deps --all [--root <dir>] [--target <sdk>] [--json]  fleet Expo SDK/plugin/dependency snapshot + drift")
 	fmt.Fprintln(w, "  preflight apps scan-bundle <bundle|.app|.ipa>       scan a built artifact for store poison (localhost/E2E)")
-	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")
+	fmt.Fprintln(w, "  preflight apps submit-for-review <app> --asc-build-id <id> --version <version> --build-number <number>")
 	fmt.Fprintln(w, "  preflight apps screenshots --scheme <s> --sim <udid> [--flow f.yaml] [--app <id> --upload]  capture App Store screenshots (R5)")
 	fmt.Fprintln(w, "  preflight apps review compile <flow.review.yaml>     compile a TrueFlight review workflow → Maestro flow + reviewer guide")
 	fmt.Fprintln(w)
@@ -17759,16 +17759,52 @@ func runAppsStatus(args []string, stdout io.Writer, stderr io.Writer, client *ht
 // runAppsSubmitForReview fires the explicit R6 action: submit an app's uploaded
 // build to App Review. The server gates it on the ladder preconditions, so a
 // non-ready app comes back as a clear error rather than a botched submission.
+type cliReviewSelection struct {
+	AscBuildID  string `json:"ascBuildId"`
+	Version     string `json:"version"`
+	BuildNumber string `json:"buildNumber"`
+}
+
+func (s cliReviewSelection) valid() bool {
+	return strings.TrimSpace(s.AscBuildID) != "" && strings.TrimSpace(s.Version) != "" && strings.TrimSpace(s.BuildNumber) != ""
+}
+
 func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	options, ok := parseReleaseStatusCLIOptions(args, stderr)
 	if !ok {
 		return 2
 	}
+	if options.platform != "ios" {
+		fmt.Fprintln(stderr, "App Review submission supports iOS only")
+		return 2
+	}
 	// --all / --fire arrive in rest (unknown flags); split them from the app arg.
-	all, fire := false, false
+	all, fire, listBuilds := false, false, false
 	var positional []string
-	for _, r := range options.rest {
+	selection := cliReviewSelection{}
+	selectionsFile := ""
+	for index := 0; index < len(options.rest); index++ {
+		r := options.rest[index]
 		switch r {
+		case "--asc-build-id", "--version", "--build-number", "--selections-file":
+			if index+1 >= len(options.rest) {
+				fmt.Fprintf(stderr, "%s requires a value\n", r)
+				return 2
+			}
+			index++
+			value := options.rest[index]
+			switch r {
+			case "--asc-build-id":
+				selection.AscBuildID = value
+			case "--version":
+				selection.Version = value
+			case "--build-number":
+				selection.BuildNumber = value
+			case "--selections-file":
+				selectionsFile = value
+			}
+		case "--list-builds":
+			listBuilds = true
 		case "--all":
 			all = true
 		case "--fire", "--confirm":
@@ -17780,13 +17816,30 @@ func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, c
 	options.rest = positional
 
 	if all {
-		return runFleetSubmitForReview(options, fire, stdout, stderr, client)
+		selections := map[string]cliReviewSelection{}
+		if fire {
+			if selectionsFile == "" {
+				fmt.Fprintln(stderr, "--all --fire requires --selections-file with an exact ASC build/version/buildNumber per app ID")
+				return 2
+			}
+			data, err := os.ReadFile(selectionsFile)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 2
+			}
+			if err := json.Unmarshal(data, &selections); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 2
+			}
+		}
+		return runFleetSubmitForReview(options, fire, selections, stdout, stderr, client)
 	}
 
-	if len(options.rest) != 1 {
+	if len(options.rest) != 1 || (!listBuilds && !selection.valid()) {
 		fmt.Fprintln(stderr, "Usage:")
-		fmt.Fprintln(stderr, "  preflight apps submit-for-review <app-id|slug|name>   submit one app")
-		fmt.Fprintln(stderr, "  preflight apps submit-for-review --all [--fire]       submit every R5-ready app (dry-run without --fire)")
+		fmt.Fprintln(stderr, "  preflight apps submit-for-review <app> --list-builds   list selectable ASC build IDs and versions")
+		fmt.Fprintln(stderr, "  preflight apps submit-for-review <app> --asc-build-id <id> --version <version> --build-number <number>")
+		fmt.Fprintln(stderr, "  preflight apps submit-for-review --all [--fire --selections-file selections.json]")
 		return 2
 	}
 	appID, err := resolveReleaseAppID(client, options, options.rest[0])
@@ -17794,10 +17847,21 @@ func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, c
 		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
 		return 1
 	}
+	if listBuilds {
+		endpoint := strings.TrimRight(options.apiURL, "/") + "/api/preflight/v1/apps/" + url.PathEscape(appID) + "/testflight/builds"
+		data, err := getPreflightJSON(client, endpoint, options.token)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, string(data))
+		return 0
+	}
+
 	endpoint := strings.TrimRight(options.apiURL, "/") +
 		"/api/preflight/v1/apps/" + url.PathEscape(appID) + "/submit-for-review"
 	data, err := postPreflightJSON(client, endpoint, options.token, map[string]any{
-		"requestedBy": "cli",
+		"requestedBy": "cli", "ascBuildId": selection.AscBuildID, "version": selection.Version, "buildNumber": selection.BuildNumber, "autoRelease": false,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "submit-for-review failed: %v\n", err)
@@ -17833,7 +17897,7 @@ func runAppsSubmitForReview(args []string, stdout io.Writer, stderr io.Writer, c
 // submit (and why the rest aren't), and — only with --fire — submits each ready
 // app through the same gated route (which re-checks readiness server-side, so a
 // stale fleet snapshot can never push a half-baked app to Apple).
-func runFleetSubmitForReview(options releaseStatusCLIOptions, fire bool, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+func runFleetSubmitForReview(options releaseStatusCLIOptions, fire bool, selections map[string]cliReviewSelection, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	rows, err := fetchFleetReleaseRows(client, options)
 	if err != nil {
 		fmt.Fprintf(stderr, "fetch fleet failed: %v\n", err)
@@ -17869,16 +17933,22 @@ func runFleetSubmitForReview(options releaseStatusCLIOptions, fire bool, stdout 
 		fmt.Fprintf(stdout, "  %s (%s)\n", firstNonEmpty(r.Name, r.AppID), r.AppID)
 	}
 	if !fire {
-		fmt.Fprintf(stdout, "\nDry-run. Re-run with --fire to submit these %d app(s) for App Review.\n", len(ready))
+		fmt.Fprintf(stdout, "\nDry-run. Select an exact ASC build for each app, then use --fire --selections-file selections.json to submit these %d app(s).\n", len(ready))
 		return 0
 	}
 
+	for _, row := range ready {
+		if !selections[row.AppID].valid() {
+			fmt.Fprintf(stderr, "Missing exact ASC build selection for %s; no apps submitted\n", row.AppID)
+			return 2
+		}
+	}
 	fmt.Fprintf(stdout, "\nSubmitting %d app(s) for App Review...\n", len(ready))
 	failures := 0
 	for _, r := range ready {
 		endpoint := strings.TrimRight(options.apiURL, "/") +
 			"/api/preflight/v1/apps/" + url.PathEscape(r.AppID) + "/submit-for-review"
-		if _, err := postPreflightJSON(client, endpoint, options.token, map[string]any{"requestedBy": "cli-fleet"}); err != nil {
+		if _, err := postPreflightJSON(client, endpoint, options.token, map[string]any{"requestedBy": "cli-fleet", "ascBuildId": selections[r.AppID].AscBuildID, "version": selections[r.AppID].Version, "buildNumber": selections[r.AppID].BuildNumber, "autoRelease": false}); err != nil {
 			fmt.Fprintf(stderr, "  x %-30s %v\n", firstNonEmpty(r.Name, r.AppID), err)
 			failures++
 			continue

@@ -1,0 +1,314 @@
+apiVersion: forgegraph.dev/v1alpha1
+kind: ServiceUsage
+service: preflight-runner
+coverage: partial
+uses:
+  - service: github
+    operations:
+      - GET /repos/{owner}/{repo}/releases/latest
+    transport: rest
+    notes: >-
+      Binary updater uses configurable PREFLIGHT_UPDATE_REPO and downloads
+      release/checksum assets; build-time/user CLI execution, not deployment
+      service dependency.
+
+      cmd/preflight/update.go:168 — Release lookup
+  - service: preflight-app
+    operations:
+      - registerManualTarget
+      - listManualTargets
+      - postApiPreflightV1SecretRefs
+      - getApiPreflightV1SecretRefs
+      - postApiPreflightV1ProviderAccounts
+      - getApiPreflightV1ProviderAccounts
+      - postApiPreflightV1AppsIdProviderReadiness
+      - getApiPreflightV1AppsIdProviderReadiness
+      - getApiPreflightV1AppsIdProviderSetupPlan
+      - postApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows
+      - getApiPreflightV1ProviderAccountsProviderAccountIdCredentialFlows
+      - postApiPreflightV1OauthClientsConfigure
+      - postApiPreflightV1OauthClients
+      - getApiPreflightV1OauthClients
+      - postApiPreflightV1SetupTranscripts
+      - postApiPreflightV1WorkflowsWorkflowIdResumeSetup
+      - getApiPreflightV1RunnersRunnerIdSigningCert
+      - postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdLock
+      - postApiPreflightV1RunnersRunnerIdTargetsAndroidEmulators
+      - postApiPreflightV1RunnersRunnerIdTargetsIosDevices
+      - postApiPreflightV1RunnersRunnerIdTargetsIosSimulators
+      - postApiPreflightV1RunnersRunnerIdJobsJobIdTargetsTargetIdInstallations
+      - postApiPreflightV1AppsIdSimulatorProofPlans
+      - postApiPreflightV1AppsIdDevelopmentBuildPlans
+      - postApiPreflightV1AppsIdDevelopmentBuildResults
+      - postApiPreflightV1AppsIdDevelopmentSessionPlans
+      - postApiPreflightV1AppsIdRuntimeArtifacts
+      - postApiPreflightV1AppsIdDevSessions
+      - postApiPreflightV1AppsIdTargetSessions
+      - postApiPreflightV1AppsIdTargetRuns
+      - getApiPreflightV1RunnersCapacity
+      - postApiPreflightV1WorkOrders
+      - getApiPreflightV1WorkOrdersId
+      - getApiPreflightV1WorkOrders
+      - getApiPreflightV1Nodes
+      - getApiPreflightV1Health
+      - postApiPreflightV1NodesNodeIdRetire
+      - postApiPreflightV1TestflightEnroll
+      - postApiPreflightV1AppsIdStoreListingPublish
+      - getApiPreflightV1AppsIdScreenshotRecipe
+      - getApiPreflightV1AppsIdErrorsAnalysisQueue
+      - postApiPreflightV1AppsIdErrorsGroupIdAnalysis
+      - postApiPreflightV1AppsIdSessionHealth
+      - postApiPreflightV1AppsIdPerformance
+      - postApiPreflightV1AppsIdErrors
+      - postApiPreflightV1CrashesAlertsEvaluate
+      - postApiPreflightV1AppsIdReviewNotes
+      - postApiPreflightV1AppsIdDependencies
+      - postApiPreflightV1AppsIdBuildHealth
+      - getApiPreflightV1UptimeCheckQueue
+      - postApiPreflightV1UptimeIdResult
+      - postApiPreflightV1RunnersRegister
+      - postApiPreflightV1RunnersRunnerIdHeartbeat
+      - postApiPreflightV1RunnersRunnerIdReconcile
+      - postApiPreflightV1RunnersRunnerIdJobsClaim
+      - postApiPreflightV1RunnersRunnerIdJobsJobIdArtifacts
+      - postApiPreflightV1RunnersRunnerIdJobsJobIdComplete
+      - postApiPreflightV1RunnersRunnerIdJobsJobIdSecretsSecretRefIdReveal
+      - postApiPreflightV1RunnersRunnerIdJobsJobIdHeartbeat
+      - getApiPreflightV1RunnersRunnerIdJobsJobId
+      - getApiPreflightV1WorkflowsWorkflowId
+      - getApiPreflightV1ReleaseStatus
+      - getApiPreflightV1AppsIdReleaseStatus
+      - postApiPreflightV1AppsIdSubmitForReview
+      - putApiPreflightV1AppsIdReleaseChecklist
+      - getApiPreflightV1AppsIdTestflightBuilds
+    transport: rest
+    client:
+      timeoutMs: 20000
+      retries:
+        maxAttempts: 4
+        backoff: exponential
+    notes: >-
+      20-second PER ATTEMPT deadline from PREFLIGHT_API_REQUEST_TIMEOUT
+      override;4attempts total,network/5xx only;500/1000/2000ms exponential
+      backoff.4xx immediate;success data envelope unwrapped. User or runner
+      Bearer and workspace headers where workspace helper is used. Target origin
+      PREFLIGHT_API_URL; provider operationIds unresolved.
+
+      cmd/preflight/main.go:13854 — JSON helper retry policy
+
+      cmd/preflight/main.go:13895 — Per-attempt timeout
+
+      cmd/preflight/main.go:13784 — runnerEndpoint concatenates without
+      rewriting /api/v1 path
+  - service: preflight-app
+    operations:
+      - postApiPreflightV1CliAuthDeviceStart
+      - postApiPreflightV1AppsIdStoreListingScreenshots
+      - putApiPreflightV1AppsIdScreenshotRecipe
+      - putApiPreflightV1RunnersRunnerIdArtifactsArtifactIdBlob
+      - postApiPreflightV1WorkflowsProveApp
+    transport: rest
+    notes: >-
+      Raw client.Do path; main injects http.DefaultClient. No explicit
+      deadline/retry at these callsites. Do not inherit JSON-helper defaults.
+      Target origin PREFLIGHT_API_URL; provider operationIds unresolved.
+
+      cmd/preflight/main.go:13854 — JSON helper retry policy
+
+      cmd/preflight/main.go:13895 — Per-attempt timeout
+
+      cmd/preflight/main.go:13784 — runnerEndpoint concatenates without
+      rewriting /api/v1 path
+  - service: preflight-app
+    operations:
+      - postApiPreflightV1CliAuthDeviceToken
+    transport: rest
+    notes: >-
+      Device authorization poll interval default5s,expirydefault600s from
+      serverresponse; raw request itself has no explicitdeadline. Poll retries
+      are protocol behavior. Target origin PREFLIGHT_API_URL; provider
+      operationIds unresolved.
+
+      cmd/preflight/main.go:13854 — JSON helper retry policy
+
+      cmd/preflight/main.go:13895 — Per-attempt timeout
+
+      cmd/preflight/main.go:13784 — runnerEndpoint concatenates without
+      rewriting /api/v1 path
+  - service: preflight-app
+    operations:
+      - getApiPreflightV1RunnersRunnerIdJobsStream
+    transport: rest
+    notes: >-
+      GET SSE waits for job availability; no explicitrequestdeadline. Stream
+      errors fall back to normal job-claim path; do not evaluate as ordinary
+      REST p99. Target origin PREFLIGHT_API_URL; provider operationIds
+      unresolved.
+
+      cmd/preflight/main.go:13854 — JSON helper retry policy
+
+      cmd/preflight/main.go:13895 — Per-attempt timeout
+
+      cmd/preflight/main.go:13784 — runnerEndpoint concatenates without
+      rewriting /api/v1 path
+  - service: preflight-app
+    operations:
+      - getApiPreflightV1WorkflowsWorkflowIdEvents
+    transport: rest
+    notes: >-
+      GET SSE bounded by options.watchTimeout(default10minutes) via
+      requestcontext; ordinary JSON polling used as fallback. Watch duration is
+      not per-operationSLA. Target origin PREFLIGHT_API_URL; provider
+      operationIds unresolved.
+
+      cmd/preflight/main.go:13854 — JSON helper retry policy
+
+      cmd/preflight/main.go:13895 — Per-attempt timeout
+
+      cmd/preflight/main.go:13784 — runnerEndpoint concatenates without
+      rewriting /api/v1 path
+  - service: preflight-app
+    operations:
+      - getApiPreflightV1Capabilities
+    transport: rest
+    notes: >-
+      Capability compatibility helper uses20s/4attempts; standalone capabilities
+      CLI atmain.go531 bypasses helper with raw client.Do. Separate callsite
+      observations required. Target origin PREFLIGHT_API_URL; provider
+      operationIds unresolved.
+
+      cmd/preflight/main.go:13854 — JSON helper retry policy
+
+      cmd/preflight/main.go:13895 — Per-attempt timeout
+
+      cmd/preflight/main.go:13784 — runnerEndpoint concatenates without
+      rewriting /api/v1 path
+  - service: app-store-connect
+    operations:
+      - GET /v1/apps
+      - GET /v1/bundleIds
+      - GET /v1/certificates
+      - POST /v1/certificates
+    transport: rest
+    notes: >-
+      Third-party provider verification/signing paths. JWT Bearer built with
+      issuer/key/private key. apps probe limit1;bundleIds includes
+      bundleIdCapabilities;certificate list limit200. Raw client.Do,does not
+      inherit Preflight JSON helper20s/4attempts. Provider operationIds
+      unresolved.
+
+      cmd/preflight/main.go:1350 — Provider verification invokes apps probe
+
+      cmd/preflight/main.go:2536 — GETapps
+
+      cmd/preflight/main.go:2583 — GETbundleIds
+
+      cmd/preflight/main.go:2984 — Certificate list
+
+      cmd/preflight/main.go:3054 — Certificate create
+  - service: google-play
+    operations:
+      - POST /androidpublisher/v3/applications/{packageName}/edits
+      - GET /androidpublisher/v3/applications/{packageName}/edits/{editId}/tracks
+      - DELETE /androidpublisher/v3/applications/{packageName}/edits/{editId}
+    transport: rest
+    notes: >-
+      Verification inserts temporary edit,lists tracks,then deletes edit;OAuth
+      Bearer. Raw helper lacks per-request timeout/retry;source limit4096byte
+      response read. Provider operationIds unresolved.
+
+      cmd/preflight/main.go:2388 — Probe invokes temporary-edit lifecycle
+
+      cmd/preflight/main.go:2442 — Create edit
+
+      cmd/preflight/main.go:2465 — Tracks query
+
+      cmd/preflight/main.go:2494 — Delete edit
+  - service: google-oauth
+    operations:
+      - POST {serviceAccount.token_uri}
+    transport: rest
+    notes: >-
+      JWT-bearer service-account grant;provider target comes from credential
+      JSON token_uri,not guessed fixedhost. Form-urlencoded body. Raw client.Do.
+
+      cmd/preflight/main.go:2296 — Service-account token exchange
+  - service: sentry
+    operations:
+      - GET /api/0/projects/{orgSlug}/{projectSlug}/
+    transport: rest
+    notes: >-
+      Provider credentials/readiness probe;Bearer,raw client.Do without
+      JSON-helper retries.
+
+      cmd/preflight/main.go:1688 — Verification calls probe
+
+      cmd/preflight/main.go:2705 — Exact probeendpoint
+  - service: sentry
+    operations:
+      - GET /api/0/organizations/{orgSlug}/projects/
+      - GET /api/0/projects/{orgSlug}/{projectSlug}/issues/
+      - GET /api/0/issues/{issueId}/events/latest/
+      - GET /api/0/organizations/{orgSlug}/sessions/
+      - GET /api/0/organizations/{orgSlug}/events/
+    transport: rest
+    notes: >-
+      Sentry-sync actual helper:Bearer,minimuminterval throttle,429only retries
+      up to5attempts total,Retry-After seconds or1500ms fallback. No
+      explicitrequestdeadline. This differs from Preflightcontrol-plane
+      retries;do not average p95observations into SLA.
+
+      cmd/preflight/sentry_sync.go:788 — sentryGet throttle/retry
+
+      cmd/preflight/sentry_sync.go:829 — Projects
+
+      cmd/preflight/sentry_sync.go:843 — Issues
+
+      cmd/preflight/sentry_sync.go:857 — Latestevent
+
+      cmd/preflight/sentry_sync.go:885 — Sessions
+
+      cmd/preflight/sentry_sync.go:942 — Performanceevents
+  - service: configured-uptime-target
+    operations:
+      - configuredMonitorHttpProbe
+    transport: rest
+    notes: >-
+      preflight uptime check probes each monitor URL with configured Method
+      (defaults GET), User-Agent preflight-uptime/1.0. No invented REST
+      operationId/path or credentials; client is supplied by caller.
+
+      Source activation: conditional. Reviewed caller must be invoked with the
+      configuration and credentials described in notes; production activation
+      unverified.
+
+      cmd/preflight/uptime.go:50 — 
+  - service: configured-screenshot-artifact
+    operations:
+      - GET configuredScreenshotUrl
+    transport: rest
+    client:
+      timeoutMs: 60000
+    notes: >-
+      Screenshot materialization downloads per-ref URL with dedicated60s
+      HTTPclient, no API Bearer inherited.
+
+      Source activation: conditional. Reviewed caller must be invoked with the
+      configuration and credentials described in notes; production activation
+      unverified.
+
+      cmd/preflight/main.go:8578 — 
+  - service: github-release-asset
+    operations:
+      - GET configuredReleaseAssetUrl
+    transport: rest
+    notes: >-
+      Updater downloads selected release asset URL in addition to
+      already-declared releases/latest metadata GET; not a fixed GitHub REST
+      route.
+
+      Source activation: conditional. Reviewed caller must be invoked with the
+      configuration and credentials described in notes; production activation
+      unverified.
+
+      cmd/preflight/update.go:241 — 
