@@ -11572,17 +11572,6 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		} else {
 			fmt.Fprintf(logFile, "warning: could not install headless osascript shim: %v\n", shimErr)
 		}
-		// Simulator builds never need code signing, but a runner Mac may have no
-		// signing certs — `expo run:ios` then dies with "No code signing
-		// certificates are available to use." Shim xcodebuild (simulator lane only)
-		// to force signing off; device-lane iOS builds are untouched and still sign.
-		if shouldBootIOSSimulator(job) {
-			if shimDir, shimErr := ensureSimulatorXcodebuildShim(); shimErr == nil {
-				command.Env = prependPathEnv(command.Env, shimDir)
-			} else {
-				fmt.Fprintf(logFile, "warning: could not install simulator xcodebuild shim: %v\n", shimErr)
-			}
-		}
 	}
 	flushExpoRunLog := attachRedactedCommandLog(command, logFile)
 	if err := runExpoPrebuild(logFile, appDir, platform, job, cancellationCheck); err != nil {
@@ -11598,7 +11587,7 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		// and auto-selects a paired physical iPhone even for a simulator target,
 		// demanding a signing identity the runner Macs don't have ("No code
 		// signing certificates are available to use."). Build for the simulator
-		// directly with xcodebuild (signing off — a simulator never needs it) and
+		// directly with xcodebuild using an ad hoc simulator signature and
 		// install via simctl, bypassing expo's device resolution entirely. The
 		// dev-client launch below (openExpoDevelopmentClient) is unchanged.
 		flushExpoRunLog()
@@ -11632,8 +11621,10 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 }
 
 // buildAndInstallIOSSimulatorApp builds the prebuilt iOS app for a specific
-// simulator with xcodebuild (code signing forced off — a simulator never needs
-// it) and installs the resulting .app with simctl. This replaces `expo run:ios`
+// simulator with xcodebuild and ad hoc signing, then installs the resulting
+// .app with simctl. Simulator Keychain/SecureStore access requires a signed
+// executable with Xcode-generated entitlements, even without a developer
+// certificate or provisioning profile. This replaces `expo run:ios`
 // for the simulator lane: expo resolves --device through devicectl and
 // auto-selects a paired physical iPhone even for a simulator target, demanding a
 // signing identity the runner Macs lack. Building directly + installing via
@@ -11657,7 +11648,7 @@ func buildAndInstallIOSSimulatorApp(
 	derivedData := filepath.Join(appDir, ".preflight", "ios-sim-deriveddata")
 	_, _ = fmt.Fprintf(
 		logFile,
-		"xcodebuild: building scheme %s for simulator %s (code signing off)\n",
+		"xcodebuild: building scheme %s for simulator %s (ad hoc signing)\n",
 		scheme, simulatorUDID,
 	)
 	build := exec.Command(
@@ -11669,10 +11660,11 @@ func buildAndInstallIOSSimulatorApp(
 		"-destination", "id="+simulatorUDID,
 		"-derivedDataPath", derivedData,
 		"build",
-		"CODE_SIGNING_ALLOWED=NO",
-		"CODE_SIGNING_REQUIRED=NO",
-		"CODE_SIGN_IDENTITY=",
-		"CODE_SIGN_ENTITLEMENTS=",
+		"CODE_SIGNING_ALLOWED=YES",
+		"CODE_SIGNING_REQUIRED=YES",
+		"CODE_SIGN_IDENTITY=-",
+		// Preserve CODE_SIGN_ENTITLEMENTS from the generated project so Xcode can
+		// produce the simulator's application identifier and configured capabilities.
 	)
 	build.Dir = iosDir
 	build.Env = expoCommandEnv(job)
@@ -11964,35 +11956,6 @@ func ensureHeadlessOsascriptShim() (string, error) {
 		"  *) : ;;\n" +
 		"esac\n" +
 		"exit 0\n"
-	if existing, err := os.ReadFile(shimPath); err != nil || string(existing) != script {
-		if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
-			return "", err
-		}
-	}
-	if err := os.Chmod(shimPath, 0o755); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
-// ensureSimulatorXcodebuildShim writes an `xcodebuild` wrapper (returned dir is
-// meant to be prepended to PATH for simulator-lane iOS builds only) that appends
-// CODE_SIGNING_ALLOWED=NO to real build invocations. A simulator build never
-// needs a signing identity, so this lets a runner Mac with no certs build+install
-// the .app onto the sim; informational xcodebuild calls (-version/-list) pass
-// through untouched, and it execs the absolute /usr/bin/xcodebuild (no recursion).
-func ensureSimulatorXcodebuildShim() (string, error) {
-	dir := filepath.Join(os.TempDir(), "preflight-sim-xcodebuild-bin")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	shimPath := filepath.Join(dir, "xcodebuild")
-	script := "#!/bin/sh\n" +
-		"# Preflight simulator shim: simulator builds never need code signing.\n" +
-		"case \" $* \" in\n" +
-		"  *\" -version \"*|*\" -list \"*|*\" -showsdks \"*|*\" -showBuildSettings \"*) exec /usr/bin/xcodebuild \"$@\" ;;\n" +
-		"esac\n" +
-		"exec /usr/bin/xcodebuild \"$@\" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= CODE_SIGN_ENTITLEMENTS=\n"
 	if existing, err := os.ReadFile(shimPath); err != nil || string(existing) != script {
 		if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
 			return "", err

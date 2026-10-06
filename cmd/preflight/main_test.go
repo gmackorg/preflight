@@ -6436,7 +6436,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("read Xcode build log: %v", err)
 	}
-	for _, expected := range []string{"-workspace " + filepath.Join(appDir, "ios", "Forgegraph.xcworkspace"), "-scheme Forgegraph", "-sdk iphonesimulator", "-destination id=6BA8F38E-BF97-4830-98A6-E459E4312F29", "CODE_SIGNING_ALLOWED=NO"} {
+	for _, expected := range []string{"-workspace " + filepath.Join(appDir, "ios", "Forgegraph.xcworkspace"), "-scheme Forgegraph", "-sdk iphonesimulator", "-destination id=6BA8F38E-BF97-4830-98A6-E459E4312F29", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"} {
 		if !strings.Contains(string(xcodeOutput), expected) {
 			t.Fatalf("expected simulator build to contain %q, got %q", expected, string(xcodeOutput))
 		}
@@ -12353,7 +12353,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("read Xcode build log: %v", err)
 	}
-	for _, expected := range []string{"-workspace " + filepath.Join(appDir, "ios", "Forgegraph.xcworkspace"), "-scheme Forgegraph", "-sdk iphonesimulator", "-destination id=6BA8F38E-BF97-4830-98A6-E459E4312F29", "CODE_SIGNING_ALLOWED=NO"} {
+	for _, expected := range []string{"-workspace " + filepath.Join(appDir, "ios", "Forgegraph.xcworkspace"), "-scheme Forgegraph", "-sdk iphonesimulator", "-destination id=6BA8F38E-BF97-4830-98A6-E459E4312F29", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGN_IDENTITY=-"} {
 		if !strings.Contains(string(xcodeOutput), expected) {
 			t.Fatalf("expected simulator build to contain %q, got %q", expected, string(xcodeOutput))
 		}
@@ -12468,6 +12468,8 @@ exit 42
 			"macbook.local",
 			"--name",
 			"CLI Runner",
+			"--xcrun-path",
+			writeFakeExecutable(t, "xcrun", "#!/bin/sh\nexit 0\n"),
 		},
 		&stdout,
 		&stderr,
