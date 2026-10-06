@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
-// recorder captures the chunks a shipper posts, safely across the flush
-// goroutine.
 type recorder struct {
 	mu     sync.Mutex
 	chunks []string
@@ -21,128 +22,130 @@ func (r *recorder) post(chunk string) error {
 	r.chunks = append(r.chunks, chunk)
 	return r.err
 }
-
-func (r *recorder) all() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return strings.Join(r.chunks, "")
-}
-
-func (r *recorder) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.chunks)
-}
+func (r *recorder) upload(_ context.Context, chunk string) error { return r.post(chunk) }
+func (r *recorder) all() string                                  { r.mu.Lock(); defer r.mu.Unlock(); return strings.Join(r.chunks, "") }
+func (r *recorder) count() int                                   { r.mu.Lock(); defer r.mu.Unlock(); return len(r.chunks) }
 
 func TestJobLogShipperBatchesInsteadOfPostingPerLine(t *testing.T) {
-	// xcodebuild emits thousands of lines; one request each would be its own
-	// outage. Nothing goes out until a flush.
 	rec := &recorder{}
-	shipper := newJobLogShipper(rec.post)
-
+	s := newJobLogShipper(rec.upload)
+	defer s.stop()
 	for i := 0; i < 50; i++ {
-		shipper.append("building...\n")
+		s.append("building...\n")
 	}
 	if rec.count() != 0 {
-		t.Fatalf("want nothing posted before a flush, got %d chunks", rec.count())
+		t.Fatal("posted before threshold/timer")
 	}
-
-	shipper.flush()
-	if rec.count() != 1 {
-		t.Fatalf("want one batched chunk, got %d", rec.count())
-	}
-	if strings.Count(rec.all(), "building...") != 50 {
-		t.Fatalf("want all 50 lines in the batch, got %q", rec.all())
+	s.stop()
+	if rec.count() != 1 || strings.Count(rec.all(), "building...") != 50 {
+		t.Fatal("batched lines lost")
 	}
 }
 
 func TestJobLogShipperFlushesOnceBufferIsFull(t *testing.T) {
-	// A burst must not wait out the timer, or the tail of a fast failure lands
-	// after anyone has stopped looking.
-	rec := &recorder{}
-	shipper := newJobLogShipper(rec.post)
-
-	line := strings.Repeat("x", 1024) + "\n"
-	for i := 0; i < (jobLogFlushBytes/len(line))+2; i++ {
-		shipper.append(line)
-	}
-	if rec.count() == 0 {
-		t.Fatal("want an early flush once the buffer filled, got none")
+	posted := make(chan struct{}, 1)
+	s := newJobLogShipper(func(_ context.Context, chunk string) error { posted <- struct{}{}; return nil })
+	defer s.stop()
+	s.append(strings.Repeat("x", jobLogFlushBytes))
+	select {
+	case <-posted:
+	case <-time.After(time.Second):
+		t.Fatal("threshold did not wake uploader")
 	}
 }
 
-func TestJobLogShipperStopsAtItsBudgetAndSaysSo(t *testing.T) {
+func TestJobLogShipperBudgetIncludesInflightAndTruncation(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
 	rec := &recorder{}
-	shipper := newJobLogShipper(rec.post)
-
-	// One line past the budget.
-	shipper.append(strings.Repeat("y", jobLogMaxBytes+1))
-	shipper.flush()
-
-	if !strings.Contains(rec.all(), "log truncated") {
-		t.Fatalf("want a truncation marker so the gap is explained, got %q", truncate(rec.all(), 120))
+	var once sync.Once
+	s := newJobLogShipper(func(_ context.Context, chunk string) error {
+		once.Do(func() { close(entered); <-release })
+		return rec.post(chunk)
+	})
+	defer s.stop()
+	s.append(strings.Repeat("first", jobLogFlushBytes/5+1))
+	<-entered
+	s.append(strings.Repeat("y", jobLogMaxBytes+1))
+	s.append("must be dropped")
+	close(release)
+	s.stop()
+	got := rec.all()
+	if len(got) > jobLogMaxBytes || !strings.HasSuffix(got, jobLogTruncationMarker) || strings.Count(got, jobLogTruncationMarker) != 1 || strings.Contains(got, "must be dropped") {
+		t.Fatalf("incorrect budget/truncation: bytes=%d", len(got))
 	}
-
-	// Everything after the budget is dropped rather than retried forever.
-	before := rec.count()
-	shipper.append("this should be dropped\n")
-	shipper.flush()
-	if rec.count() != before {
-		t.Fatal("want nothing more posted after the budget was hit")
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, chunk := range rec.chunks {
+		if len(chunk) > jobLogFlushBytes {
+			t.Fatal("oversized request")
+		}
 	}
 }
 
 func TestJobLogShipperFlushIsANoOpWhenEmpty(t *testing.T) {
-	// The ticker fires on a quiet build too; it must not post empty chunks.
 	rec := &recorder{}
-	shipper := newJobLogShipper(rec.post)
-	shipper.flush()
-	shipper.flush()
+	s := newJobLogShipper(rec.upload)
+	s.stop()
+	s.stop()
 	if rec.count() != 0 {
-		t.Fatalf("want no empty posts, got %d", rec.count())
+		t.Fatal("empty posts")
 	}
 }
 
 func TestJobLogShipperSurvivesAFailingServer(t *testing.T) {
-	// Log shipping must never fail a build. A server that is down costs
-	// visibility, not the job.
 	rec := &recorder{err: errors.New("503")}
-	shipper := newJobLogShipper(rec.post)
-
-	shipper.append("still building\n")
-	shipper.flush()
-	shipper.append("still building\n")
-	shipper.flush()
-
+	s := newJobLogShipper(rec.upload)
+	s.append(strings.Repeat("x", jobLogFlushBytes*2))
+	s.stop()
 	if rec.count() != 2 {
-		t.Fatalf("want the shipper to keep trying subsequent chunks, got %d", rec.count())
+		t.Fatalf("subsequent chunks skipped or retried: %d", rec.count())
 	}
 }
 
 func TestTeeIgnoresBlankLinesAndUnclaimedOutput(t *testing.T) {
-	// Output produced while no job is in flight has nowhere to go and must not
-	// panic; blank lines are not worth a request.
 	activeJobLog.mu.Lock()
 	activeJobLog.shipper = nil
 	activeJobLog.mu.Unlock()
-	teeRedactedLogLine("orphan output\n")
-
+	teeRedactedLogLine("orphan\n")
 	rec := &recorder{}
-	shipper := newJobLogShipper(rec.post)
+	s := newJobLogShipper(rec.upload)
 	activeJobLog.mu.Lock()
-	activeJobLog.shipper = shipper
+	activeJobLog.shipper = s
 	activeJobLog.mu.Unlock()
-	defer func() {
-		activeJobLog.mu.Lock()
-		activeJobLog.shipper = nil
-		activeJobLog.mu.Unlock()
-	}()
-
-	teeRedactedLogLine("   \n")
+	defer func() { activeJobLog.mu.Lock(); activeJobLog.shipper = nil; activeJobLog.mu.Unlock(); s.stop() }()
+	teeRedactedLogLine("  \n")
 	teeRedactedLogLine("real line\n")
-	shipper.flush()
+	s.stop()
+	if rec.all() != "real line\n" {
+		t.Fatal("unexpected tee output")
+	}
+}
 
-	if got := rec.all(); got != "real line\n" {
-		t.Fatalf("want only the real line shipped, got %q", got)
+func TestJobLogChunksPreserveUTF8AndOrder(t *testing.T) {
+	rec := &recorder{}
+	s := newJobLogShipper(rec.upload)
+	expected := strings.Repeat("a", jobLogFlushBytes-1) + strings.Repeat("🐱 line\n", 4000)
+	s.append(expected)
+	s.stop()
+	if rec.all() != expected {
+		t.Fatal("output reordered or lost")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, chunk := range rec.chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatal("split UTF8 rune")
+		}
+	}
+}
+
+func TestJobLogInvalidToolOutputDoesNotStallDrain(t *testing.T) {
+	rec := &recorder{}
+	s := newJobLogShipper(rec.upload)
+	expected := strings.Repeat("\x80", jobLogFlushBytes*2)
+	s.append(expected)
+	s.stop()
+	if rec.all() != expected {
+		t.Fatal("invalid tool bytes blocked or vanished in queue")
 	}
 }
