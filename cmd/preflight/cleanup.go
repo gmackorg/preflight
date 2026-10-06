@@ -1,9 +1,8 @@
 package main
 
-// P6 — runner self-maintenance. `preflight cleanup builds` prunes stale
-// regenerable build caches under a root; cleanupBuildStorageUnderPressure is
-// the same sweep gated on free disk, for the runner loop to call before
-// claiming work. The build volume filling to 100% (twice in one fleet-capture
+// P6 — explicit runner maintenance. `preflight cleanup builds` prunes stale
+// regenerable build caches under a root. Automatic runner checks only probe
+// free space; they never authorize a sweep of shared products. The build volume filling to 100% (twice in one fleet-capture
 // day) presents as mid-build lipo/codegen failures, not as a disk error —
 // prune proactively instead. Contract defined by cleanup_test.go.
 
@@ -266,7 +265,7 @@ func runCleanup(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runnerMinFreeDiskBytes: claims are declined (and post-job sweeps run) below
+// runnerMinFreeDiskBytes: claims are declined below
 // this free-space floor. Opt-in via PREFLIGHT_MIN_FREE_DISK_GB — 0 (unset)
 // disables the gate, so tests and ad-hoc CLI runs on low-disk machines are
 // unaffected; runner launchd definitions set it (15 is a good floor: a

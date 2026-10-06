@@ -5538,26 +5538,11 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 		return err
 	}
 
-	// Disk gate: builds that run out of space fail mid-lipo/codegen in
-	// confusing ways (the volume hit 100% twice in one fleet-capture day).
-	// Under pressure, sweep regenerable caches; if still low, decline to
-	// claim — the reason is visible via the heartbeat's freeDiskGb.
-	if free, err := freeBytesForPath(options.workspaceRoot); err == nil {
-		minFree := runnerMinFreeDiskBytes()
-		if minFree > 0 && free <= minFree {
-			swept, _ := cleanupBuildStorageUnderPressure(
-				options.workspaceRoot, 24*time.Hour, minFree, nil,
-			)
-			if after, err := freeBytesForPath(options.workspaceRoot); err == nil && after <= minFree {
-				fmt.Fprintf(stdout,
-					"low disk: %.1f GiB free (< %.0f GiB) after sweeping %d cache entries — declining claims\n",
-					float64(after)/float64(bytesPerGiB),
-					float64(minFree)/float64(bytesPerGiB),
-					swept.Removed,
-				)
-				return nil
-			}
-		}
+	// Disk pressure never authorizes deleting another runner's products. Check
+	// the configured floor without enumerating any shared cache directories.
+	if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
+		fmt.Fprintf(stdout, "declining claims: %v\n", err)
+		return nil
 	}
 
 	claim, err := claimRunnerJob(client, options, registration)
@@ -7206,6 +7191,15 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		port = options.metroPort
 	}
 	platform := jobPlatform(job)
+	if err := ensureBuildDiskHeadroom(appDir, stdout); err != nil {
+		return completeRunnerJob(client, options, registration, job, map[string]any{
+			"status": "failed",
+			"failure": map[string]any{
+				"code":    "build_disk_headroom_unavailable",
+				"message": err.Error(),
+			},
+		})
+	}
 	if platform == "ios" {
 		// Reap leftover CI builds from prior attempts (lease-expiry reclaims
 		// re-spawn expo run:ios on top of orphaned ones) or concurrent CI jobs
@@ -7216,12 +7210,7 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		// for this job is running yet; every CI build process here is an orphan or
 		// a competitor and is safe to kill. Serializes iOS builds on the host.
 		cleanupStaleCiBuildProcesses(stdout, preflightCiCheckoutSegment(appDir))
-		// Reclaim disk before building if the shared volume is low. The build host's
-		// APFS container fills across ~14 app checkouts + Xcode DerivedData, and a
-		// full disk silently breaks ciCheckout (git fetch), simulator.open (xcodebuild
-		// write), and Maestro artifact upload. Only clears IDLE DerivedData so a
-		// concurrent runner's in-flight build cache is preserved.
-		ensureBuildDiskHeadroom(appDir, stdout)
+
 		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
 			fmt.Fprintf(stdout, "warning: could not normalize ios/.xcode.env.local: %v\n", err)
 		}
@@ -9411,17 +9400,6 @@ func devSessionArtifactFailureCode(err error) string {
 
 func completeRunnerJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, result map[string]any) error {
 	_, err := completeRunnerJobWithResponse(client, options, registration, job, result)
-	// Post-job hygiene (P6): when the volume is under pressure, sweep stale
-	// regenerable caches now instead of failing the NEXT build mid-lipo.
-	// Pressure-gated so healthy runners pay nothing.
-	if minFree := runnerMinFreeDiskBytes(); minFree > 0 {
-		if swept, sweepErr := cleanupBuildStorageUnderPressure(
-			options.workspaceRoot, 24*time.Hour, minFree, nil,
-		); sweepErr == nil && swept.Removed > 0 {
-			fmt.Printf("post-job cache sweep: removed %d stale entries (%.1f GiB free)\n",
-				swept.Removed, float64(swept.FreeBytes)/float64(bytesPerGiB))
-		}
-	}
 
 	return err
 }
@@ -11517,52 +11495,6 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
 		}
 		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", seg, pid)
 		terminateCommandProcess(pid)
-	}
-}
-
-// ensureBuildDiskHeadroom clears Xcode DerivedData when free space on the build
-// volume is low. The farm shares one APFS container across ~14 CI checkouts +
-// DerivedData; a full disk silently fails git fetch ("No space left on device"),
-// xcodebuild, and artifact upload. Called right after the build reap (no in-flight
-// build), so DerivedData has no live consumer. Only clears under pressure, so warm
-// incremental builds keep their cache the rest of the time.
-func ensureBuildDiskHeadroom(buildDir string, stdout io.Writer) {
-	const minFreeBytes = 20 * 1024 * 1024 * 1024 // 20 GiB
-	probe := buildDir
-	if probe == "" {
-		probe = "/"
-	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(probe, &stat); err != nil {
-		return
-	}
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
-	if freeBytes >= minFreeBytes {
-		return
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return
-	}
-	derivedData := filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData")
-	entries, err := os.ReadDir(derivedData)
-	if err != nil {
-		return
-	}
-	// Multi-runner-per-host safety: only clear IDLE DerivedData. A concurrent
-	// runner's in-flight build touches its DerivedData subtree constantly, so a
-	// recent mtime means "active build, do not wipe". Clearing only entries
-	// untouched for >15m reclaims stale caches without yanking a live build.
-	const idleCutoff = 15 * time.Minute
-	now := time.Now()
-	fmt.Fprintf(stdout, "disk headroom low (%.1f GiB free); clearing idle Xcode DerivedData\n", float64(freeBytes)/(1024*1024*1024))
-	for _, entry := range entries {
-		path := filepath.Join(derivedData, entry.Name())
-		if info, statErr := os.Stat(path); statErr == nil && now.Sub(info.ModTime()) < idleCutoff {
-			fmt.Fprintf(stdout, "  keeping active DerivedData %s (modified %s ago)\n", entry.Name(), now.Sub(info.ModTime()).Round(time.Second))
-			continue
-		}
-		_ = os.RemoveAll(path)
 	}
 }
 
