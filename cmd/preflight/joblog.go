@@ -20,11 +20,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // How often buffered output is flushed upstream. Frequent enough that a live
@@ -41,22 +44,76 @@ const jobLogFlushBytes = 16 * 1024
 // chunks that will be refused.
 const jobLogMaxBytes = 4 * 1024 * 1024
 
+const jobLogTruncationMarker = "\n[preflight] log truncated: job exceeded the runner's upload budget\n"
+
+// The upload worker owns HTTP; command writers only append to a bounded buffer.
+// Requests and terminal drain are bounded independently of native-build timeouts.
 type jobLogShipper struct {
 	mu       sync.Mutex
 	pending  bytes.Buffer
-	sent     int
+	accepted int
 	stopped  bool
 	overflow bool
-
-	// Injected so tests exercise batching and budgets rather than HTTP.
-	post func(chunk string) error
-
-	done chan struct{}
-	wg   sync.WaitGroup
+	post     func(context.Context, string) error
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wake     chan struct{}
+	done     chan struct{}
+	finished chan struct{}
+	stopOnce sync.Once
 }
 
-func newJobLogShipper(post func(chunk string) error) *jobLogShipper {
-	return &jobLogShipper{post: post, done: make(chan struct{})}
+func newJobLogShipper(post func(context.Context, string) error) *jobLogShipper {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &jobLogShipper{post: post, ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{}), finished: make(chan struct{})}
+	go s.run()
+	return s
+}
+
+func (s *jobLogShipper) run() {
+	defer close(s.finished)
+	ticker := time.NewTicker(jobLogFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.done:
+			s.flush()
+			return
+		case <-s.wake:
+			s.flush()
+		case <-ticker.C:
+			s.flush()
+		}
+	}
+}
+
+func (s *jobLogShipper) stop() {
+	s.stopOnce.Do(func() {
+		// Fence appends before taking the terminal snapshot. An append that already
+		// acquired the mutex belongs to this job and is included in the drain.
+		s.mu.Lock()
+		s.stopped = true
+		s.mu.Unlock()
+		close(s.done)
+		timer := time.NewTimer(durationFromEnv("PREFLIGHT_JOB_LOG_STOP_TIMEOUT", 5*time.Second))
+		defer timer.Stop()
+		select {
+		case <-s.finished:
+		case <-timer.C:
+			s.cancel()
+			<-s.finished
+		}
+		s.cancel()
+	})
+}
+
+func (s *jobLogShipper) signal() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 var activeJobLog struct {
@@ -72,58 +129,37 @@ func startJobLogShipping(
 	registration runnerRegistrationData,
 	job apiRunnerJob,
 ) func() {
-	shipper := newJobLogShipper(func(chunk string) error {
-		_, err := postPreflightJSON(
-			client,
-			runnerEndpoint(options.apiURL, fmt.Sprintf(
-				"/api/preflight/v1/runners/%s/jobs/%s/logs",
-				registration.Runner.ID, job.ID,
-			)),
-			registration.Token,
-			map[string]any{"chunk": chunk},
-		)
+	shipper := newJobLogShipper(func(ctx context.Context, chunk string) error {
+		body, err := json.Marshal(struct {
+			Chunk string `json:"chunk"`
+		}{Chunk: chunk})
+		if err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/jobs/%s/logs", registration.Runner.ID, job.ID)), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if registration.Token != "" {
+			request.Header.Set("Authorization", "Bearer "+registration.Token)
+		}
+		// Log chunks are not idempotent. Avoid the general API helper's retry/backoff
+		// loop, which duplicates chunks and can extend shutdown after cancellation.
+		_, _, err = doPreflightJSONOnce(client, request)
 		return err
 	})
-
 	activeJobLog.mu.Lock()
 	activeJobLog.shipper = shipper
 	activeJobLog.mu.Unlock()
-
-	shipper.wg.Add(1)
-	go func() {
-		defer shipper.wg.Done()
-		ticker := time.NewTicker(jobLogFlushInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-shipper.done:
-				return
-			case <-ticker.C:
-				shipper.flush()
-			}
-		}
-	}()
-
-	var once sync.Once
 	return func() {
-		once.Do(func() {
-			close(shipper.done)
-			shipper.wg.Wait()
-			// One last flush after the goroutine is gone, so the tail of a
-			// failing command — the part anyone actually wants — is not the
-			// part that gets dropped.
-			shipper.flush()
-
-			activeJobLog.mu.Lock()
-			if activeJobLog.shipper == shipper {
-				activeJobLog.shipper = nil
-			}
-			activeJobLog.mu.Unlock()
-
-			shipper.mu.Lock()
-			shipper.stopped = true
-			shipper.mu.Unlock()
-		})
+		activeJobLog.mu.Lock()
+		if activeJobLog.shipper == shipper {
+			activeJobLog.shipper = nil
+		}
+		activeJobLog.mu.Unlock()
+		shipper.stop()
 	}
 }
 
@@ -145,39 +181,57 @@ func (s *jobLogShipper) append(line string) {
 		s.mu.Unlock()
 		return
 	}
-	if s.sent+s.pending.Len()+len(line) > jobLogMaxBytes {
+	// Reserve the marker inside the budget, including already in-flight chunks.
+	remaining := jobLogMaxBytes - len(jobLogTruncationMarker) - s.accepted
+	if len(line) > remaining {
+		count := jobLogPrefixBytes([]byte(line), remaining)
+		s.pending.WriteString(line[:count])
+		s.pending.WriteString(jobLogTruncationMarker)
+		s.accepted += count + len(jobLogTruncationMarker)
 		s.overflow = true
-		s.pending.WriteString("\n[preflight] log truncated: job exceeded the runner's upload budget\n")
-		s.mu.Unlock()
-		s.flush()
-		return
+	} else {
+		s.pending.WriteString(line)
+		s.accepted += len(line)
 	}
-	s.pending.WriteString(line)
-	full := s.pending.Len() >= jobLogFlushBytes
+	full := s.pending.Len() >= jobLogFlushBytes || s.overflow
 	s.mu.Unlock()
-
 	if full {
-		s.flush()
+		s.signal()
 	}
 }
 
+// Only the worker calls flush, so requests cannot race or reorder chunks.
 func (s *jobLogShipper) flush() {
-	s.mu.Lock()
-	if s.pending.Len() == 0 {
+	for s.ctx.Err() == nil {
+		s.mu.Lock()
+		count := min(s.pending.Len(), jobLogFlushBytes)
+		if count == 0 {
+			s.mu.Unlock()
+			return
+		}
+		// Keep UTF-8 code points intact when a chunk boundary crosses a log line.
+		count = jobLogPrefixBytes(s.pending.Bytes(), count)
+		chunk := string(s.pending.Next(count))
 		s.mu.Unlock()
-		return
+		ctx, cancel := context.WithTimeout(s.ctx, durationFromEnv("PREFLIGHT_JOB_LOG_UPLOAD_TIMEOUT", 5*time.Second))
+		_ = s.post(ctx, chunk)
+		cancel()
+		// Failed uploads remain best-effort; complete redacted output stays in the
+		// command's local log. Never retry a chunk the server may have accepted.
 	}
-	chunk := s.pending.String()
-	s.pending.Reset()
-	s.sent += len(chunk)
-	s.mu.Unlock()
+}
 
-	if err := s.post(chunk); err != nil {
-		// Deliberately not retried and not surfaced. The lease may simply have
-		// ended, or the budget been hit server-side; either way the build is
-		// the thing that matters and it is still running.
-		return
+// Do not split valid UTF-8, but do not stall forever on invalid tool output.
+func jobLogPrefixBytes(data []byte, count int) int {
+	if count >= len(data) {
+		return count
 	}
+	for cut := count; cut >= 0 && cut >= count-utf8.UTFMax+1; cut-- {
+		if utf8.RuneStart(data[cut]) {
+			return cut
+		}
+	}
+	return count
 }
 
 // jobLogUploadEnabled reports whether the server advertised the log-ingest

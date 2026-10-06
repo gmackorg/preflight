@@ -4939,13 +4939,17 @@ func shouldFlushSetupPromptFragment(value string) bool {
 }
 
 type redactingCommandWriter struct {
+	shipper     *jobLogShipper
 	destination io.Writer
 	mu          sync.Mutex
 	pending     string
 }
 
 func attachRedactedCommandLog(command *exec.Cmd, destination io.Writer) func() {
-	writer := &redactingCommandWriter{destination: destination}
+	activeJobLog.mu.Lock()
+	shipper := activeJobLog.shipper
+	activeJobLog.mu.Unlock()
+	writer := &redactingCommandWriter{destination: destination, shipper: shipper}
 	command.Stdout = writer
 	command.Stderr = writer
 	return writer.Flush
@@ -4966,7 +4970,7 @@ func (writer *redactingCommandWriter) Write(chunk []byte) (int, error) {
 		redacted := redactSetupTranscriptText(line)
 		// Every logged command funnels through here, so this one tee ships all
 		// of them to the server — see joblog.go for why that had never happened.
-		teeRedactedLogLine(redacted)
+		writer.tee(redacted)
 		if _, err := io.WriteString(writer.destination, redacted); err != nil {
 			return 0, err
 		}
@@ -4981,8 +4985,18 @@ func (writer *redactingCommandWriter) Flush() {
 	if writer.pending == "" {
 		return
 	}
-	_, _ = io.WriteString(writer.destination, redactSetupTranscriptText(writer.pending))
+	redacted := redactSetupTranscriptText(writer.pending)
+	writer.tee(redacted)
+	_, _ = io.WriteString(writer.destination, redacted)
 	writer.pending = ""
+}
+
+// Bind output to the job present when the command was attached. A lingering
+// process must not send its output to a later job after the active pointer moves.
+func (writer *redactingCommandWriter) tee(line string) {
+	if writer.shipper != nil && strings.TrimSpace(line) != "" {
+		writer.shipper.append(line)
+	}
 }
 
 // Bounds for commandLogExcerpt. Only the tail of a log is scanned (build logs
