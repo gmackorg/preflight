@@ -6545,10 +6545,8 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	}
 
 	appDir := appDirectoryForJob(options, job)
-	// The prove-app chain (dev_session.start -> simulator.open -> maestro.run) has
-	// no dev_session.stop, so Metro from a PRIOR build leaks and holds the metro
-	// port, making expo decline to start ("Skipping dev server") for this build.
-	// Reap leftover dev servers from other CI checkouts before we resolve the port.
+	// Clear only this app's dead session handle. Live sessions belong to their
+	// workflows, including simulator reviews that continue after a native build.
 	cleanupStalePreflightDevServers(appDir, stdout)
 	// An Android emulator dev-client bakes the default Metro port 8081 (paired
 	// with the REACT_NATIVE_PACKAGER_HOSTNAME=10.0.2.2 pin in expoCommandEnv), so
@@ -6574,8 +6572,8 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	// Android emulator dev-clients bake Metro port 8081, so keep the pinned port
 	// (set just above) — do NOT auto-allocate a free port, or the baked 8081 and
 	// the actual Metro port diverge and the dev-client can't connect. A stale
-	// Metro squatting on 8081 is reaped below (cleanupStalePreflightDevServers)
-	// or reused; Android runs serially so there's no concurrent-build collision.
+	// Metro on 8081 is handled by the Android-specific ownership check above;
+	// live sessions on other ports remain owned by their workflows.
 	if options.metroStatusURL == "" && options.metroPort > 0 && !isAndroidEmulatorJob(job) {
 		configuredStatusURL := runnerLocalDevServerURL(options) + "/status"
 		// Reuse our own metro if it's already up on the configured port (the
@@ -11326,56 +11324,27 @@ func preflightCiCheckoutSegment(s string) string {
 	return rest
 }
 
-// cleanupStalePreflightDevServers kills leftover `expo start --dev-client` Metro
-// processes from PRIOR preflight CI builds (a different .preflight-ci checkout
-// than the current job). The prove-app chain has no dev_session.stop, so without
-// this each completed build leaks its Metro, which then holds the metro port and
-// makes expo decline to start for the next build. Serial-runner safe: it never
-// touches a dev server for the current job's own checkout (so same-app reuse and
-// concurrent builds of the SAME app are preserved).
+// cleanupStalePreflightDevServers removes a dead process handle for this exact
+// app directory. A live Metro remains owned by its development session after
+// the native build completes: another workflow may still be collecting evidence.
+// Only an explicit dev_session.stop may terminate that session. Port allocation
+// already avoids collisions with other apps, so process-list scans are unsafe.
 func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
-	currentSeg := preflightCiCheckoutSegment(currentAppDir)
-	out, err := exec.Command("ps", "-eo", "pid=,command=").Output()
+	pidPath := filepath.Join(currentAppDir, ".preflight", "expo-dev-session.pid")
+	content, err := os.ReadFile(pidPath)
 	if err != nil {
 		return
 	}
-	lines := strings.Split(string(out), "\n")
-	// Multi-runner-per-host safety: a dev server is only a leak if NO build is
-	// actively running for its app. A concurrent runner building a different app
-	// has a live `expo run:ios`/`xcodebuild` for that app plus its dev server —
-	// reaping that server would wedge the other runner. Collect segments with an
-	// active build and spare their dev servers.
-	activeBuildSegs := map[string]bool{}
-	for _, line := range lines {
-		if !strings.Contains(line, "/.preflight-ci/") {
-			continue
-		}
-		if strings.Contains(line, "expo run:ios") || strings.Contains(line, "xcodebuild") {
-			if s := preflightCiCheckoutSegment(line); s != "" {
-				activeBuildSegs[s] = true
-			}
-		}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil || pid <= 0 {
+		return
 	}
-	for _, line := range lines {
-		if !strings.Contains(line, "/.preflight-ci/") ||
-			!strings.Contains(line, "--dev-client") ||
-			!strings.Contains(line, "start") {
-			continue
-		}
-		seg := preflightCiCheckoutSegment(line)
-		if seg == "" || (currentSeg != "" && seg == currentSeg) || activeBuildSegs[seg] {
-			continue
-		}
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) == 0 {
-			continue
-		}
-		pid, convErr := strconv.Atoi(fields[0])
-		if convErr != nil || pid <= 0 {
-			continue
-		}
-		fmt.Fprintf(stdout, "reaping stale preflight dev server for %s (pid %d)\n", seg, pid)
-		terminateCommandProcess(pid)
+	// Permission errors do not establish that the process is dead.
+	if !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return
+	}
+	if err := os.Remove(pidPath); err == nil {
+		fmt.Fprintf(stdout, "removed dead Preflight dev-session handle for %s (pid %d)\n", currentAppDir, pid)
 	}
 }
 
