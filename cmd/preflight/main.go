@@ -10705,6 +10705,9 @@ func runCmd(dir string, name string, args ...string) (string, error) {
 }
 
 func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob) error {
+	if err := validatePinnedSimulatorJob(options, job); err != nil {
+		return err
+	}
 	binding := job.Payload.SourceBinding
 	if runnerJobSourceBindingEmpty(binding) {
 		return nil
@@ -13825,9 +13828,7 @@ func loadSimctlInventory(options runnerOnceOptions) (json.RawMessage, error) {
 	// that device so the control plane locks this runner to its own sim and two
 	// runners never contend for the same simulator.
 	if udid := strings.TrimSpace(options.simulatorUDID); udid != "" {
-		if filtered, err := filterSimctlInventoryToUDID(content, udid); err == nil {
-			return filtered, nil
-		}
+		return filterSimctlInventoryToUDID(content, udid)
 	}
 	return json.RawMessage(content), nil
 }
@@ -13896,6 +13897,14 @@ func firstAvailableTarget(targets []apiTarget) *apiTarget {
 func preferredSimulatorTarget(options runnerOnceOptions, platform string, targets []apiTarget) *apiTarget {
 	if platform != "ios" {
 		return firstAvailableTarget(targets)
+	}
+	if pinned := strings.TrimSpace(options.simulatorUDID); pinned != "" {
+		for index := range targets {
+			if targets[index].Availability == "available" && strings.EqualFold(strings.TrimSpace(targets[index].ProviderIdentity), pinned) {
+				return &targets[index]
+			}
+		}
+		return nil
 	}
 	booted := bootedIOSSimulatorUDIDs(options)
 	for index := range targets {
@@ -15297,7 +15306,14 @@ func executeStandaloneDevelopmentSessionPlan(options proveAppOptions, binding so
 			return 1
 		}
 		defer logFile.Close()
-		command, observedOutput, err := startStandaloneObservedPlannedCommandWithOutput(plannedCommand, io.MultiWriter(stderr, logFile), defaultExpoDevSessionStartTimeout)
+		outputReady := func(output string) bool {
+			if readMapString(plan.DevSession, "hostMode") != "tunnel" {
+				return strings.TrimSpace(output) != ""
+			}
+			_, ready := expoTunnelDevServerURLFromLogContent(output)
+			return ready
+		}
+		command, observedOutput, err := startStandaloneObservedPlannedCommandWithOutput(plannedCommand, io.MultiWriter(stderr, logFile), defaultExpoDevSessionStartTimeout, outputReady)
 		if err != nil {
 			fmt.Fprintf(stderr, "start %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
 			return 1
@@ -16341,7 +16357,7 @@ func startStandaloneObservedPlannedCommand(plannedCommand simulatorProofPlanComm
 	return command, err
 }
 
-func startStandaloneObservedPlannedCommandWithOutput(plannedCommand simulatorProofPlanCommand, stderr io.Writer, startupTimeout time.Duration) (*exec.Cmd, string, error) {
+func startStandaloneObservedPlannedCommandWithOutput(plannedCommand simulatorProofPlanCommand, stderr io.Writer, startupTimeout time.Duration, readyChecks ...func(string) bool) (*exec.Cmd, string, error) {
 	command := standalonePlannedExecCommandWithoutOutput(plannedCommand)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdoutPipe, err := command.StdoutPipe()
@@ -16366,20 +16382,36 @@ func startStandaloneObservedPlannedCommandWithOutput(plannedCommand simulatorPro
 
 	timeout := time.NewTimer(startupTimeout)
 	defer timeout.Stop()
+	readyPoll := time.NewTicker(20 * time.Millisecond)
+	defer readyPoll.Stop()
+	ready := func() bool {
+		output := capturedOutput.String()
+		if len(readyChecks) == 0 {
+			return strings.TrimSpace(output) != ""
+		}
+		return readyChecks[0](output)
+	}
 	closedPipes := 0
 	for {
 		select {
 		case <-outputSeen:
-			return command, capturedOutput.String(), nil
+			outputSeen = nil
+			if ready() {
+				return command, capturedOutput.String(), nil
+			}
+		case <-readyPoll.C:
+			if ready() {
+				return command, capturedOutput.String(), nil
+			}
 		case <-outputClosed:
 			closedPipes += 1
 			if closedPipes == 2 {
 				terminateProcessGroup(command)
-				return nil, capturedOutput.String(), fmt.Errorf("%s exited before emitting startup output", standaloneCommandLabel(plannedCommand))
+				return nil, capturedOutput.String(), fmt.Errorf("%s exited before emitting startup output satisfying readiness", standaloneCommandLabel(plannedCommand))
 			}
 		case <-timeout.C:
 			terminateProcessGroup(command)
-			return nil, capturedOutput.String(), fmt.Errorf("%s did not emit startup output within %s", standaloneCommandLabel(plannedCommand), startupTimeout)
+			return nil, capturedOutput.String(), fmt.Errorf("%s did not emit ready startup output within %s", standaloneCommandLabel(plannedCommand), startupTimeout)
 		}
 	}
 }
