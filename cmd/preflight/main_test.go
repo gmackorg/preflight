@@ -1786,6 +1786,7 @@ esac
 	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
 printf 'npx %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 printf 'npx %s\n' "$*"
+printf 'exp+forgegraf://expo-development-client/?url=https%%3A%%2F%%2Fpreflight-tunnel.ngrok-free.app\n'
 sleep 30
 `), 0o755); err != nil {
 		t.Fatalf("write fake npx: %v", err)
