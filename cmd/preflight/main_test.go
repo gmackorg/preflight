@@ -11814,6 +11814,9 @@ exit 0
 			if !containsAny(capabilities["adapters"].([]any), "unity.android.build_support") {
 				t.Fatalf("expected Unity Android adapter capability, got %#v", capabilities)
 			}
+			if !containsAny(capabilities["adapters"].([]any), "unity.native.packaging") {
+				t.Fatalf("expected Unity native packaging capability, got %#v", capabilities)
+			}
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","workspaceId":"ws_cli","name":"CLI Runner","hostIdentity":"vanuc","allowedWorkspaceRoots":["/repo"],"capabilities":{"platforms":["android"],"localTools":["unity"],"adapters":["unity.editor","unity.android.build_support"],"runnerArtifactUpload":true,"runnerJobHeartbeat":false},"status":"online"},"token":"runner_token"},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_register"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/heartbeat":
 			_, _ = w.Write([]byte(`{"data":{"runner":{"id":"pfrun_cli","status":"online"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_heartbeat"}}`))

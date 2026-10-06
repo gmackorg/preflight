@@ -239,7 +239,7 @@ func promoteUnityExport(options runnerOnceOptions, job apiRunnerJob, stagedProje
 	if err := validateUnityOwnedPath(stagedProject, output); err != nil {
 		return err
 	}
-	if len(discoverUnityBuildArtifacts(plan.Output.ArtifactKind, output)) == 0 {
+	if len(discoverUnityBuildArtifacts(firstNonEmpty(plan.Output.ExportArtifactKind, plan.Output.ArtifactKind), output)) == 0 {
 		return fmt.Errorf("Unity staged export is missing native project")
 	}
 	if err := verifyUnityExportChecksums(output); err != nil {
@@ -251,7 +251,7 @@ func promoteUnityExport(options runnerOnceOptions, job apiRunnerJob, stagedProje
 		return err
 	}
 	ownedRoot := filepath.Join(workspace, ".preflight", "unity-exports", job.ID)
-	target := filepath.Clean(plan.Output.OutputPath)
+	target := filepath.Clean(firstNonEmpty(plan.Output.ExportOutputPath, plan.Output.OutputPath))
 	if !pathWithin(ownedRoot, target) || filepath.Base(target) != filepath.Base(output) {
 		return fmt.Errorf("Unity export output must be inside this job's owned export directory")
 	}

@@ -5689,7 +5689,7 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 	}
 	if unityCommandAvailable() {
 		localTools = append(localTools, "unity")
-		adapters = append(adapters, "unity.editor")
+		adapters = append(adapters, "unity.editor", "unity.native.packaging")
 		editor, _ := resolveUnityExecutable(runnerJobCommandPlan{})
 		adapters = append(adapters, unityInstalledBuildSupport(editor)...)
 	}
@@ -5966,6 +5966,8 @@ type runnerJobCommandExecutable struct {
 }
 
 type runnerJobCommandPlanOutput struct {
+	ExportArtifactKind   string `json:"exportArtifactKind"`
+	ExportOutputPath     string `json:"exportOutputPath"`
 	ExportRelativePath   string `json:"exportRelativePath"`
 	BuildTarget          string `json:"buildTarget"`
 	ArtifactKind         string `json:"artifactKind"`
@@ -7498,6 +7500,8 @@ func handleUnityBuildPlayerJob(client *http.Client, options runnerOnceOptions, r
 }
 
 type unityBuildArtifacts struct {
+	NativeManifestSHA256 string
+	NativeFileCount      int
 	SourceCommit         string
 	SourceManifestPath   string
 	SourceManifestSHA256 string
@@ -7525,6 +7529,9 @@ func runUnityBuildPlayer(
 ) (unityBuildArtifacts, error) {
 	plan := job.Payload.CommandPlan
 	if err := validateUnityBuildCommandPlan(plan); err != nil {
+		return unityBuildArtifactsFromPlan(options, job), err
+	}
+	if err := validateUnityNativePackagePlan(firstNonEmpty(job.Payload.SourceBinding.WorkspaceRoot, options.workspaceRoot), job); err != nil {
 		return unityBuildArtifactsFromPlan(options, job), err
 	}
 	executable, err := resolveUnityExecutable(plan)
@@ -7590,7 +7597,11 @@ func runUnityBuildPlayer(
 			artifacts.SourceManifestSHA256, err = unityFileSHA256(artifacts.SourceManifestPath)
 		}
 		if err == nil {
-			artifacts.ExportManifestSHA256, artifacts.ExportFileCount, err = unityDirectorySHA256(filepath.Dir(artifacts.OutputPath))
+			err = packageUnityNativeLibrary(options, job, stagedProject, executable, logFile, cancellationCheck, &artifacts)
+		}
+		if err == nil && artifacts.ExportManifestSHA256 == "" {
+			exportPath := firstNonEmpty(plan.Output.ExportOutputPath, artifacts.OutputPath)
+			artifacts.ExportManifestSHA256, artifacts.ExportFileCount, err = unityDirectorySHA256(filepath.Dir(exportPath))
 		}
 	}
 	artifacts.BuildArtifacts = discoverUnityBuildArtifacts(artifacts.ArtifactKind, artifacts.OutputPath)
@@ -8007,6 +8018,10 @@ func unityBuildResultPayload(artifacts unityBuildArtifacts) map[string]any {
 		result["sourceManifestSHA256"] = artifacts.SourceManifestSHA256
 		result["exportManifestSHA256"] = artifacts.ExportManifestSHA256
 		result["exportFileCount"] = artifacts.ExportFileCount
+	}
+	if artifacts.NativeManifestSHA256 != "" {
+		result["nativeManifestSHA256"] = artifacts.NativeManifestSHA256
+		result["nativeFileCount"] = artifacts.NativeFileCount
 	}
 	return result
 }
