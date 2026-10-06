@@ -50,6 +50,16 @@ Configuration lives in `~/.config/preflight/config.json`. Useful overrides:
 
 ## Running a build host
 
+Unity build work orders can request `sourceBinding.unity.nativePackage` as
+`ios-xcframework` with an `ios-simulator` export, or `android-aar` with an
+`android-library` export. The runner stages tracked source, verifies the raw
+export checksums, then builds both unsigned iOS framework slices and their
+XCFramework or an Android AAR using the selected editor's bundled JDK/Gradle.
+Native output and intermediate builds belong to
+`.preflight/unity-native-packages/<jobId>`; completion records native and export
+hashes separately. Pin these libraries into the hybrid app before its normal
+simulator build and journeys. Unity packaging alone does not prove gameplay.
+
 A runner is a long-lived process that claims jobs. On macOS it's a launchd
 agent; `ops/` has a working example plus the hourly disk sweep the build farm
 uses.
