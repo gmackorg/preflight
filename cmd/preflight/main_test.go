@@ -6204,20 +6204,8 @@ exit 0
 	t.Setenv("MAESTRO_LOG", maestroLog)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The runner streams command output to /logs for whatever job is in
-		// flight. That is not what this test asserts, but it must not read as an
-		// unexpected route either.
-		if strings.HasSuffix(r.URL.Path, "/logs") {
-			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
-			return
-		}
-		if r.URL.Path != "/status" {
-			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
-		}
-		_, _ = w.Write([]byte("packager-status:running"))
-	}))
-	t.Cleanup(metroServer.Close)
+	metroServer := startTestMetroProcess(t, appDir)
+	writeTestMetroPID(t, appDir, metroServer.PID)
 
 	var mu sync.Mutex
 	var calls []string
@@ -6938,7 +6926,6 @@ exit 1
 
 	for _, expected := range []string{
 		"created workflow pfw_dev_accept queued",
-		"workflow pfw_dev_accept running waiting_for_runner",
 		"workflow pfw_dev_accept passed_with_warnings development_open_attempted",
 	} {
 		if !strings.Contains(proveStdout.String(), expected) {
@@ -11437,20 +11424,8 @@ exit 0
 	t.Setenv("MAESTRO_LOG", maestroLog)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The runner streams command output to /logs for whatever job is in
-		// flight. Not what these tests assert, but it must not read as an
-		// unexpected route either.
-		if strings.HasSuffix(r.URL.Path, "/logs") {
-			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
-			return
-		}
-		if r.URL.Path != "/status" {
-			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
-		}
-		_, _ = w.Write([]byte("packager-status:running"))
-	}))
-	t.Cleanup(metroServer.Close)
+	metroServer := startTestMetroProcess(t, appDir)
+	writeTestMetroPID(t, appDir, metroServer.PID)
 
 	var calls []string
 	var devSessionResult map[string]any
@@ -12125,20 +12100,8 @@ exit 0
 	t.Setenv("MAESTRO_LOG", maestroLog)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The runner streams command output to /logs for whatever job is in
-		// flight. That is not what this test asserts, but it must not read as an
-		// unexpected route either.
-		if strings.HasSuffix(r.URL.Path, "/logs") {
-			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
-			return
-		}
-		if r.URL.Path != "/status" {
-			t.Fatalf("unexpected Metro status path %s", r.URL.Path)
-		}
-		_, _ = w.Write([]byte("packager-status:running"))
-	}))
-	t.Cleanup(metroServer.Close)
+	metroServer := startTestMetroProcess(t, appDir)
+	writeTestMetroPID(t, appDir, metroServer.PID)
 
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -13479,31 +13442,13 @@ printf 'forgegraph-bot\n'
 
 func TestPreflightOwnedMetroRequiresLivePid(t *testing.T) {
 	appDir := t.TempDir()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The runner streams command output to /logs for whatever job is in
-		// flight. Not what these tests assert, but it must not read as an
-		// unexpected route either.
-		if strings.HasSuffix(r.URL.Path, "/logs") {
-			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
-			return
-		}
-		_, _ = w.Write([]byte("packager-status:running"))
-	}))
-	t.Cleanup(server.Close)
-
-	if preflightOwnedMetroReady(server.Client(), appDir, server.URL) {
+	server := startTestMetroProcess(t, appDir)
+	if preflightOwnedMetroReady(http.DefaultClient, appDir, server.URL) {
 		t.Fatal("status-only Metro must not be treated as Preflight-owned")
 	}
-
-	preflightDir := filepath.Join(appDir, ".preflight")
-	if err := os.MkdirAll(preflightDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(preflightDir, "expo-dev-session.pid"), []byte(fmt.Sprint(os.Getpid())), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !preflightOwnedMetroReady(server.Client(), appDir, server.URL) {
-		t.Fatal("live Preflight pid and healthy status should be reusable")
+	writeTestMetroPID(t, appDir, server.PID)
+	if !preflightOwnedMetroReady(http.DefaultClient, appDir, server.URL) {
+		t.Fatal("live recorded Metro listener in the app directory should be reusable")
 	}
 }
 

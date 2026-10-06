@@ -11163,7 +11163,7 @@ func preflightOwnedMetroReady(client *http.Client, appDir string, statusURL stri
 		_ = os.Remove(pidPath)
 		return false
 	}
-	return metroStatusReady(client, statusURL)
+	return metroListenerOwnedByApp(appDir, pid, statusURL) && metroStatusReady(client, statusURL)
 }
 
 func stopPreflightOwnedDevSession(appDir string, expectedPID int) (string, error) {
