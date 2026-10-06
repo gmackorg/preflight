@@ -16,6 +16,18 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install Jujutsu for source-binding integration tests
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/jj-vcs/jj/releases/download/v0.38.0/jj-v0.38.0-x86_64-unknown-linux-musl.tar.gz \
+            --output /tmp/preflight-jj.tar.gz
+          mkdir -p /tmp/preflight-jj
+          tar -xzf /tmp/preflight-jj.tar.gz -C /tmp/preflight-jj
+          JJ_BINARY="$(find /tmp/preflight-jj -type f -name jj -print -quit)"
+          test -n "$JJ_BINARY"
+          sudo install -m 0755 "$JJ_BINARY" /usr/local/bin/jj
+          jj --version
+
       - name: Build
         run: go build ./...
 

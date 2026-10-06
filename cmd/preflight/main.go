@@ -10305,18 +10305,33 @@ func bootIOSSimulator(options runnerOnceOptions, providerIdentity string) error 
 // against an unresolved one fails with a source_binding_mismatch that looks
 // like a misconfigured job rather than two spellings of the same directory.
 //
-// Falls back to the absolute path when the target does not exist yet, since a
-// checkout root is created after this check in some flows.
+// A cold checkout does not exist yet. Resolve its closest existing ancestor
+// (which can be an external-disk symlink) and append the missing suffix.
 func resolvedPathForBindingCheck(path string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return absolute, nil
+	ancestor := absolute
+	var suffix []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(ancestor)
+		if resolveErr == nil {
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(resolveErr) {
+			return "", resolveErr
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", resolveErr
+		}
+		suffix = append(suffix, filepath.Base(ancestor))
+		ancestor = parent
 	}
-	return resolved, nil
 }
 
 func appDirectoryForJob(options runnerOnceOptions, job apiRunnerJob) string {
@@ -10610,10 +10625,6 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	}
 
 	appDir := appDirectoryForJob(options, job)
-	absoluteAppDir, err := resolvedPathForBindingCheck(appDir)
-	if err != nil {
-		return sourceBindingMismatch("packagePath", appDir, err.Error())
-	}
 	bindingRoot := binding.WorkspaceRoot
 	if bindingRoot == "" {
 		bindingRoot = options.workspaceRoot
@@ -10624,6 +10635,11 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	if err := ensureCiCheckout(bindingRoot, binding); err != nil {
 		return sourceBindingMismatch("ciCheckout", bindingRoot, err.Error())
 	}
+	absoluteAppDir, err := resolvedPathForBindingCheck(appDir)
+	if err != nil {
+		return sourceBindingMismatch("packagePath", appDir, err.Error())
+	}
+
 	// For a Preflight-owned CI checkout the runner just checked out the exact
 	// commit, so the git-identity checks below are authoritative. The content
 	// digests / dirty-state / app-config comparisons are skipped: they assume a
@@ -10717,35 +10733,28 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		}
 	}
 
-	if expected := strings.TrimSpace(binding.GitRemoteURL); expected != "" {
-		actual, err := gitOutput(bindingRoot, "config", "--get", "remote.origin.url")
-		if err != nil {
-			return sourceBindingMismatch("gitRemoteUrl", expected, err.Error())
+	if binding.GitRemoteURL != "" || binding.GitCommitSHA != "" || (!isCiRoot && binding.GitBranch != "") {
+		repository, repositoryErr := readSourceRepository(bindingRoot)
+		if repositoryErr != nil {
+			return sourceBindingMismatch("sourceRepository", "inspectable source", repositoryErr.Error())
 		}
-		if err := compareSourceBindingValue("gitRemoteUrl", expected, actual); err != nil {
-			return err
+		if expected := strings.TrimSpace(binding.GitRemoteURL); expected != "" {
+			if err := compareSourceBindingValue("gitRemoteUrl", expected, repository.remote); err != nil {
+				return err
+			}
 		}
-	}
-	// gitBranch is skipped for CI roots: ensureCiCheckout does `git reset --hard
-	// <sha>` which leaves HEAD on the clone's local branch name (or detached),
-	// so the local branch name is not meaningful — gitCommitSha is authoritative.
-	if expected := strings.TrimSpace(binding.GitBranch); expected != "" && !isCiRoot {
-		actual, err := gitOutput(bindingRoot, "rev-parse", "--abbrev-ref", "HEAD")
-		if err != nil {
-			return sourceBindingMismatch("gitBranch", expected, err.Error())
+		// CI checkouts can be detached; their exact source SHA is authoritative.
+		if expected := strings.TrimSpace(binding.GitBranch); expected != "" && !isCiRoot {
+			if err := compareSourceBindingValue("gitBranch", expected, repository.branch); err != nil {
+				return err
+			}
 		}
-		if err := compareSourceBindingValue("gitBranch", expected, actual); err != nil {
-			return err
+		if expected := strings.TrimSpace(binding.GitCommitSHA); expected != "" {
+			if err := compareSourceBindingValue("gitCommitSha", expected, repository.commit); err != nil {
+				return err
+			}
 		}
-	}
-	if expected := strings.TrimSpace(binding.GitCommitSHA); expected != "" {
-		actual, err := gitOutput(bindingRoot, "rev-parse", "HEAD")
-		if err != nil {
-			return sourceBindingMismatch("gitCommitSha", expected, err.Error())
-		}
-		if err := compareSourceBindingValue("gitCommitSha", expected, actual); err != nil {
-			return err
-		}
+
 	}
 
 	return nil
@@ -17136,8 +17145,14 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 	selectedEASProfile := selectEASProfile(easConfig, options.platform, options.lane)
 	resolvedExpoConfig := resolveExpoConfig(absoluteAppDir, selectedEASProfile.env)
 	appIdentity := resolvedExpoConfig.identity
-	dirtyWorkspace, changedSetupFiles := sourceBindingGitState(workspaceRoot, absoluteAppDir)
-	gitRemoteURL, gitBranch, gitCommitSHA := sourceBindingGitIdentity(workspaceRoot)
+	repository, err := readSourceRepository(workspaceRoot)
+	if err != nil {
+		return sourceBinding{}, err
+	}
+	changedFiles := filterRunnerManagedPaths(workspaceRoot, absoluteAppDir, repository.changed)
+	dirtyWorkspace := len(changedFiles) > 0
+	changedSetupFiles := changedPreflightSetupFiles(workspaceRoot, absoluteAppDir, changedFiles)
+	gitRemoteURL, gitBranch, gitCommitSHA := repository.remote, repository.branch, repository.commit
 
 	return sourceBinding{
 		AppID:               "pfapp_" + sanitizeID(pkg.Name),
@@ -17177,6 +17192,14 @@ func sourceBindingGitIdentity(workspaceRoot string) (string, string, string) {
 }
 
 func sourceBindingGitState(workspaceRoot string, appDir string) (bool, []string) {
+	if jjOnlyWorkspace(workspaceRoot) {
+		repository, err := readJJSourceRepository(workspaceRoot)
+		if err != nil {
+			return true, []string{}
+		}
+		changed := filterRunnerManagedPaths(workspaceRoot, appDir, repository.changed)
+		return len(changed) > 0, changedPreflightSetupFiles(workspaceRoot, appDir, changed)
+	}
 	changedFiles := filterRunnerManagedPaths(
 		workspaceRoot,
 		appDir,
@@ -17455,7 +17478,7 @@ func easProfileAndroidInstallable(profile easBuildProfile) bool {
 func findWorkspaceRoot(appDir string) string {
 	current := appDir
 	for {
-		if fileExists(filepath.Join(current, "pnpm-workspace.yaml")) {
+		if fileExists(filepath.Join(current, "pnpm-workspace.yaml")) || fileExists(filepath.Join(current, ".git")) || fileExists(filepath.Join(current, ".jj")) {
 			return current
 		}
 		parent := filepath.Dir(current)

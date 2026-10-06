@@ -6029,6 +6029,39 @@ func TestRunnerOnceCleansExpiredLocalPreflightArtifactDirectories(t *testing.T) 
 	}
 }
 
+// writeSimulatorNativeBuildFixture models the two native tool boundaries used by
+// the simulator lane: Expo produces a workspace, then Xcode produces an app.
+func writeSimulatorNativeBuildFixture(t *testing.T, fakeBin string) string {
+	t.Helper()
+	xcodeLog := filepath.Join(t.TempDir(), "xcodebuild.log")
+	t.Setenv("XCODEBUILD_LOG", xcodeLog)
+	for name, script := range map[string]string{
+		"npx": `#!/usr/bin/env sh
+printf '%s :: APP_VARIANT=%s :: %s\n' "$PWD" "$APP_VARIANT" "$*" >> "$NPX_LOG"
+if [ "$1" = "expo" ] && [ "$2" = "prebuild" ]; then
+  mkdir -p ios/Forgegraph.xcworkspace
+fi
+`,
+		"xcodebuild": `#!/usr/bin/env sh
+printf '%s :: %s\n' "$PWD" "$*" >> "$XCODEBUILD_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-derivedDataPath" ]; then
+    shift
+    mkdir -p "$1/Build/Products/Debug-iphonesimulator/Forgegraph.app"
+    exit 0
+  fi
+  shift
+done
+exit 1
+`,
+	} {
+		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0o755); err != nil {
+			t.Fatalf("write native tool fixture %s: %v", name, err)
+		}
+	}
+	return xcodeLog
+}
+
 func TestProveAppIOSSimulatorProofLoopCoordinatesRunnerAndArtifacts(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	// macOS puts TempDir under /var, a symlink to /private/var. The runner
@@ -6112,6 +6145,7 @@ exit 0
 `), 0o755); err != nil {
 		t.Fatalf("write fake maestro: %v", err)
 	}
+	xcodeLog := writeSimulatorNativeBuildFixture(t, fakeBin)
 	t.Setenv("NPX_LOG", npxLog)
 	t.Setenv("MAESTRO_LOG", maestroLog)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -6395,8 +6429,20 @@ exit 0
 	if err != nil {
 		t.Fatalf("read npx log: %v", err)
 	}
-	if !strings.Contains(string(npxOutput), "expo run:ios --device 6BA8F38E-BF97-4830-98A6-E459E4312F29 --no-bundler") {
-		t.Fatalf("expected expo run:ios command, got %q", string(npxOutput))
+	if !strings.Contains(string(npxOutput), "expo prebuild --platform ios") {
+		t.Fatalf("expected Expo prebuild, got %q", string(npxOutput))
+	}
+	xcodeOutput, err := os.ReadFile(xcodeLog)
+	if err != nil {
+		t.Fatalf("read Xcode build log: %v", err)
+	}
+	for _, expected := range []string{"-workspace " + filepath.Join(appDir, "ios", "Forgegraph.xcworkspace"), "-scheme Forgegraph", "-sdk iphonesimulator", "-destination id=6BA8F38E-BF97-4830-98A6-E459E4312F29", "CODE_SIGNING_ALLOWED=NO"} {
+		if !strings.Contains(string(xcodeOutput), expected) {
+			t.Fatalf("expected simulator build to contain %q, got %q", expected, string(xcodeOutput))
+		}
+	}
+	if !strings.Contains(string(xcrunOutput), "simctl install 6BA8F38E-BF97-4830-98A6-E459E4312F29 "+filepath.Join(appDir, ".preflight", "ios-sim-deriveddata", "Build", "Products", "Debug-iphonesimulator", "Forgegraph.app")) {
+		t.Fatalf("expected simulator install of built app, got %q", string(xcrunOutput))
 	}
 	if !strings.Contains(string(xcrunOutput), "simctl openurl 6BA8F38E-BF97-4830-98A6-E459E4312F29") {
 		t.Fatalf("expected simulator openurl command, got %q", string(xcrunOutput))
@@ -7456,7 +7502,7 @@ exit 0
 		t.Fatalf("read Maestro log: %v", err)
 	}
 	expectedFlowPath := filepath.Join(workspaceRoot, "apps/mobile/.maestro/01-app-launches.yaml")
-	expectedMaestroArgs := "--platform android --device emulator-5554 test --test-output-dir=.preflight/maestro/pfjob_maestro/runtime-artifacts --debug-output=.preflight/maestro/pfjob_maestro/runtime-artifacts --format junit --output .preflight/maestro/pfjob_maestro/junit.xml -e FG_DEV_CLIENT_URL=http://192.168.4.10:19000 -e FG_DEV_CLIENT_DEEP_LINK=" + deepLinkURL + " -e FG_DEV_CLIENT_QR_URL=" + qrURL + " " + expectedFlowPath
+	expectedMaestroArgs := "--platform android --device emulator-5554 test --test-output-dir=.preflight/maestro/pfjob_maestro/runtime-artifacts --debug-output=.preflight/maestro/pfjob_maestro/runtime-artifacts --format junit --output .preflight/maestro/pfjob_maestro/junit.xml -e FG_DEV_CLIENT_URL=http://192.168.4.10:19000 -e FG_DEV_CLIENT_DEEP_LINK=" + deepLinkURL + " -e FG_DEV_CLIENT_QR_URL=" + qrURL + " -e APP_ID=com.gmacko.forgegraph.dev " + expectedFlowPath
 	if !strings.Contains(string(maestroOutput), expectedMaestroArgs) {
 		t.Fatalf("expected Android Maestro command, got %q", string(maestroOutput))
 	}
@@ -10622,6 +10668,7 @@ sleep 1
 
 	metroStartedAt := time.Now()
 	var startedAt time.Time
+	var completedAt time.Time
 	metroServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The runner streams command output to /logs for whatever job is in
 		// flight. That is not what this test asserts, but it must not read as an
@@ -10671,11 +10718,13 @@ sleep 1
 		case "/api/preflight/v1/runners/pfrun_cli/reconcile":
 			_, _ = w.Write([]byte(`{"data":{"reason":"runner_startup","expiredJobs":[],"releasedTargets":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_reconcile"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/claim":
+			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli","payload":{"lane":"development","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile","appScheme":"forgegraph","expoSlug":"forgegraf"},"devBuild":{"buildId":"build_ios_dev_1","installUrl":"https://expo.dev/runtime-artifacts/ios-dev.ipa"}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_devsession"}}`, workspaceRoot)
+		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
+			// Measure the cancellation response from when the control plane
+			// reports it, excluding host inspection and job preparation.
 			if startedAt.IsZero() {
 				startedAt = time.Now()
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"running","runnerId":"pfrun_cli","payload":{"lane":"development","sourceBinding":{"workspaceRoot":%q,"packagePath":"apps/mobile","appScheme":"forgegraph","expoSlug":"forgegraf"},"devBuild":{"buildId":"build_ios_dev_1","installUrl":"https://expo.dev/runtime-artifacts/ios-dev.ipa"}}}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_claim_devsession"}}`, workspaceRoot)
-		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_devsession":
 			if r.Method != http.MethodGet {
 				t.Fatalf("unexpected method for job read: %s", r.Method)
 			}
@@ -10696,6 +10745,7 @@ sleep 1
 			if devSession["status"] != "cancelled" {
 				t.Fatalf("expected cancelled dev session payload, got %#v", devSession)
 			}
+			completedAt = time.Now()
 			completedCancelled = true
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_devsession","kind":"dev_session.start","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_devsession"}}`))
 		default:
@@ -10704,7 +10754,7 @@ sleep 1
 	}))
 	t.Cleanup(server.Close)
 
-	// startedAt is stamped by the claim handler below.
+	// Cancellation timing ends at job completion, before runner shutdown work.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -10742,7 +10792,7 @@ sleep 1
 	if !completedCancelled {
 		t.Fatalf("expected runner to complete cancelled dev session job, got calls %v", calls)
 	}
-	if elapsed := time.Since(startedAt); elapsed > 700*time.Millisecond {
+	if elapsed := completedAt.Sub(startedAt); elapsed > 700*time.Millisecond {
 		t.Fatalf("expected cancellation to stop dev session promptly, elapsed %s", elapsed)
 	}
 }
@@ -12009,6 +12059,7 @@ exit 0
 `), 0o755); err != nil {
 		t.Fatalf("write fake maestro: %v", err)
 	}
+	xcodeLog := writeSimulatorNativeBuildFixture(t, fakeBin)
 	t.Setenv("NPX_LOG", npxLog)
 	t.Setenv("MAESTRO_LOG", maestroLog)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -12294,8 +12345,20 @@ exit 0
 	if err != nil {
 		t.Fatalf("read npx log: %v", err)
 	}
-	if !strings.Contains(string(npxOutput), "expo run:ios --device 6BA8F38E-BF97-4830-98A6-E459E4312F29 --no-bundler") {
-		t.Fatalf("expected expo run:ios command, got %q", string(npxOutput))
+	if !strings.Contains(string(npxOutput), "expo prebuild --platform ios") {
+		t.Fatalf("expected Expo prebuild, got %q", string(npxOutput))
+	}
+	xcodeOutput, err := os.ReadFile(xcodeLog)
+	if err != nil {
+		t.Fatalf("read Xcode build log: %v", err)
+	}
+	for _, expected := range []string{"-workspace " + filepath.Join(appDir, "ios", "Forgegraph.xcworkspace"), "-scheme Forgegraph", "-sdk iphonesimulator", "-destination id=6BA8F38E-BF97-4830-98A6-E459E4312F29", "CODE_SIGNING_ALLOWED=NO"} {
+		if !strings.Contains(string(xcodeOutput), expected) {
+			t.Fatalf("expected simulator build to contain %q, got %q", expected, string(xcodeOutput))
+		}
+	}
+	if !strings.Contains(string(xcrunOutput), "simctl install 6BA8F38E-BF97-4830-98A6-E459E4312F29 "+filepath.Join(appDir, ".preflight", "ios-sim-deriveddata", "Build", "Products", "Debug-iphonesimulator", "Forgegraph.app")) {
+		t.Fatalf("expected simulator install of built app, got %q", string(xcrunOutput))
 	}
 	if !strings.Contains(string(xcrunOutput), "simctl openurl 6BA8F38E-BF97-4830-98A6-E459E4312F29") {
 		t.Fatalf("expected simulator openurl command, got %q", string(xcrunOutput))
@@ -12653,6 +12716,7 @@ func TestRunnerOnceCancelsInFlightMaestroWhenJobStatusTurnsCancelled(t *testing.
 	if err := os.WriteFile(flowPath, []byte("appId: com.gmacko.forgegraph\n---\n- launchApp\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	xcrunPath := writeFakeExecutable(t, "xcrun", "#!/usr/bin/env sh\nexit 0\n")
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "maestro"), []byte(`#!/usr/bin/env sh
 printf 'maestro started\n'
@@ -12667,6 +12731,7 @@ printf 'maestro finished\n'
 	var calls []string
 	completedCancelled := false
 	var startedAt time.Time
+	var completedAt time.Time
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The runner streams command output to /logs for whatever job is in
 		// flight. Not what these tests assert, but it must not read as an
@@ -12731,6 +12796,7 @@ printf 'maestro finished\n'
 			if result["status"] != "cancelled" {
 				t.Fatalf("expected cancelled Maestro result, got %#v", result)
 			}
+			completedAt = time.Now()
 			completedCancelled = true
 			_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_maestro","kind":"maestro.run","status":"cancelled","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_complete_maestro"}}`))
 		case "/api/preflight/v1/runners/pfrun_cli/signing-cert":
@@ -12744,7 +12810,7 @@ printf 'maestro finished\n'
 	}))
 	t.Cleanup(server.Close)
 
-	// startedAt is stamped by the claim handler below.
+	// Cancellation timing ends at job completion, before runner shutdown work.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run(
@@ -12753,6 +12819,8 @@ printf 'maestro finished\n'
 			"once",
 			"--api-url",
 			server.URL,
+			"--xcrun-path",
+			xcrunPath,
 			"--workspace-id",
 			"ws_cli",
 			"--workspace-root",
@@ -12776,7 +12844,7 @@ printf 'maestro finished\n'
 	if !completedCancelled {
 		t.Fatalf("expected runner to complete cancelled Maestro job, got calls %v", calls)
 	}
-	if elapsed := time.Since(startedAt); elapsed > 700*time.Millisecond {
+	if elapsed := completedAt.Sub(startedAt); elapsed > 700*time.Millisecond {
 		t.Fatalf("expected cancellation to stop Maestro promptly, elapsed %s", elapsed)
 	}
 }

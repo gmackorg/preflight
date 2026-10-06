@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -227,15 +226,24 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		//   fatal: Could not parse object '<sha>'
 		// and the job then thrashes claim/mismatch/release. Checking that the
 		// remote actually has it turns that into an error the caller can act on.
-		if !commitIsOnRemote(binding.GitCommitSHA) {
+		if !sourceCommitIsOnRemote(binding.WorkspaceRoot, binding.GitRemoteURL, binding.GitCommitSHA) {
 			fmt.Fprintf(stderr, "commit %s is not on the remote\n", binding.GitCommitSHA[:min(12, len(binding.GitCommitSHA))])
 			fmt.Fprintln(stderr, "the runner fetches from the remote and cannot check out a local-only commit")
 			fmt.Fprintln(stderr, "push the branch (or cherry-pick it to the tracked branch) and re-run")
 			return 2
 		}
-		repo := filepath.Base(strings.TrimSuffix(binding.WorkspaceRoot, "/"))
+		repo, nameErr := ciRepositoryName(binding.WorkspaceRoot, binding.GitRemoteURL)
+		if nameErr != nil {
+			fmt.Fprintln(stderr, nameErr)
+			return 2
+		}
 		binding.WorkspaceRoot = filepath.Join(
 			filepath.Dir(binding.WorkspaceRoot), ciCheckoutRootSegment, repo)
+		binding.WorkspaceRoot, bindingErr = resolvedPathForBindingCheck(binding.WorkspaceRoot)
+		if bindingErr != nil {
+			fmt.Fprintln(stderr, "cannot resolve CI checkout root")
+			return 2
+		}
 		// The runner hard-resets this checkout, so whatever was uncommitted
 		// locally is irrelevant to what actually gets built.
 		binding.DirtyWorkspace = false
@@ -879,20 +887,4 @@ func retireNode(ctx buildOpsContext, client *http.Client, name string, stdout, s
 		target.Name, response.Revoked)
 	fmt.Fprintln(stdout, "If the machine comes back, its agents re-register and the node returns.")
 	return 0
-}
-
-// commitIsOnRemote reports whether a remote-tracking ref contains the commit —
-// i.e. whether a runner fetching from the remote could check it out.
-func commitIsOnRemote(sha string) bool {
-	sha = strings.TrimSpace(sha)
-	if sha == "" {
-		return false
-	}
-	out, err := exec.Command("git", "branch", "-r", "--contains", sha).Output()
-	if err != nil {
-		// Unknown rather than absent (detached objects, shallow clones): do not
-		// block the build on a check that could not run.
-		return true
-	}
-	return strings.TrimSpace(string(out)) != ""
 }
