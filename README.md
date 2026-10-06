@@ -60,6 +60,18 @@ so a host that quietly fills up looks idle instead of sick. `preflight disk`
 and `preflight nodes` both surface that, and `preflight disk --reclaim` prunes
 regenerable build caches.
 
+For a standalone simulator proof, `prove-app --standalone-run --target-key <id>`
+requires a readable Maestro flow and the simulator development profile. Choose a
+free Metro port and a fresh artifact directory. The CLI launches its own Metro,
+waits for readiness, opens the development client, and publishes Maestro reports,
+logs, screenshots and videos. A passing proof requires a fresh JUnit report with
+executed passing tests; skipped or missing tests fail the run. When the command
+exits, it stops its Metro and closes the runtime session records.
+
+Standalone Metro uses the selected EAS profile environment as defaults and
+preserves explicit process environment overrides, including live API URLs.
+Both source identity resolution and Metro use the development app variant.
+
 ## Development
 
 ```sh

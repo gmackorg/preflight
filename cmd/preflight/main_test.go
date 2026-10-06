@@ -870,7 +870,7 @@ func TestTargetsUpsertAndListUseStandalonePreflightAPI(t *testing.T) {
 }
 
 func TestProveAppStandaloneSimulatorPlanUsesDerivedAppAndPreflightAPI(t *testing.T) {
-	appDir := writeExpoFixture(t)
+	appDir := writeStandaloneProofFixture(t)
 	t.Setenv("PREFLIGHT_TOKEN", "standalone_token")
 
 	var planBody map[string]any
@@ -906,7 +906,7 @@ func TestProveAppStandaloneSimulatorPlanUsesDerivedAppAndPreflightAPI(t *testing
 		if planBody["flowPath"] != filepath.Join(appDir, ".maestro", "01-app-launches.yaml") {
 			t.Fatalf("unexpected flowPath %#v", planBody["flowPath"])
 		}
-		_, _ = w.Write([]byte(`{"data":{"workflowId":"pfw_cli_sim","platform":"ios","targetKind":"ios_simulator","targetKey":"SIM-UDID","advertisedUrl":"http://127.0.0.1:19000","commands":[{"id":"expo_start","title":"Start Expo development server","kind":"long_running","command":"npx","args":["expo","start","--localhost","--dev-client","--port","19000"],"cwd":"/app"},{"id":"open_development_client","title":"Open development client on iOS simulator","kind":"one_shot","command":"xcrun","args":["simctl","openurl","SIM-UDID","forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000"]},{"id":"maestro","title":"Run Maestro flow","kind":"one_shot","command":"maestro","args":["--device","SIM-UDID","test","--format","junit","--output","/runtime-artifacts/maestro/report.xml","--test-output-dir","/runtime-artifacts/maestro/output","/app/.maestro/01-app-launches.yaml"]}]}}`))
+		_, _ = w.Write([]byte(`{"data":{"plan":{"workflowId":"pfw_cli_sim","platform":"ios","targetKind":"ios_simulator","targetKey":"SIM-UDID","advertisedUrl":"http://127.0.0.1:19000","commands":[{"id":"expo_start","title":"Start Expo development server","kind":"long_running","command":"npx","args":["expo","start","--localhost","--dev-client","--port","19000"],"cwd":"/app"},{"id":"open_development_client","title":"Open development client on iOS simulator","kind":"one_shot","command":"xcrun","args":["simctl","openurl","SIM-UDID","forgegraph://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A19000"]},{"id":"maestro_test","title":"Run Maestro flow","kind":"one_shot","command":"maestro","args":["--device","SIM-UDID","test","--format","junit","--output","/runtime-artifacts/maestro/report.xml","--test-output-dir","/runtime-artifacts/maestro/output","/app/.maestro/01-app-launches.yaml"]}]}}}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -948,19 +948,29 @@ func TestProveAppStandaloneSimulatorPlanUsesDerivedAppAndPreflightAPI(t *testing
 }
 
 func TestProveAppStandaloneRunExecutesPlanAndPostsRuntimeState(t *testing.T) {
-	appDir := writeExpoFixture(t)
+	appDir := writeStandaloneProofFixture(t)
+	port := setupStandaloneMetroHelper(t)
 	fakeBin := t.TempDir()
 	commandLog := filepath.Join(t.TempDir(), "commands.log")
 	for name, script := range map[string]string{
 		"npx": `#!/usr/bin/env sh
 printf 'npx %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
-sleep 30
+exec "$PREFLIGHT_TEST_BINARY" -test.run=^TestStandaloneMetroHelperProcess$
 `,
 		"xcrun": `#!/usr/bin/env sh
+test -f "$PREFLIGHT_METRO_READY_MARKER" || exit 6
 printf 'xcrun %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 `,
 		"maestro": `#!/usr/bin/env sh
 printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    mkdir -p "$(dirname "$2")"
+    printf '<testsuite tests="1" failures="0"><testcase status="SUCCESS"/></testsuite>\n' > "$2"
+    break
+  fi
+  shift
+done
 `,
 	} {
 		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0o755); err != nil {
@@ -972,8 +982,8 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 	t.Setenv("PREFLIGHT_TOKEN", "standalone_run_token")
 
 	var calls []string
-	var devSessionBody map[string]any
-	var targetSessionBody map[string]any
+	var devSessionBodies []map[string]any
+	var targetSessionBodies []map[string]any
 	var targetRunBodies []map[string]any
 	var artifactBodies []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -994,16 +1004,20 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/simulator-proof-plans":
-			_, _ = fmt.Fprintf(w, `{"data":{"workflowId":"pfw_run","platform":"ios","targetKind":"ios_simulator","targetKey":"SIM-UDID","advertisedUrl":"http://127.0.0.1:19000","devSession":{"id":"pfds_run","workspaceId":"ws_run","appId":"pfapp_forgegraph_mobile","workflowId":"pfw_run","platform":"ios","lane":"simulator","targetKind":"ios_simulator","hostMode":"localhost","status":"starting","appScheme":"forgegraph","advertisedUrl":"http://127.0.0.1:19000","port":19000,"metadata":{}},"targetSession":{"id":"pftsess_run","workspaceId":"ws_run","appId":"pfapp_forgegraph_mobile","targetId":"SIM-UDID","devSessionId":"pfds_run","workflowId":"pfw_run","status":"opening","openedUrl":"forgegraph://expo-development-client/?url=http%%3A%%2F%%2F127.0.0.1%%3A19000","metadata":{}},"targetRun":{"id":"pftrun_run","workspaceId":"ws_run","appId":"pfapp_forgegraph_mobile","targetId":"SIM-UDID","workflowId":"pfw_run","targetSessionId":"pftsess_run","status":"queued","flowPath":%q,"resultSummary":{},"metadata":{"format":"junit"}},"commands":[{"id":"expo_start","title":"Start Expo development server","kind":"long_running","command":"npx","args":["expo","start","--localhost","--dev-client","--port","19000"],"cwd":%q},{"id":"open_development_client","title":"Open development client on iOS simulator","kind":"one_shot","command":"xcrun","args":["simctl","openurl","SIM-UDID","forgegraph://expo-development-client/?url=http%%3A%%2F%%2F127.0.0.1%%3A19000"]},{"id":"maestro","title":"Run Maestro flow","kind":"one_shot","command":"maestro","args":["--device","SIM-UDID","test","--format","junit","--output","%s","%s"]}]}}`, filepath.Join(appDir, ".maestro", "01-app-launches.yaml"), appDir, filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_run", "maestro", "report.xml"), filepath.Join(appDir, ".maestro", "01-app-launches.yaml"))
+			_, _ = fmt.Fprintf(standalonePortResponseWriter{ResponseWriter: w, port: port}, `{"data":{"plan":{"workflowId":"pfw_run","platform":"ios","targetKind":"ios_simulator","targetKey":"SIM-UDID","advertisedUrl":"http://127.0.0.1:19000","devSession":{"id":"pfds_run","workspaceId":"ws_run","appId":"pfapp_forgegraph_mobile","workflowId":"pfw_run","platform":"ios","lane":"simulator","targetKind":"ios_simulator","hostMode":"localhost","status":"starting","appScheme":"forgegraph","advertisedUrl":"http://127.0.0.1:19000","port":19000,"metadata":{}},"targetSession":{"id":"pftsess_run","workspaceId":"ws_run","appId":"pfapp_forgegraph_mobile","targetId":"SIM-UDID","devSessionId":"pfds_run","workflowId":"pfw_run","status":"opening","openedUrl":"forgegraph://expo-development-client/?url=http%%3A%%2F%%2F127.0.0.1%%3A19000","metadata":{}},"targetRun":{"id":"pftrun_run","workspaceId":"ws_run","appId":"pfapp_forgegraph_mobile","targetId":"SIM-UDID","workflowId":"pfw_run","targetSessionId":"pftsess_run","status":"queued","flowPath":%q,"resultSummary":{},"metadata":{"format":"junit"}},"commands":[{"id":"expo_start","title":"Start Expo development server","kind":"long_running","command":"npx","args":["expo","start","--localhost","--dev-client","--port","19000"],"cwd":%q},{"id":"open_development_client","title":"Open development client on iOS simulator","kind":"one_shot","command":"xcrun","args":["simctl","openurl","SIM-UDID","forgegraph://expo-development-client/?url=http%%3A%%2F%%2F127.0.0.1%%3A19000"]},{"id":"maestro_test","title":"Run Maestro flow","kind":"one_shot","command":"maestro","args":["--device","SIM-UDID","test","--format","junit","--output","%s","%s"]}]}}}`, filepath.Join(appDir, ".maestro", "01-app-launches.yaml"), appDir, filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_run", "maestro", "report.xml"), filepath.Join(appDir, ".maestro", "01-app-launches.yaml"))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/dev-sessions":
+			var devSessionBody map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&devSessionBody); err != nil {
 				t.Fatalf("decode dev session body: %v", err)
 			}
+			devSessionBodies = append(devSessionBodies, devSessionBody)
 			_, _ = w.Write([]byte(`{"data":{"id":"pfds_run","status":"running"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/target-sessions":
+			var targetSessionBody map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&targetSessionBody); err != nil {
 				t.Fatalf("decode target session body: %v", err)
 			}
+			targetSessionBodies = append(targetSessionBodies, targetSessionBody)
 			_, _ = w.Write([]byte(`{"data":{"id":"pftsess_run","status":"open"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/target-runs":
 			var body map[string]any
@@ -1046,7 +1060,7 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 			"--workflow-id",
 			"pfw_run",
 			"--port",
-			"19000",
+			strconv.Itoa(port),
 		},
 		&stdout,
 		&stderr,
@@ -1055,6 +1069,11 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 	if code != 0 {
 		t.Fatalf("standalone run exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
+	if len(devSessionBodies) != 2 || len(targetSessionBodies) != 2 || devSessionBodies[1]["status"] != "stale" || devSessionBodies[1]["stoppedAt"] == nil || targetSessionBodies[1]["status"] != "closed" || targetSessionBodies[1]["closedAt"] == nil {
+		t.Fatalf("owned runtime sessions not closed: dev=%#v target=%#v", devSessionBodies, targetSessionBodies)
+	}
+	devSessionBody := devSessionBodies[0]
+	targetSessionBody := targetSessionBodies[0]
 	if devSessionBody["status"] != "running" || devSessionBody["pid"] == nil {
 		t.Fatalf("expected running dev session with pid, got %#v", devSessionBody)
 	}
@@ -1072,7 +1091,7 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 		t.Fatalf("read command log: %v", err)
 	}
 	for _, expected := range []string{
-		"npx expo start --localhost --dev-client --port 19000",
+		"npx expo start --localhost --dev-client --port " + strconv.Itoa(port),
 		"xcrun simctl openurl SIM-UDID",
 		"maestro --device SIM-UDID test --format junit",
 	} {
@@ -1086,25 +1105,35 @@ printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 }
 
 func TestProveAppStandaloneSimulatorRunPostsMaestroArtifactMetadata(t *testing.T) {
-	appDir := writeExpoFixture(t)
-	fakeBin := t.TempDir()
-	commandLog := filepath.Join(t.TempDir(), "commands.log")
-	reportPath := filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_artifacts", "maestro", "report.xml")
-	outputDir := filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_artifacts", "maestro", "output")
-	for name, script := range map[string]string{
-		"npx": `#!/usr/bin/env sh
+	for _, test := range []struct {
+		name, status string
+		exitCode     int
+	}{{"passed", "passed", 0}, {"maestro-failed", "failed", 7}} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("PREFLIGHT_MAESTRO_EXIT", strconv.Itoa(test.exitCode))
+			appDir := writeStandaloneProofFixture(t)
+			port := setupStandaloneMetroHelper(t)
+			fakeBin := t.TempDir()
+			commandLog := filepath.Join(t.TempDir(), "commands.log")
+			reportPath := filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_artifacts", "maestro", "report.xml")
+			outputDir := filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_artifacts", "maestro", "output")
+			debugDir := filepath.Join(appDir, ".preflight", "simulator-proofs", "pfw_artifacts", "maestro", "debug")
+			for name, script := range map[string]string{
+				"npx": `#!/usr/bin/env sh
 printf 'npx %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
-sleep 30
+exec "$PREFLIGHT_TEST_BINARY" -test.run=^TestStandaloneMetroHelperProcess$
 `,
-		"xcrun": `#!/usr/bin/env sh
+				"xcrun": `#!/usr/bin/env sh
+test -f "$PREFLIGHT_METRO_READY_MARKER" || exit 6
 printf 'xcrun %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 `,
-		"maestro": `#!/usr/bin/env sh
+				"maestro": `#!/usr/bin/env sh
 printf 'maestro %s\n' "$*" >> "$PREFLIGHT_COMMAND_LOG"
 printf 'maestro stdout line\n'
 printf 'maestro stderr line\n' >&2
 report=""
 output_dir=""
+debug_dir=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output)
@@ -1115,142 +1144,165 @@ while [ "$#" -gt 0 ]; do
       output_dir="$2"
       shift 2
       ;;
+    --debug-output)
+      debug_dir="$2"
+      shift 2
+      ;;
     *)
       shift
       ;;
   esac
 done
-mkdir -p "$(dirname "$report")" "$output_dir"
-printf '<testsuite tests="2" failures="0"></testsuite>\n' > "$report"
+mkdir -p "$(dirname "$report")" "$output_dir" "$debug_dir"
+printf '<testsuite tests="2" failures="0"><testcase status="SUCCESS"/><testcase status="SUCCESS"/></testsuite>\n' > "$report"
 printf '{"commands":[]}\n' > "$output_dir/commands-1.json"
 printf 'png\n' > "$output_dir/screenshot-1.png"
 printf 'mp4\n' > "$output_dir/video-1.mp4"
+printf 'debug screenshot\n' > "$debug_dir/screenshot-debug.png"
+printf 'APP_ID %s\n' "$APP_ID"
+exit "$PREFLIGHT_MAESTRO_EXIT"
 `,
-	} {
-		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0o755); err != nil {
-			t.Fatalf("write fake %s: %v", name, err)
-		}
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("PREFLIGHT_COMMAND_LOG", commandLog)
-	t.Setenv("PREFLIGHT_TOKEN", "standalone_artifact_token")
+			} {
+				if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0o755); err != nil {
+					t.Fatalf("write fake %s: %v", name, err)
+				}
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("PREFLIGHT_COMMAND_LOG", commandLog)
+			t.Setenv("PREFLIGHT_TOKEN", "standalone_artifact_token")
 
-	var targetRunBodies []map[string]any
-	var artifactBodies []map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The runner streams command output to /logs for whatever job is in
-		// flight. Not what these tests assert, but it must not read as an
-		// unexpected route either.
-		if strings.HasSuffix(r.URL.Path, "/logs") {
-			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/simulator-proof-plans":
-			_, _ = fmt.Fprintf(w, `{"data":{"workflowId":"pfw_artifacts","platform":"ios","targetKind":"ios_simulator","targetKey":"SIM-UDID","advertisedUrl":"http://127.0.0.1:19000","devSession":{"id":"pfds_artifacts","workspaceId":"ws_artifacts","appId":"pfapp_forgegraph_mobile","workflowId":"pfw_artifacts","platform":"ios","lane":"simulator","targetKind":"ios_simulator","hostMode":"localhost","status":"starting","appScheme":"forgegraph","advertisedUrl":"http://127.0.0.1:19000","port":19000,"metadata":{}},"targetSession":{"id":"pftsess_artifacts","workspaceId":"ws_artifacts","appId":"pfapp_forgegraph_mobile","targetId":"SIM-UDID","devSessionId":"pfds_artifacts","workflowId":"pfw_artifacts","status":"opening","openedUrl":"forgegraph://expo-development-client/?url=http%%3A%%2F%%2F127.0.0.1%%3A19000","metadata":{}},"targetRun":{"id":"pftrun_artifacts","workspaceId":"ws_artifacts","appId":"pfapp_forgegraph_mobile","targetId":"SIM-UDID","workflowId":"pfw_artifacts","targetSessionId":"pftsess_artifacts","status":"queued","flowPath":%q,"reportArtifactId":%q,"resultSummary":{},"metadata":{"format":"junit","testOutputDirectory":%q}},"commands":[{"id":"expo_start","kind":"long_running","command":"npx","args":["expo","start","--localhost","--dev-client","--port","19000"],"cwd":%q},{"id":"open_development_client","kind":"one_shot","command":"xcrun","args":["simctl","openurl","SIM-UDID","forgegraph://expo-development-client/?url=http%%3A%%2F%%2F127.0.0.1%%3A19000"]},{"id":"maestro","kind":"one_shot","command":"maestro","args":["--device","SIM-UDID","test","--format","junit","--output",%q,"--test-output-dir",%q,"%s"]}]}}`,
-				filepath.Join(appDir, ".maestro", "01-app-launches.yaml"),
-				reportPath,
-				outputDir,
-				appDir,
-				reportPath,
-				outputDir,
-				filepath.Join(appDir, ".maestro", "01-app-launches.yaml"),
+			var targetRunBodies []map[string]any
+			var artifactBodies []map[string]any
+			var cleanupStatuses []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The runner streams command output to /logs for whatever job is in
+				// flight. Not what these tests assert, but it must not read as an
+				// unexpected route either.
+				if strings.HasSuffix(r.URL.Path, "/logs") {
+					_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/simulator-proof-plans":
+					_, _ = w.Write(currentSimulatorProofRunEnvelope(t, appDir, "ws_artifacts", "pfw_artifacts", port, reportPath, outputDir, debugDir))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/dev-sessions":
+					var record map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+						t.Fatal(err)
+					}
+					cleanupStatuses = append(cleanupStatuses, "dev:"+readMapString(record, "status"))
+					_, _ = w.Write([]byte(`{"data":{"id":"pfds_artifacts","status":"running"}}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/target-sessions":
+					var record map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&record); err != nil {
+						t.Fatal(err)
+					}
+					cleanupStatuses = append(cleanupStatuses, "target:"+readMapString(record, "status"))
+					_, _ = w.Write([]byte(`{"data":{"id":"pftsess_artifacts","status":"open"}}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/target-runs":
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatalf("decode target run body: %v", err)
+					}
+					targetRunBodies = append(targetRunBodies, body)
+					_, _ = w.Write([]byte(`{"data":{"id":"pftrun_artifacts"}}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/runtime-artifacts":
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatalf("decode artifact body: %v", err)
+					}
+					artifactBodies = append(artifactBodies, body)
+					_, _ = w.Write([]byte(`{"data":{"id":"pfart_recorded"}}`))
+				default:
+					t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := run(
+				[]string{
+					"prove-app",
+					"--standalone-run",
+					"--api-url",
+					server.URL,
+					"--workspace-id",
+					"ws_artifacts",
+					"--app-dir",
+					appDir,
+					"--platform",
+					"ios",
+					"--target-kind",
+					"ios_simulator",
+					"--target-key",
+					"SIM-UDID",
+					"--workflow-id",
+					"pfw_artifacts",
+					"--port",
+					strconv.Itoa(port),
+				},
+				&stdout,
+				&stderr,
+				server.Client(),
 			)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/dev-sessions":
-			_, _ = w.Write([]byte(`{"data":{"id":"pfds_artifacts","status":"running"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/target-sessions":
-			_, _ = w.Write([]byte(`{"data":{"id":"pftsess_artifacts","status":"open"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/target-runs":
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decode target run body: %v", err)
+			wantExit := 0
+			if test.exitCode != 0 {
+				wantExit = 1
 			}
-			targetRunBodies = append(targetRunBodies, body)
-			_, _ = w.Write([]byte(`{"data":{"id":"pftrun_artifacts"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_forgegraph_mobile/runtime-artifacts":
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decode artifact body: %v", err)
+			if code != wantExit {
+				t.Fatalf("standalone simulator artifact run exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 			}
-			artifactBodies = append(artifactBodies, body)
-			_, _ = w.Write([]byte(`{"data":{"id":"pfart_recorded"}}`))
-		default:
-			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := run(
-		[]string{
-			"prove-app",
-			"--standalone-run",
-			"--api-url",
-			server.URL,
-			"--workspace-id",
-			"ws_artifacts",
-			"--app-dir",
-			appDir,
-			"--platform",
-			"ios",
-			"--target-kind",
-			"ios_simulator",
-			"--target-key",
-			"SIM-UDID",
-			"--workflow-id",
-			"pfw_artifacts",
-			"--port",
-			"19000",
-		},
-		&stdout,
-		&stderr,
-		server.Client(),
-	)
-	if code != 0 {
-		t.Fatalf("standalone simulator artifact run exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
-	}
-	if len(targetRunBodies) != 2 {
-		t.Fatalf("expected two target run posts, got %#v", targetRunBodies)
-	}
-	completed := targetRunBodies[1]
-	if completed["reportArtifactId"] != reportPath {
-		t.Fatalf("expected reportArtifactId %q, got %#v", reportPath, completed)
-	}
-	if len(artifactBodies) != 5 {
-		t.Fatalf("expected five artifact posts, got %#v", artifactBodies)
-	}
-	if artifactBodies[0]["kind"] != "maestro_report" ||
-		artifactBodies[0]["targetRunId"] != "pftrun_artifacts" ||
-		artifactBodies[0]["uri"] != reportPath ||
-		artifactBodies[0]["redacted"] != true {
-		t.Fatalf("expected redacted Maestro report artifact, got %#v", artifactBodies[0])
-	}
-	resultSummary := completed["resultSummary"].(map[string]any)
-	if resultSummary["reportPath"] != reportPath {
-		t.Fatalf("expected result summary report path, got %#v", resultSummary)
-	}
-	metadata := completed["metadata"].(map[string]any)
-	if metadata["testOutputDirectory"] != outputDir {
-		t.Fatalf("expected output dir metadata, got %#v", metadata)
-	}
-	if len(metadata["screenshotPaths"].([]any)) != 1 ||
-		len(metadata["videoPaths"].([]any)) != 1 ||
-		len(metadata["commandPaths"].([]any)) != 1 {
-		t.Fatalf("expected discovered artifact paths in metadata, got %#v", metadata)
-	}
-	logPath, ok := metadata["logPath"].(string)
-	if !ok || logPath == "" {
-		t.Fatalf("expected maestro log path in metadata, got %#v", metadata)
-	}
-	logContent, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read maestro log path: %v", err)
-	}
-	if !strings.Contains(string(logContent), "maestro stdout line") ||
-		!strings.Contains(string(logContent), "maestro stderr line") {
-		t.Fatalf("expected maestro stdout/stderr in log, got %q", string(logContent))
+			if !slices.Equal(cleanupStatuses, []string{"dev:running", "target:open", "target:closed", "dev:stale"}) {
+				t.Fatalf("runtime cleanup mismatch: %#v", cleanupStatuses)
+			}
+			if len(targetRunBodies) != 2 {
+				t.Fatalf("expected two target run posts, got %#v", targetRunBodies)
+			}
+			completed := targetRunBodies[1]
+			if completed["status"] != test.status {
+				t.Fatalf("expected run %s, got %#v", test.status, completed)
+			}
+			if completed["reportArtifactId"] != reportPath {
+				t.Fatalf("expected reportArtifactId %q, got %#v", reportPath, completed)
+			}
+			if len(artifactBodies) != 6 {
+				t.Fatalf("expected six artifact posts, got %#v", artifactBodies)
+			}
+			if artifactBodies[0]["kind"] != "maestro_report" ||
+				artifactBodies[0]["targetRunId"] != "pftrun_artifacts" ||
+				artifactBodies[0]["uri"] != reportPath ||
+				artifactBodies[0]["redacted"] != true {
+				t.Fatalf("expected redacted Maestro report artifact, got %#v", artifactBodies[0])
+			}
+			resultSummary := completed["resultSummary"].(map[string]any)
+			if resultSummary["reportPath"] != reportPath {
+				t.Fatalf("expected result summary report path, got %#v", resultSummary)
+			}
+			metadata := completed["metadata"].(map[string]any)
+			if metadata["testOutputDirectory"] != outputDir {
+				t.Fatalf("expected output dir metadata, got %#v", metadata)
+			}
+			if len(metadata["screenshotPaths"].([]any)) != 2 ||
+				len(metadata["videoPaths"].([]any)) != 1 ||
+				len(metadata["commandPaths"].([]any)) != 1 {
+				t.Fatalf("expected discovered artifact paths in metadata, got %#v", metadata)
+			}
+			logPath, ok := metadata["logPath"].(string)
+			if !ok || logPath == "" {
+				t.Fatalf("expected maestro log path in metadata, got %#v", metadata)
+			}
+			logContent, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read maestro log path: %v", err)
+			}
+			if !strings.Contains(string(logContent), "APP_ID com.gmacko.forgegraph.dev") ||
+				!strings.Contains(string(logContent), "maestro stdout line") ||
+				!strings.Contains(string(logContent), "maestro stderr line") {
+				t.Fatalf("expected maestro stdout/stderr in log, got %q", string(logContent))
+			}
+		})
 	}
 }
 

@@ -1,0 +1,133 @@
+{
+  "data": {
+    "plan": {
+      "workflowId": "pfw_festigram_standalone_plan_probe_824bb1af-114a-4b1b-b8cd-bb46fca7d3c3",
+      "platform": "ios",
+      "targetKind": "ios_simulator",
+      "targetKey": "9990184B-E605-4095-96A7-A07F63B5B9B1",
+      "advertisedUrl": "http://127.0.0.1:8200",
+      "deepLinkUrl": "festigram-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8200",
+      "qrUrl": "https://qr.expo.dev/development-client?appScheme=festigram-dev&url=http%3A%2F%2F127.0.0.1%3A8200",
+      "devSession": {
+        "id": "pfds_pfw_festigram_standalone_plan_probe_824bb1af_114a_4b1b_b8cd_bb46fca7d3c3",
+        "workspaceId": "00000000-0000-4000-8000-000000000001",
+        "appId": "pfapp_festigram",
+        "workflowId": "pfw_festigram_standalone_plan_probe_824bb1af-114a-4b1b-b8cd-bb46fca7d3c3",
+        "platform": "ios",
+        "lane": "simulator",
+        "targetKind": "ios_simulator",
+        "hostMode": "localhost",
+        "status": "starting",
+        "appScheme": "festigram-dev",
+        "advertisedUrl": "http://127.0.0.1:8200",
+        "deepLinkUrl": "festigram-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8200",
+        "qrUrl": "https://qr.expo.dev/development-client?appScheme=festigram-dev&url=http%3A%2F%2F127.0.0.1%3A8200",
+        "port": 8200,
+        "metadata": {
+          "appDirectory": "/app",
+          "targetKey": "9990184B-E605-4095-96A7-A07F63B5B9B1"
+        },
+        "createdAt": "1970-01-01T00:00:00.000Z",
+        "updatedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "targetSession": {
+        "id": "pftsess_pfw_festigram_standalone_plan_probe_824bb1af_114a_4b1b_b8cd_bb46fca7d3c3",
+        "workspaceId": "00000000-0000-4000-8000-000000000001",
+        "appId": "pfapp_festigram",
+        "targetId": "9990184B-E605-4095-96A7-A07F63B5B9B1",
+        "devSessionId": "pfds_pfw_festigram_standalone_plan_probe_824bb1af_114a_4b1b_b8cd_bb46fca7d3c3",
+        "workflowId": "pfw_festigram_standalone_plan_probe_824bb1af-114a-4b1b-b8cd-bb46fca7d3c3",
+        "status": "opening",
+        "openedUrl": "festigram-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8200",
+        "metadata": {
+          "targetKind": "ios_simulator"
+        },
+        "createdAt": "1970-01-01T00:00:00.000Z",
+        "updatedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "targetRun": {
+        "id": "pftrun_pfw_festigram_standalone_plan_probe_824bb1af_114a_4b1b_b8cd_bb46fca7d3c3",
+        "workspaceId": "00000000-0000-4000-8000-000000000001",
+        "appId": "pfapp_festigram",
+        "targetId": "9990184B-E605-4095-96A7-A07F63B5B9B1",
+        "workflowId": "pfw_festigram_standalone_plan_probe_824bb1af-114a-4b1b-b8cd-bb46fca7d3c3",
+        "targetSessionId": "pftsess_pfw_festigram_standalone_plan_probe_824bb1af_114a_4b1b_b8cd_bb46fca7d3c3",
+        "reportArtifactId": "/artifacts/maestro/report.xml",
+        "status": "queued",
+        "flowPath": "/app/.maestro/01-app-launches.yaml",
+        "resultSummary": {},
+        "metadata": {
+          "format": "junit",
+          "testOutputDirectory": "/artifacts/maestro/output",
+          "debugOutputDirectory": "/artifacts/maestro/debug",
+          "logPath": "/artifacts/maestro/debug/maestro.log"
+        },
+        "createdAt": "1970-01-01T00:00:00.000Z",
+        "updatedAt": "1970-01-01T00:00:00.000Z"
+      },
+      "commands": [
+        {
+          "id": "expo_start",
+          "title": "Start Expo development server",
+          "kind": "long_running",
+          "command": "npx",
+          "args": [
+            "expo",
+            "start",
+            "--localhost",
+            "--dev-client",
+            "--port",
+            "8200"
+          ],
+          "cwd": "/app",
+          "env": {
+            "EXPO_NO_TELEMETRY": "1"
+          }
+        },
+        {
+          "id": "open_development_client",
+          "title": "Open development client on iOS simulator",
+          "kind": "one_shot",
+          "command": "xcrun",
+          "args": [
+            "simctl",
+            "openurl",
+            "9990184B-E605-4095-96A7-A07F63B5B9B1",
+            "festigram-dev://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8200"
+          ]
+        },
+        {
+          "id": "maestro_test",
+          "title": "Run Maestro proof flow",
+          "kind": "one_shot",
+          "command": "maestro",
+          "args": [
+            "--platform",
+            "ios",
+            "--device",
+            "9990184B-E605-4095-96A7-A07F63B5B9B1",
+            "test",
+            "--format",
+            "junit",
+            "--output",
+            "/artifacts/maestro/report.xml",
+            "--test-output-dir",
+            "/artifacts/maestro/output",
+            "--debug-output",
+            "/artifacts/maestro/debug",
+            "/app/.maestro/01-app-launches.yaml"
+          ],
+          "env": {
+            "APP_ID": "festigram-dev",
+            "PREFLIGHT_WORKFLOW_ID": "pfw_festigram_standalone_plan_probe_824bb1af-114a-4b1b-b8cd-bb46fca7d3c3"
+          }
+        }
+      ]
+    }
+  },
+  "meta": {
+    "apiVersion": "v1",
+    "contractVersion": "2026-05-20",
+    "requestId": "d3de8010-a3e9-42c6-b9d7-03bee1177443"
+  }
+}
