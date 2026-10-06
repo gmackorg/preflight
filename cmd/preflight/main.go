@@ -12113,8 +12113,15 @@ func isRemoteExpoDevServerURL(value string) bool {
 }
 
 func runExpoPrebuild(logFile *os.File, appDir string, platform string, job apiRunnerJob, cancellationCheck func() (bool, error)) error {
-	_, _ = fmt.Fprintf(logFile, "$ npx expo prebuild --platform %s\n", platform)
-	command := exec.Command("npx", "expo", "prebuild", "--platform", platform)
+	args := []string{"expo", "prebuild", "--platform", platform}
+	if platform == "ios" {
+		// Expo compares dependencies before and after prebuild. A dependency
+		// added before this invocation can leave the CocoaPods graph stale.
+		// Install once explicitly after generating the native project.
+		args = append(args, "--no-install")
+	}
+	_, _ = fmt.Fprintf(logFile, "$ npx %s\n", strings.Join(args, " "))
+	command := exec.Command("npx", args...)
 	command.Dir = appDir
 	command.Env = expoCommandEnv(job)
 	flushLog := attachRedactedCommandLog(command, logFile)
@@ -12122,6 +12129,18 @@ func runExpoPrebuild(logFile *os.File, appDir string, platform string, job apiRu
 	flushLog()
 	if err != nil {
 		return fmt.Errorf("run Expo %s prebuild: %w%s", platform, err, commandLogExcerpt(logFile))
+	}
+	if platform == "ios" {
+		_, _ = fmt.Fprintln(logFile, "$ pod install (refresh generated iOS native dependencies)")
+		pods := exec.Command("pod", "install")
+		pods.Dir = filepath.Join(appDir, "ios")
+		pods.Env = expoCommandEnv(job)
+		flushPods := attachRedactedCommandLog(pods, logFile)
+		err := runCommandWithTimeoutAndCancellation(pods, simulatorOpenTimeout(), cancellationCheck, runnerPollInterval())
+		flushPods()
+		if err != nil {
+			return fmt.Errorf("synchronize iOS CocoaPods: %w%s", err, commandLogExcerpt(logFile))
+		}
 	}
 	return nil
 }
