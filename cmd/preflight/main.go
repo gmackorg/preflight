@@ -11189,7 +11189,7 @@ func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJ
 
 	command := exec.Command("npx", "expo", "start", "--dev-client", "--host", expoHostArgForJob(options.hostMode, job), "--port", strconv.Itoa(options.metroPort))
 	command.Dir = appDir
-	command.Env = expoCommandEnv(job)
+	command.Env = expoDevServerEnv(options, job)
 	command.Stdout = logFile
 	command.Stderr = logFile
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -12543,6 +12543,23 @@ func runOptionalLoggedXcrunCommand(logFile *os.File, options runnerOnceOptions, 
 	}
 }
 
+// Expo localhost mode listens on Node's first DNS result, while manifest JS
+// asset URLs use 127.0.0.1. Node 24 on macOS can otherwise listen only on ::1.
+func expoDevServerEnv(options runnerOnceOptions, job apiRunnerJob) []string {
+	env := expoCommandEnv(job)
+	if expoHostArgForJob(options.hostMode, job) != "localhost" {
+		return env
+	}
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, "NODE_OPTIONS="); ok {
+			// Node uses the last occurrence of a single-value option. Appending keeps
+			// existing flags and quoted values intact while overriding conflicting DNS.
+			return upsertEnv(env, "NODE_OPTIONS", strings.TrimSpace(value+" --dns-result-order=ipv4first"))
+		}
+	}
+	return upsertEnv(env, "NODE_OPTIONS", "--dns-result-order=ipv4first")
+}
+
 func expoCommandEnv(job apiRunnerJob) []string {
 	env := append([]string{}, os.Environ()...)
 	env = upsertEnv(env, "EXPO_NO_INTERACTIVE", "1")
@@ -13261,9 +13278,8 @@ func advertisedDevServerURL(options runnerOnceOptions, job apiRunnerJob) (string
 }
 
 func runnerLocalDevServerURL(options runnerOnceOptions) string {
-	if options.hostMode == "localhost" {
-		return fmt.Sprintf("http://localhost:%d", options.metroPort)
-	}
+	// Probe the numeric address Expo advertises in its manifest asset URL. A
+	// localhost probe may reach an IPv6-only server the simulator cannot use.
 	return fmt.Sprintf("http://127.0.0.1:%d", options.metroPort)
 }
 
