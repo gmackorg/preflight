@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -14828,6 +14829,8 @@ type simulatorProofPlanData struct {
 	TargetKind    string                      `json:"targetKind"`
 	TargetKey     string                      `json:"targetKey"`
 	AdvertisedURL string                      `json:"advertisedUrl"`
+	DeepLinkURL   string                      `json:"deepLinkUrl"`
+	QRURL         string                      `json:"qrUrl"`
 	DevSession    map[string]any              `json:"devSession"`
 	TargetSession map[string]any              `json:"targetSession"`
 	TargetRun     map[string]any              `json:"targetRun"`
@@ -14888,10 +14891,7 @@ func createStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceB
 		workflowID = "pfw_" + sanitizeID(binding.PackageName) + "_" + options.platform + "_sim"
 	}
 	appDirectory := filepath.Clean(filepath.Join(binding.WorkspaceRoot, binding.PackagePath))
-	flowPath := strings.TrimSpace(options.flowPath)
-	if flowPath == "" {
-		flowPath = filepath.Join(appDirectory, ".maestro", "01-app-launches.yaml")
-	}
+	flowPath := localReadinessMaestroFlowPath(options, appDirectory)
 	artifactDir := strings.TrimSpace(options.artifactDir)
 	if artifactDir == "" {
 		artifactDir = filepath.Join(appDirectory, ".preflight", "simulator-proofs", workflowID)
@@ -14904,18 +14904,24 @@ func createStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceB
 		fmt.Fprintln(stderr, "app scheme could not be derived; pass an Expo app scheme in app config")
 		return 2
 	}
+	developmentReadiness, err := readStandaloneDevelopmentReadiness(options, binding)
+	if err != nil {
+		fmt.Fprintf(stderr, "read simulator development readiness failed: %v\n", err)
+		return 1
+	}
 
 	payload := map[string]any{
-		"workspaceId":       options.workspaceID,
-		"workflowId":        workflowID,
-		"platform":          options.platform,
-		"targetKind":        targetKind,
-		"targetKey":         options.targetKey,
-		"appDirectory":      appDirectory,
-		"appScheme":         appScheme,
-		"port":              port,
-		"flowPath":          flowPath,
-		"artifactDirectory": artifactDir,
+		"workspaceId":          options.workspaceID,
+		"workflowId":           workflowID,
+		"platform":             options.platform,
+		"targetKind":           targetKind,
+		"targetKey":            options.targetKey,
+		"appDirectory":         appDirectory,
+		"appScheme":            appScheme,
+		"port":                 port,
+		"flowPath":             flowPath,
+		"artifactDirectory":    artifactDir,
+		"developmentReadiness": developmentReadiness,
 	}
 	endpoint := runnerEndpoint(
 		options.apiURL,
@@ -14926,14 +14932,21 @@ func createStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceB
 		fmt.Fprintf(stderr, "standalone simulator proof plan failed: %v\n", err)
 		return 1
 	}
+	var response struct {
+		Plan simulatorProofPlanData `json:"plan"`
+	}
+	if err := decodeEnvelopeData(data, &response); err != nil {
+		fmt.Fprintf(stderr, "decode simulator proof plan failed: %v\n", err)
+		return 1
+	}
+	plan := response.Plan
+	if err := validateStandaloneSimulatorProofPlan(plan); err != nil {
+		fmt.Fprintf(stderr, "invalid simulator proof plan: %v\n", err)
+		return 1
+	}
 	if options.json && !options.standaloneRun {
 		_, _ = fmt.Fprintln(stdout, string(data))
 		return 0
-	}
-	var plan simulatorProofPlanData
-	if err := decodeEnvelopeData(data, &plan); err != nil {
-		fmt.Fprintf(stderr, "decode simulator proof plan failed: %v\n", err)
-		return 1
 	}
 	if options.standaloneRun {
 		return executeStandaloneSimulatorProofPlan(options, binding, plan, stdout, stderr, client)
@@ -15771,22 +15784,42 @@ func firstEASBuildRecord(decoded any) (map[string]any, bool) {
 	return record, ok
 }
 
-func executeStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceBinding, plan simulatorProofPlanData, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	var longRunning []*exec.Cmd
+func executeStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceBinding, plan simulatorProofPlanData, stdout io.Writer, stderr io.Writer, client *http.Client) (exitCode int) {
+	if err := validateStandaloneSimulatorProofPlan(plan); err != nil {
+		fmt.Fprintf(stderr, "invalid simulator proof plan: %v\n", err)
+		return 1
+	}
+	var longRunning []standaloneMetroProcess
+	devSessionPublished := false
+	targetSessionPublished := false
 	defer func() {
 		for _, command := range longRunning {
-			if command.Process == nil {
-				continue
+			terminateCommandProcess(command.command.Process.Pid)
+			<-command.done
+		}
+		completedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if targetSessionPublished {
+			if err := postStandaloneRuntimeState(client, options, binding.AppID, "target-sessions", mapWith(plan.TargetSession, map[string]any{"status": "closed", "closedAt": completedAt})); err != nil {
+				fmt.Fprintf(stderr, "post target session cleanup failed: %v\n", err)
+				exitCode = 1
 			}
-			terminateCommandProcess(command.Process.Pid)
-			_ = command.Wait()
+		}
+		if devSessionPublished {
+			// The live runtime API represents stopped sessions as stale.
+			if err := postStandaloneRuntimeState(client, options, binding.AppID, "dev-sessions", mapWith(plan.DevSession, map[string]any{"status": "stale", "stoppedAt": completedAt})); err != nil {
+				fmt.Fprintf(stderr, "post dev session cleanup failed: %v\n", err)
+				exitCode = 1
+			}
+		}
+		if exitCode == 0 {
+			fmt.Fprintf(stdout, "simulator proof run %s passed\n", plan.WorkflowID)
 		}
 	}()
 
 	for _, plannedCommand := range plan.Commands {
 		switch plannedCommand.ID {
 		case "expo_start":
-			command, err := startStandalonePlannedCommand(plannedCommand, stderr)
+			command, err := startStandaloneSimulatorMetro(plannedCommand, plan.AdvertisedURL, plan.Platform, stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "start %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
 				return 1
@@ -15794,11 +15827,12 @@ func executeStandaloneSimulatorProofPlan(options proveAppOptions, binding source
 			longRunning = append(longRunning, command)
 			if err := postStandaloneRuntimeState(client, options, binding.AppID, "dev-sessions", mapWith(plan.DevSession, map[string]any{
 				"status": "running",
-				"pid":    command.Process.Pid,
+				"pid":    command.command.Process.Pid,
 			})); err != nil {
 				fmt.Fprintf(stderr, "post dev session state failed: %v\n", err)
 				return 1
 			}
+			devSessionPublished = true
 		case "open_development_client":
 			if err := runStandalonePlannedCommand(plannedCommand, simulatorOpenTimeout(), stderr); err != nil {
 				fmt.Fprintf(stderr, "run %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
@@ -15810,15 +15844,27 @@ func executeStandaloneSimulatorProofPlan(options proveAppOptions, binding source
 				fmt.Fprintf(stderr, "post target session state failed: %v\n", err)
 				return 1
 			}
-		case "maestro":
+			targetSessionPublished = true
+		case "maestro_test":
 			if err := postStandaloneRuntimeState(client, options, binding.AppID, "target-runs", mapWith(plan.TargetRun, map[string]any{
 				"status": "running",
 			})); err != nil {
 				fmt.Fprintf(stderr, "post target run start failed: %v\n", err)
 				return 1
 			}
+			// Parameterized flows require the native bundle/package, not the URL scheme.
+			if plannedCommand.Env == nil {
+				plannedCommand.Env = map[string]string{}
+			}
+			appID := binding.IOSBundleID
+			if plan.Platform == "android" {
+				appID = binding.AndroidPackage
+			}
+			if appID != "" {
+				plannedCommand.Env["APP_ID"] = appID
+			}
 			artifacts := standaloneMaestroArtifacts(plannedCommand, plan.TargetRun)
-			if err := runStandalonePlannedCommandWithLog(plannedCommand, maestroSmokeTimeout(), stderr, artifacts.LogPath); err != nil {
+			if err := runStandaloneSimulatorMaestro(plannedCommand, artifacts, stderr); err != nil {
 				artifacts = collectStandaloneMaestroArtifacts(artifacts)
 				_ = postStandaloneMaestroArtifacts(client, options, binding.AppID, plan.TargetRun, artifacts)
 				_ = postStandaloneRuntimeState(client, options, binding.AppID, "target-runs", mapWith(plan.TargetRun, map[string]any{
@@ -15850,29 +15896,189 @@ func executeStandaloneSimulatorProofPlan(options proveAppOptions, binding source
 				fmt.Fprintf(stderr, "post target run completion failed: %v\n", err)
 				return 1
 			}
-		default:
-			if plannedCommand.Kind == "long_running" {
-				command, err := startStandalonePlannedCommand(plannedCommand, stderr)
-				if err != nil {
-					fmt.Fprintf(stderr, "start %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
-					return 1
-				}
-				longRunning = append(longRunning, command)
-				continue
-			}
-			if err := runStandalonePlannedCommand(plannedCommand, simulatorOpenTimeout(), stderr); err != nil {
-				fmt.Fprintf(stderr, "run %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
-				return 1
-			}
 		}
 	}
-	fmt.Fprintf(stdout, "simulator proof run %s passed\n", plan.WorkflowID)
 	return 0
+}
+
+type standaloneMetroProcess struct {
+	command *exec.Cmd
+	done    <-chan error
+}
+
+func startStandaloneSimulatorMetro(plannedCommand simulatorProofPlanCommand, advertisedURL string, platform string, stderr io.Writer) (standaloneMetroProcess, error) {
+	endpoint, err := url.Parse(advertisedURL)
+	if err != nil || endpoint.Scheme != "http" || (endpoint.Hostname() != "127.0.0.1" && endpoint.Hostname() != "localhost" && endpoint.Hostname() != "10.0.2.2") {
+		return standaloneMetroProcess{}, fmt.Errorf("simulator Metro requires an explicit local HTTP URL")
+	}
+	port, err := strconv.Atoi(endpoint.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return standaloneMetroProcess{}, fmt.Errorf("simulator Metro requires a valid explicit port")
+	}
+	// Never accept an unrelated Metro merely because /status is ready. Require
+	// the port to be free before launching the command for this source checkout.
+	listener, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		return standaloneMetroProcess{}, fmt.Errorf("Metro port %d is occupied; stop its owner or choose another port", port)
+	}
+	_ = listener.Close()
+	command := standalonePlannedExecCommand(plannedCommand, stderr)
+	easConfig, err := loadEASJSON(plannedCommand.CWD)
+	if err != nil {
+		return standaloneMetroProcess{}, fmt.Errorf("read standalone Metro profile: %w", err)
+	}
+	profile := selectEASProfile(easConfig, platform, "simulator")
+	command.Env = upsertEnvValues(expoDevServerEnv(runnerOnceOptions{hostMode: "localhost"}, apiRunnerJob{Payload: runnerJobPayload{Lane: "simulator"}}), plannedCommand.Env)
+	command.Env = upsertEnvValues(command.Env, standaloneSimulatorRuntimeEnvironment(profile.env))
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		return standaloneMetroProcess{}, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	process := standaloneMetroProcess{command: command, done: done}
+	statusURL := "http://127.0.0.1:" + strconv.Itoa(port) + "/status"
+	client := &http.Client{Timeout: 2 * time.Second}
+	err = waitForMetroStatusWithCancellation(client, statusURL, expoDevSessionStartTimeout(), func() (bool, error) {
+		select {
+		case exitErr := <-done:
+			// Retain the result so cleanup can wait without calling Cmd.Wait twice.
+			done <- exitErr
+			return false, fmt.Errorf("Expo exited before Metro became ready: %v", exitErr)
+		default:
+			return false, nil
+		}
+	}, 0)
+	if err != nil {
+		terminateCommandProcess(command.Process.Pid)
+		<-done
+		return standaloneMetroProcess{}, err
+	}
+	return process, nil
+}
+
+type standaloneJUnitSuite struct {
+	XMLName  xml.Name
+	Tests    *int                   `xml:"tests,attr"`
+	Failures int                    `xml:"failures,attr"`
+	Errors   int                    `xml:"errors,attr"`
+	Skipped  int                    `xml:"skipped,attr"`
+	Suites   []standaloneJUnitSuite `xml:"testsuite"`
+	Cases    []standaloneJUnitCase  `xml:"testcase"`
+}
+
+type standaloneJUnitCase struct {
+	Status  string    `xml:"status,attr"`
+	Failure *struct{} `xml:"failure"`
+	Error   *struct{} `xml:"error"`
+	Skipped *struct{} `xml:"skipped"`
+}
+
+// Profile values are defaults; explicit live backend overrides must survive.
+// Use the same environment for identity resolution and the owned Metro process.
+func standaloneSimulatorRuntimeEnvironment(profileEnv map[string]string) map[string]string {
+	env := map[string]string{}
+	for key, value := range profileEnv {
+		if explicit, present := os.LookupEnv(key); present {
+			value = explicit
+		}
+		env[key] = value
+	}
+	env["APP_VARIANT"] = "development"
+	return env
+}
+
+func runStandaloneSimulatorMaestro(command simulatorProofPlanCommand, artifacts standaloneMaestroRunArtifacts, stderr io.Writer) error {
+	if artifacts.ReportPath == "" {
+		return fmt.Errorf("Maestro proof requires a JUnit report path")
+	}
+	if _, err := os.Stat(artifacts.ReportPath); err == nil {
+		return fmt.Errorf("Maestro proof report already exists; use a fresh artifact directory")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := runStandalonePlannedCommandWithLog(command, maestroSmokeTimeout(), stderr, artifacts.LogPath); err != nil {
+		return err
+	}
+	report, err := os.Open(artifacts.ReportPath)
+	if err != nil {
+		return fmt.Errorf("Maestro did not produce a proof report: %w", err)
+	}
+	defer report.Close()
+	decoder := xml.NewDecoder(report)
+	var parsed standaloneJUnitSuite
+	if err := decoder.Decode(&parsed); err != nil {
+		return fmt.Errorf("invalid Maestro JUnit report: %w", err)
+	}
+	if parsed.Failures != 0 || parsed.Errors != 0 || parsed.Skipped != 0 {
+		return fmt.Errorf("Maestro report contains failed or skipped tests")
+	}
+	suites := parsed.Suites
+	if parsed.XMLName.Local == "testsuite" {
+		suites = []standaloneJUnitSuite{parsed}
+	} else if parsed.XMLName.Local != "testsuites" {
+		return fmt.Errorf("invalid Maestro JUnit root")
+	}
+	executed := 0
+	for _, suite := range suites {
+		if suite.Tests == nil || *suite.Tests != len(suite.Cases) || *suite.Tests < 0 || len(suite.Suites) > 0 {
+			return fmt.Errorf("Maestro report has inconsistent suite totals")
+		}
+		if suite.Failures != 0 || suite.Errors != 0 || suite.Skipped != 0 {
+			return fmt.Errorf("Maestro report contains failed or skipped tests")
+		}
+		for _, test := range suite.Cases {
+			if test.Failure != nil || test.Error != nil || test.Skipped != nil || (test.Status != "" && test.Status != "SUCCESS" && test.Status != "PASSED") {
+				return fmt.Errorf("Maestro report contains failed or skipped tests")
+			}
+			executed++
+		}
+	}
+	if executed == 0 {
+		return fmt.Errorf("Maestro report contains no executed tests")
+	}
+	if parsed.XMLName.Local == "testsuites" && parsed.Tests != nil && *parsed.Tests != executed {
+		return fmt.Errorf("Maestro report has inconsistent aggregate totals")
+	}
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("invalid Maestro JUnit trailing content: %w", err)
+		}
+		if space, ok := token.(xml.CharData); ok && strings.TrimSpace(string(space)) == "" {
+			continue
+		}
+		return fmt.Errorf("invalid Maestro JUnit trailing content")
+	}
+	return nil
+}
+
+func validateStandaloneSimulatorProofPlan(plan simulatorProofPlanData) error {
+	if strings.TrimSpace(plan.WorkflowID) == "" {
+		return fmt.Errorf("workflowId is required")
+	}
+	if len(plan.Commands) == 0 {
+		return fmt.Errorf("commands must not be empty")
+	}
+	required := []string{"expo_start", "open_development_client", "maestro_test"}
+	if len(plan.Commands) != len(required) {
+		return fmt.Errorf("expected Expo, client-open and Maestro proof commands")
+	}
+	for index, plannedCommand := range plan.Commands {
+		if plannedCommand.ID != required[index] || strings.TrimSpace(plannedCommand.Command) == "" || len(plannedCommand.Args) == 0 {
+			return fmt.Errorf("command %d must be a nonempty %s command", index+1, required[index])
+		}
+	}
+	return nil
 }
 
 type standaloneMaestroRunArtifacts struct {
 	ReportPath      string
 	OutputDir       string
+	DebugDir        string
 	LogPath         string
 	CommandPaths    []string
 	ScreenshotPaths []string
@@ -15890,9 +16096,14 @@ func standaloneMaestroArtifacts(command simulatorProofPlanCommand, targetRun map
 				artifacts.ReportPath = command.Args[index+1]
 				index += 1
 			}
-		case "--test-output-dir", "--debug-output":
-			if index+1 < len(command.Args) && artifacts.OutputDir == "" {
+		case "--test-output-dir":
+			if index+1 < len(command.Args) {
 				artifacts.OutputDir = command.Args[index+1]
+				index += 1
+			}
+		case "--debug-output":
+			if index+1 < len(command.Args) {
+				artifacts.DebugDir = command.Args[index+1]
 				index += 1
 			}
 		}
@@ -15901,6 +16112,15 @@ func standaloneMaestroArtifacts(command simulatorProofPlanCommand, targetRun map
 		if metadata, ok := targetRun["metadata"].(map[string]any); ok {
 			artifacts.OutputDir = readMapString(metadata, "testOutputDirectory")
 		}
+	}
+	if metadata, ok := targetRun["metadata"].(map[string]any); ok {
+		if artifacts.DebugDir == "" {
+			artifacts.DebugDir = readMapString(metadata, "debugOutputDirectory")
+		}
+		artifacts.LogPath = readMapString(metadata, "logPath")
+	}
+	if artifacts.LogPath != "" {
+		return artifacts
 	}
 	if artifacts.ReportPath != "" {
 		artifacts.LogPath = filepath.Join(filepath.Dir(artifacts.ReportPath), "maestro.log")
@@ -15911,9 +16131,20 @@ func standaloneMaestroArtifacts(command simulatorProofPlanCommand, targetRun map
 }
 
 func collectStandaloneMaestroArtifacts(artifacts standaloneMaestroRunArtifacts) standaloneMaestroRunArtifacts {
-	artifacts.CommandPaths = findFilesWithPrefixAndExtension(artifacts.OutputDir, "commands-", ".json")
-	artifacts.ScreenshotPaths = findFilesWithExtensions(artifacts.OutputDir, ".png")
-	artifacts.VideoPaths = findFilesWithExtensions(artifacts.OutputDir, ".mp4", ".mov")
+	for _, directory := range []string{artifacts.OutputDir, artifacts.DebugDir} {
+		if directory == "" {
+			continue
+		}
+		artifacts.CommandPaths = append(artifacts.CommandPaths, findFilesWithPrefixAndExtension(directory, "commands-", ".json")...)
+		artifacts.ScreenshotPaths = append(artifacts.ScreenshotPaths, findFilesWithExtensions(directory, ".png")...)
+		artifacts.VideoPaths = append(artifacts.VideoPaths, findFilesWithExtensions(directory, ".mp4", ".mov")...)
+	}
+	slices.Sort(artifacts.CommandPaths)
+	artifacts.CommandPaths = slices.Compact(artifacts.CommandPaths)
+	slices.Sort(artifacts.ScreenshotPaths)
+	artifacts.ScreenshotPaths = slices.Compact(artifacts.ScreenshotPaths)
+	slices.Sort(artifacts.VideoPaths)
+	artifacts.VideoPaths = slices.Compact(artifacts.VideoPaths)
 	return artifacts
 }
 
@@ -15940,6 +16171,9 @@ func standaloneMaestroMetadata(targetRun map[string]any, artifacts standaloneMae
 	}
 	if artifacts.OutputDir != "" {
 		metadata["testOutputDirectory"] = artifacts.OutputDir
+	}
+	if artifacts.DebugDir != "" {
+		metadata["debugOutputDirectory"] = artifacts.DebugDir
 	}
 	if artifacts.LogPath != "" {
 		metadata["logPath"] = artifacts.LogPath
@@ -17136,7 +17370,11 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 	}
 	easConfig, _ := loadEASJSON(absoluteAppDir)
 	selectedEASProfile := selectEASProfile(easConfig, options.platform, options.lane)
-	resolvedExpoConfig := resolveExpoConfig(absoluteAppDir, selectedEASProfile.env)
+	configEnv := selectedEASProfile.env
+	if options.standalonePlan && options.lane == "simulator" {
+		configEnv = standaloneSimulatorRuntimeEnvironment(configEnv)
+	}
+	resolvedExpoConfig := resolveExpoConfig(absoluteAppDir, configEnv)
 	appIdentity := resolvedExpoConfig.identity
 	repository, err := readSourceRepository(workspaceRoot)
 	if err != nil {
