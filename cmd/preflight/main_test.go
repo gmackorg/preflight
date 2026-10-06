@@ -7378,8 +7378,9 @@ exit 0
 				"--watch",
 				"--poll-interval",
 				"1ms",
+				// This seven-job integration loop can exceed 3s on a loaded runner.
 				"--watch-timeout",
-				"3s",
+				"10s",
 			},
 			&proveStdout,
 			&proveStderr,
@@ -11900,7 +11901,7 @@ func TestResetAndroidAutolinkingOutputsRemovesOnlyGeneratedAutolinkingCaches(t *
 	}
 }
 
-func TestAdvertisedDevServerURLUsesLocalhostForLocalhostHostMode(t *testing.T) {
+func TestAdvertisedDevServerURLUsesIPv4LoopbackForLocalhostHostMode(t *testing.T) {
 	url, err := advertisedDevServerURL(
 		runnerOnceOptions{
 			hostMode:  "localhost",
@@ -11911,8 +11912,8 @@ func TestAdvertisedDevServerURLUsesLocalhostForLocalhostHostMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("advertised dev server URL failed: %v", err)
 	}
-	if url != "http://localhost:19000" {
-		t.Fatalf("expected localhost dev server URL, got %q", url)
+	if url != "http://127.0.0.1:19000" {
+		t.Fatalf("expected IPv4 loopback dev server URL, got %q", url)
 	}
 }
 
