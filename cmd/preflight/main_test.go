@@ -6094,6 +6094,7 @@ if [ "$1" = "expo" ] && [ "$2" = "prebuild" ]; then
   mkdir -p ios/Forgegraph.xcworkspace
 fi
 `,
+		"pod": "#!/usr/bin/env sh\nexit 0\n",
 		"xcodebuild": `#!/usr/bin/env sh
 printf '%s :: %s\n' "$PWD" "$*" >> "$XCODEBUILD_LOG"
 while [ "$#" -gt 0 ]; do
@@ -12620,9 +12621,12 @@ func TestRunnerOnceCancelsInFlightSimulatorOpenWhenJobStatusTurnsCancelled(t *te
 	}
 	writeExpoConfigIdentity(t, appDir)
 	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "pod"), []byte("#!/usr/bin/env sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake pod: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
 case "$*" in
-	"expo prebuild --platform ios") mkdir -p ios/ForgeGraph.xcworkspace; exit 0 ;;
+	"expo prebuild --platform ios --no-install") mkdir -p ios/ForgeGraph.xcworkspace; exit 0 ;;
 	"expo run:ios"*) sleep 1; exit 0 ;;
 	*) printf 'unexpected npx args: %s\n' "$*" >&2; exit 44 ;;
 esac
