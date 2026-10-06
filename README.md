@@ -67,8 +67,12 @@ uses.
 Disk is the failure mode worth knowing about: below
 `PREFLIGHT_MIN_FREE_DISK_GB` a runner *declines* work rather than failing it,
 so a host that quietly fills up looks idle instead of sick. `preflight disk`
-and `preflight nodes` both surface that, and `preflight disk --reclaim` prunes
-regenerable build caches.
+and `preflight nodes` both surface that. Automatic checks only probe free
+space on the build and home volumes; they never scan or delete shared Xcode
+caches. `PREFLIGHT_MIN_FREE_DISK_GB` is the single opt-in floor for claims and
+simulator builds. A configured floor also refuses work when a volume cannot
+be probed. Inspect ownership and preserve required native products before an
+explicit `preflight disk --reclaim` or `preflight cleanup builds` operation.
 
 For a standalone simulator proof, `prove-app --standalone-run --target-key <id>`
 requires a readable Maestro flow and the simulator development profile. Choose a
