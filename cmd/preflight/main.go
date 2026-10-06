@@ -5649,6 +5649,8 @@ func handleRunnerClaim(
 		return handleMaestroRunJob(client, options, registration, job, stdout)
 	case "unity.build.player":
 		return handleUnityBuildPlayerJob(client, options, registration, job, stdout)
+	case "unity.readiness.probe":
+		return handleUnityReadinessJob(client, options, registration, job, stdout)
 	case "fastlane.produce", "fastlane.metadata", "fastlane.screenshots":
 		return handleFastlaneJob(client, options, registration, job, stdout)
 	case "eas.submit":
@@ -5687,7 +5689,9 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 	}
 	if unityCommandAvailable() {
 		localTools = append(localTools, "unity")
-		adapters = append(adapters, "unity.editor", "unity.android", "unity.android.build_support")
+		adapters = append(adapters, "unity.editor")
+		editor, _ := resolveUnityExecutable(runnerJobCommandPlan{})
+		adapters = append(adapters, unityInstalledBuildSupport(editor)...)
 	}
 	// Physical-device development sessions need a dev server the phone can
 	// reach; the control plane routes tunnel-required dev_session jobs to
@@ -5943,6 +5947,7 @@ type runnerJobPayload struct {
 }
 
 type runnerJobCommandPlan struct {
+	InputPath            string                     `json:"inputPath"`
 	Tool                 string                     `json:"tool"`
 	Command              string                     `json:"command"`
 	WorkingDirectory     string                     `json:"workingDirectory"`
@@ -5961,6 +5966,7 @@ type runnerJobCommandExecutable struct {
 }
 
 type runnerJobCommandPlanOutput struct {
+	ExportRelativePath   string `json:"exportRelativePath"`
 	BuildTarget          string `json:"buildTarget"`
 	ArtifactKind         string `json:"artifactKind"`
 	BuildOutputDirectory string `json:"buildOutputDirectory"`
@@ -7446,6 +7452,9 @@ func handleUnityBuildPlayerJob(client *http.Client, options runnerOnceOptions, r
 		job,
 		runnerJobCancellationCheck(client, options, registration, job),
 	)
+	if err == nil {
+		err = validateRunnerJobSourceBinding(options, job)
+	}
 	if err != nil {
 		_ = uploadUnityBuildArtifacts(client, options, registration, job, artifacts)
 		if errors.Is(err, errCommandCancelled) {
@@ -7489,14 +7498,19 @@ func handleUnityBuildPlayerJob(client *http.Client, options runnerOnceOptions, r
 }
 
 type unityBuildArtifacts struct {
-	Target          string
-	ArtifactKind    string
-	OutputPath      string
-	OutputDirectory string
-	LogPath         string
-	BuildSeconds    float64
-	LevelForge      map[string]any
-	BuildArtifacts  []unityBuildArtifact
+	SourceCommit         string
+	SourceManifestPath   string
+	SourceManifestSHA256 string
+	ExportManifestSHA256 string
+	ExportFileCount      int
+	Target               string
+	ArtifactKind         string
+	OutputPath           string
+	OutputDirectory      string
+	LogPath              string
+	BuildSeconds         float64
+	LevelForge           map[string]any
+	BuildArtifacts       []unityBuildArtifact
 }
 
 type unityBuildArtifact struct {
@@ -7518,17 +7532,29 @@ func runUnityBuildPlayer(
 		return unityBuildArtifactsFromPlan(options, job), err
 	}
 	artifacts := unityBuildArtifactsFromPlan(options, job)
+	stagedProject, err := stageUnityBuildSource(options, job)
+	if err != nil {
+		return artifacts, err
+	}
 	if artifacts.LogPath == "" {
 		return artifacts, fmt.Errorf("unity.build.player command plan did not include a log path")
 	}
 	if artifacts.OutputPath == "" {
 		return artifacts, fmt.Errorf("unity.build.player command plan did not include a build output path")
 	}
+	if stagedProject != "" {
+		workspace := firstNonEmpty(job.Payload.SourceBinding.WorkspaceRoot, options.workspaceRoot)
+		if err := validateUnityOwnedPath(workspace, artifacts.LogPath); err != nil {
+			return artifacts, err
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(artifacts.LogPath), 0o755); err != nil {
 		return artifacts, fmt.Errorf("create Unity log directory: %w", err)
 	}
-	if err := os.MkdirAll(unityOutputDirectoryForPath(artifacts.OutputPath), 0o755); err != nil {
-		return artifacts, fmt.Errorf("create Unity build output directory: %w", err)
+	if stagedProject == "" {
+		if err := os.MkdirAll(unityOutputDirectoryForPath(artifacts.OutputPath), 0o755); err != nil {
+			return artifacts, fmt.Errorf("create Unity build output directory: %w", err)
+		}
 	}
 	logFile, err := os.OpenFile(artifacts.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -7538,6 +7564,9 @@ func runUnityBuildPlayer(
 
 	command := exec.Command(executable, plan.Args...)
 	command.Dir = unityCommandWorkingDirectory(options, job, plan)
+	if stagedProject != "" {
+		command.Dir = stagedProject
+	}
 	command.Env = unityCommandEnv(os.Environ(), plan.Env)
 	flushLog := attachRedactedCommandLog(command, logFile)
 	var cancellationCheck func() (bool, error)
@@ -7553,6 +7582,17 @@ func runUnityBuildPlayer(
 	)
 	flushLog()
 	artifacts.BuildSeconds = time.Since(startedAt).Seconds()
+	if err == nil && stagedProject != "" {
+		err = promoteUnityExport(options, job, stagedProject)
+		if err == nil {
+			artifacts.SourceCommit = job.Payload.SourceBinding.GitCommitSHA
+			artifacts.SourceManifestPath = filepath.Join(filepath.Dir(stagedProject), "source-manifest.json")
+			artifacts.SourceManifestSHA256, err = unityFileSHA256(artifacts.SourceManifestPath)
+		}
+		if err == nil {
+			artifacts.ExportManifestSHA256, artifacts.ExportFileCount, err = unityDirectorySHA256(filepath.Dir(artifacts.OutputPath))
+		}
+	}
 	artifacts.BuildArtifacts = discoverUnityBuildArtifacts(artifacts.ArtifactKind, artifacts.OutputPath)
 	if err != nil {
 		return artifacts, fmt.Errorf("run Unity batchmode build: %w", err)
@@ -7610,7 +7650,12 @@ const levelForgeUnityExecuteMethod = "LevelForge.Editor.LevelForgeBuild.RunHeadl
 // so it stays an allowlist — but an operator-configurable one, so a node can
 // build non-LevelForge Unity projects without a code change.
 func unityAllowedExecuteMethods() []string {
-	methods := []string{levelForgeUnityExecuteMethod}
+	methods := []string{
+		levelForgeUnityExecuteMethod,
+		"HabitPlay.Games.Editor.HabitPlayBuild.ExportIosDevice",
+		"HabitPlay.Games.Editor.HabitPlayBuild.ExportIosSimulator",
+		"HabitPlay.Games.Editor.HabitPlayBuild.ExportAndroidLibrary",
+	}
 	if extra := strings.TrimSpace(os.Getenv("PREFLIGHT_UNITY_EXECUTE_METHODS")); extra != "" {
 		for _, method := range strings.Split(extra, ",") {
 			if method = strings.TrimSpace(method); method != "" {
@@ -7839,12 +7884,31 @@ func discoverUnityBuildArtifacts(kind string, outputPath string) []unityBuildArt
 	if outputPath == "" {
 		return nil
 	}
+	// Library exports are directories, not installable player archives. Require
+	// their native project marker before reporting the directory as an artifact.
+	marker := ""
+	switch kind {
+	case "ios_xcode_project":
+		marker = filepath.Join("Unity-iPhone.xcodeproj", "project.pbxproj")
+	case "android_gradle_project":
+		marker = filepath.Join("unityLibrary", "build.gradle")
+	case "ios_xcframework":
+		marker = "Info.plist"
+	case "ios_framework":
+		marker = "UnityFramework"
+	}
+	if marker != "" {
+		if fileExists(filepath.Join(outputPath, marker)) {
+			return []unityBuildArtifact{{Kind: kind, URI: outputPath}}
+		}
+		return nil
+	}
 	if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
 		return []unityBuildArtifact{{Kind: unityArtifactKindForPath(kind, outputPath), URI: outputPath}}
 	}
 	outputDir := unityOutputDirectoryForPath(outputPath)
 	var artifacts []unityBuildArtifact
-	for _, path := range findFilesWithExtensions(outputDir, ".apk", ".aab", ".ipa", ".zip") {
+	for _, path := range findFilesWithExtensions(outputDir, ".apk", ".aab", ".ipa", ".zip", ".aar") {
 		artifacts = append(artifacts, unityBuildArtifact{
 			Kind: unityArtifactKindForPath(kind, path),
 			URI:  path,
@@ -7865,6 +7929,8 @@ func unityArtifactKindForPath(fallback string, path string) string {
 		return "android_apk"
 	case ".aab":
 		return "android_aab"
+	case ".aar":
+		return "android_aar"
 	case ".ipa":
 		return "ios_ipa"
 	case ".zip":
@@ -7934,6 +8000,13 @@ func unityBuildResultPayload(artifacts unityBuildArtifacts) map[string]any {
 	}
 	if len(artifacts.BuildArtifacts) > 0 {
 		result["primaryArtifactPath"] = artifacts.BuildArtifacts[0].URI
+	}
+	if artifacts.SourceManifestSHA256 != "" {
+		result["sourceCommitSha"] = artifacts.SourceCommit
+		result["sourceManifestPath"] = artifacts.SourceManifestPath
+		result["sourceManifestSHA256"] = artifacts.SourceManifestSHA256
+		result["exportManifestSHA256"] = artifacts.ExportManifestSHA256
+		result["exportFileCount"] = artifacts.ExportFileCount
 	}
 	return result
 }
@@ -10685,7 +10758,7 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 		}
 	}
 
-	if !isCiRoot {
+	if !isCiRoot && !strings.HasPrefix(job.Kind, "unity.") {
 		easProfileEnv := easProfileEnvForJob(appDir, job)
 		resolvedExpoConfig := resolveExpoConfig(appDir, easProfileEnv)
 		if expected := strings.TrimSpace(binding.ExpoConfigDigest); expected != "" {
@@ -10698,6 +10771,29 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 				return err
 			}
 		}
+
+		appIdentity := resolvedExpoConfig.identity
+		if err := compareSourceBindingValue("appScheme", binding.AppScheme, appIdentity.scheme); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("expoSlug", binding.ExpoSlug, appIdentity.slug); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("iosBundleId", binding.IOSBundleID, appIdentity.iosBundleID); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("androidPackage", binding.AndroidPackage, appIdentity.androidPackage); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("easProjectId", binding.EASProjectID, appIdentity.easProjectID); err != nil {
+			return err
+		}
+		if err := compareSourceBindingValue("easProfileName", binding.EASProfileName, actualEASProfileNameForJob(appDir, job)); err != nil {
+			return err
+		}
+	}
+
+	if !isCiRoot {
 		if binding.DirtyWorkspace != nil || binding.ChangedSetupFiles != nil {
 			// Both sides must be normalised the same way. absoluteAppDir is
 			// symlink-resolved, so passing a raw bindingRoot here made
@@ -10725,25 +10821,6 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 			}
 		}
 
-		appIdentity := resolvedExpoConfig.identity
-		if err := compareSourceBindingValue("appScheme", binding.AppScheme, appIdentity.scheme); err != nil {
-			return err
-		}
-		if err := compareSourceBindingValue("expoSlug", binding.ExpoSlug, appIdentity.slug); err != nil {
-			return err
-		}
-		if err := compareSourceBindingValue("iosBundleId", binding.IOSBundleID, appIdentity.iosBundleID); err != nil {
-			return err
-		}
-		if err := compareSourceBindingValue("androidPackage", binding.AndroidPackage, appIdentity.androidPackage); err != nil {
-			return err
-		}
-		if err := compareSourceBindingValue("easProjectId", binding.EASProjectID, appIdentity.easProjectID); err != nil {
-			return err
-		}
-		if err := compareSourceBindingValue("easProfileName", binding.EASProfileName, actualEASProfileNameForJob(appDir, job)); err != nil {
-			return err
-		}
 	}
 
 	if binding.GitRemoteURL != "" || binding.GitCommitSHA != "" || (!isCiRoot && binding.GitBranch != "") {

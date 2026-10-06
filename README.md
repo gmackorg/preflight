@@ -72,6 +72,24 @@ Standalone Metro uses the selected EAS profile environment as defaults and
 preserves explicit process environment overrides, including live API URLs.
 Both source identity resolution and Metro use the development app variant.
 
+Unity library builds use `unity.build.player` with a source-bound command plan.
+LevelForge's build entry point and HabitPlay's three native library exports are
+permitted by default. Set `PREFLIGHT_UNITY_EXECUTE_METHODS` for additional permitted
+editor methods and `UNITY_EDITOR` to the installed editor. Platform capabilities reflect installed
+`PlaybackEngines/iOSSupport` and `PlaybackEngines/AndroidPlayer` modules.
+
+For a library export, `commandPlan.inputPath` selects the authored Unity project,
+`-projectPath` selects `.preflight/unity-projects/<jobId>/HabitPlayUnity`, and
+`output.exportRelativePath` identifies the editor-generated project under
+`Build/exports`. The runner stages tracked Assets, Packages and ProjectSettings,
+copies tracked local SDK packages, and rewrites local package references in the
+staged manifest. Editor-generated settings stay in that staging directory.
+Exports must include a complete parent `SHA256SUMS`; the runner verifies those
+files before moving the lane to `.preflight/unity-exports/<jobId>/<lane>`.
+The completion result includes source-file provenance, source commit, the whole
+export digest and file count. Xcode and Gradle project exports need subsequent
+native library packaging and an Expo simulator proof to validate a hybrid app.
+
 ## Development
 
 ```sh

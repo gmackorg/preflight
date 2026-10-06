@@ -11774,6 +11774,9 @@ exit 0
 `)
 	t.Setenv("PREFLIGHT_UNITY_COMMAND", unityPath)
 	t.Setenv("UNITY_COMMAND_LOG", unityCommandLog)
+	if err := os.MkdirAll(filepath.Join(filepath.Dir(unityPath), "PlaybackEngines", "AndroidPlayer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	var calls []string
 	var artifactBodies []map[string]any
