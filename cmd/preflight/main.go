@@ -11696,11 +11696,15 @@ func buildAndInstallIOSSimulatorApp(
 		"xcodebuild: building scheme %s for simulator %s (ad hoc signing)\n",
 		scheme, simulatorUDID,
 	)
+	configuration := "Debug"
+	if isPackagedIOSSimulatorJob(job) {
+		configuration = "Release"
+	}
 	build := exec.Command(
 		"xcodebuild",
 		"-workspace", workspace,
 		"-scheme", scheme,
-		"-configuration", "Debug",
+		"-configuration", configuration,
 		"-sdk", "iphonesimulator",
 		"-destination", "id="+simulatorUDID,
 		"-derivedDataPath", derivedData,
@@ -11720,9 +11724,12 @@ func buildAndInstallIOSSimulatorApp(
 	}
 	flushBuild()
 
-	appPath, err := findBuiltSimulatorApp(derivedData)
+	appPath, err := findBuiltSimulatorAppForConfiguration(derivedData, configuration)
 	if err != nil {
 		return err
+	}
+	if configuration == "Release" && !fileExists(filepath.Join(appPath, "main.jsbundle")) {
+		return fmt.Errorf("packaged simulator build is missing main.jsbundle: %s", appPath)
 	}
 	_, _ = fmt.Fprintf(logFile, "simctl: installing %s onto %s\n", filepath.Base(appPath), simulatorUDID)
 	install := exec.Command(options.xcrunPath, "simctl", "install", simulatorUDID, appPath)
@@ -11754,7 +11761,11 @@ func findIOSAppWorkspace(iosDir string) (string, error) {
 
 // findBuiltSimulatorApp locates the .app xcodebuild wrote for the simulator.
 func findBuiltSimulatorApp(derivedDataPath string) (string, error) {
-	productsDir := filepath.Join(derivedDataPath, "Build", "Products", "Debug-iphonesimulator")
+	return findBuiltSimulatorAppForConfiguration(derivedDataPath, "Debug")
+}
+
+func findBuiltSimulatorAppForConfiguration(derivedDataPath string, configuration string) (string, error) {
+	productsDir := filepath.Join(derivedDataPath, "Build", "Products", configuration+"-iphonesimulator")
 	entries, err := os.ReadDir(productsDir)
 	if err != nil {
 		return "", fmt.Errorf("read build products %s: %w", productsDir, err)
@@ -12344,6 +12355,13 @@ func expoRunAndroidArgs(providerIdentity string, port int) []string {
 }
 
 func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, platform string, providerIdentity string, port int, job apiRunnerJob, cancellationCheck func() (bool, error)) error {
+	if isPackagedIOSSimulatorJob(job) {
+		bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
+		if bundleID == "" {
+			return fmt.Errorf("packaged iOS simulator job requires iosBundleId")
+		}
+		return runLoggedXcrunCommandWithCancellation(logFile, options, cancellationCheck, "simctl", "launch", providerIdentity, bundleID)
+	}
 	deepLinkURL := simulatorDeepLinkURL(job, port)
 	if strings.TrimSpace(deepLinkURL) == "" {
 		return nil
@@ -12608,6 +12626,9 @@ func expoCommandEnv(job apiRunnerJob) []string {
 	if expoDevelopmentVariant(job) {
 		env = upsertEnv(env, "APP_VARIANT", "development")
 	}
+	for key, value := range easProfileEnvForJob(appDirectoryForJob(runnerOnceOptions{}, job), job) {
+		env = upsertEnv(env, key, value)
+	}
 	// @sentry/react-native's Xcode build phase runs `sentry-cli` to upload
 	// source maps on every build; without a configured org/sentry.properties it
 	// fails xcodebuild with code 65 (seen fleet-wide). A local simulator/dev
@@ -12631,6 +12652,9 @@ func expoCommandEnv(job apiRunnerJob) []string {
 }
 
 func expoDevelopmentVariant(job apiRunnerJob) bool {
+	if variant := easProfileEnvForJob(appDirectoryForJob(runnerOnceOptions{}, job), job)["APP_VARIANT"]; variant != "" {
+		return variant == "development"
+	}
 	lane := strings.TrimSpace(job.Payload.Lane)
 	if lane == "simulator" || lane == "development" {
 		return true
@@ -12644,6 +12668,24 @@ func expoDevelopmentVariant(job apiRunnerJob) bool {
 	}
 	return strings.Contains(job.Payload.SourceBinding.AndroidPackage, ".dev") ||
 		strings.Contains(job.Payload.SourceBinding.IOSBundleID, ".dev")
+}
+
+// Preview simulator profiles produce a packaged app with embedded JavaScript.
+// Keep physical development targets and Android on their existing dev-client path.
+func isPackagedIOSSimulatorProfile(profile easBuildProfile, platform string, lane string) bool {
+	return platform == "ios" && lane == "simulator" &&
+		profile.DevelopmentClient != nil && !*profile.DevelopmentClient &&
+		easProfileIsIOSSimulator(profile) && profile.Distribution == "internal" &&
+		easProfileEnv(profile, platform)["APP_VARIANT"] == "preview"
+}
+
+func isPackagedIOSSimulatorJob(job apiRunnerJob) bool {
+	config, err := loadEASJSON(appDirectoryForJob(runnerOnceOptions{}, job))
+	if err != nil {
+		return false
+	}
+	profile, ok := config.Build[easProfileNameForJob(job)]
+	return ok && isPackagedIOSSimulatorProfile(profile, jobPlatform(job), job.Payload.Lane)
 }
 
 func upsertEnv(env []string, key string, value string) []string {
@@ -14342,6 +14384,7 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		fmt.Fprintln(stdout, "  --platform ios|android  Platform to prove (default: ios)")
 		fmt.Fprintln(stdout, "  --lane <lane>           simulator or development (default: simulator)")
 		fmt.Fprintln(stdout, "  --build-strategy <name> local or eas development build strategy")
+		fmt.Fprintln(stdout, "  --build-profile <name>  Select an EAS profile (preview simulator profiles build packaged apps locally)")
 		fmt.Fprintln(stdout, "  --priority <n>          scheduling priority; higher is claimed first (default: 0)")
 		fmt.Fprintln(stdout, "  --local-readiness       Validate local Expo/EAS/Maestro readiness without API calls")
 		fmt.Fprintln(stdout, "  --interactive-setup     Allow EAS credential prompts during a standalone build run")
@@ -14854,7 +14897,8 @@ func buildLocalReadinessReport(options proveAppOptions, binding sourceBinding) l
 		profile, ok := easConfig.Build[binding.EASProfileName]
 		addCheck("eas_profile", ok && binding.EASProfileName != "", fmt.Sprintf("selected EAS profile %q", binding.EASProfileName))
 		if ok {
-			addCheck("eas_development_client", easProfileDevelopmentClient(profile), "EAS profile enables developmentClient")
+			packagedPreview := isPackagedIOSSimulatorProfile(profile, binding.Platform, binding.Lane)
+			addCheck("eas_development_client", easProfileDevelopmentClient(profile) || packagedPreview, "EAS profile enables developmentClient or a packaged iOS preview simulator build")
 			addCheck("eas_internal_distribution", profile.Distribution == "" || profile.Distribution == "internal", "EAS profile uses internal distribution")
 			if binding.Platform == "ios" {
 				simulator := profile.IOS.Simulator != nil && *profile.IOS.Simulator
@@ -17489,6 +17533,22 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 	}
 	easConfig, _ := loadEASJSON(absoluteAppDir)
 	selectedEASProfile := selectEASProfile(easConfig, options.platform, options.lane)
+	if requested := strings.TrimSpace(options.buildProfile); requested != "" && !(options.standalonePlan && options.lane == "development") {
+		profile, ok := easConfig.Build[requested]
+		if !ok {
+			return sourceBinding{}, fmt.Errorf("EAS build profile %q was not found", requested)
+		}
+		if isProductionBuildProfile(requested) {
+			return sourceBinding{}, fmt.Errorf("production profiles require the separate store build workflow")
+		}
+		if !easProfileDevelopmentClient(profile) && !isPackagedIOSSimulatorProfile(profile, options.platform, options.lane) {
+			return sourceBinding{}, fmt.Errorf("EAS profile %q must enable developmentClient or target a packaged iOS preview simulator", requested)
+		}
+		if isPackagedIOSSimulatorProfile(profile, options.platform, options.lane) && (options.buildStrategy == "eas" || options.standalonePlan) {
+			return sourceBinding{}, fmt.Errorf("packaged preview simulator profiles require the local queued runner workflow")
+		}
+		selectedEASProfile = makeSelectedEASProfile(requested, profile, options.platform)
+	}
 	configEnv := selectedEASProfile.env
 	if options.standalonePlan && options.lane == "simulator" {
 		configEnv = standaloneSimulatorRuntimeEnvironment(configEnv)
