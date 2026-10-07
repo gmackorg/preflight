@@ -12656,6 +12656,12 @@ exit 0
 			// The runner learns the job is cancelled here; promptness is measured
 			// from this point, not from process start (registration probes the
 			// host for installed tooling, which is not what this asserts).
+			// This test targets cancellation during the build, after the newly
+			// cancellable simulator boot has finished.
+			if _, err := os.Stat(filepath.Join(appDir, ".preflight", "expo-run-ios.log")); os.IsNotExist(err) {
+				_, _ = w.Write([]byte(`{"data":{"job":{"id":"pfjob_open","kind":"simulator.open","status":"running","runnerId":"pfrun_cli"}},"meta":{"apiVersion":"v1"}}`))
+				return
+			}
 			if startedAt.IsZero() {
 				startedAt = time.Now()
 			}
