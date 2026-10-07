@@ -53,6 +53,7 @@ const defaultExpoConfigTimeout = 30 * time.Second
 // Override per host with PREFLIGHT_EXPO_START_TIMEOUT.
 const defaultExpoDevSessionStartTimeout = 6 * time.Minute
 const defaultSimulatorOpenTimeout = 10 * time.Minute
+const defaultIOSSimulatorBootTimeout = 3 * time.Minute
 const defaultUnityBuildTimeout = 60 * time.Minute
 const defaultAndroidDevelopmentOpenTimeout = 5 * time.Minute
 const defaultAndroidDeviceNameTimeout = 2 * time.Second
@@ -75,6 +76,7 @@ const defaultSentryAPIURL = "https://sentry.io"
 const googlePlayAndroidPublisherScope = "https://www.googleapis.com/auth/androidpublisher"
 
 var errCommandCancelled = errors.New("preflight runner job cancelled")
+var errCommandTimedOut = errors.New("command timed out")
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, http.DefaultClient))
@@ -6597,11 +6599,15 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	}
 
 	if providerIdentity != "" && shouldBootIOSSimulator(job) {
-		if err := bootIOSSimulator(options, providerIdentity); err != nil {
-			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-				"status": "failed",
+		if err := bootIOSSimulator(options, providerIdentity, runnerJobCancellationCheck(client, options, registration, job)); err != nil {
+			status := "failed"
+			if errors.Is(err, errCommandCancelled) {
+				status = "cancelled"
+			}
+			completion := map[string]any{
+				"status": status,
 				"devSession": devSessionResultPayload(devSessionResultInput{
-					status:           "failed",
+					status:           status,
 					localURL:         localDevServerURL,
 					advertisedURL:    advertisedURL,
 					statusURL:        statusURL,
@@ -6614,14 +6620,17 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 					devBuild:         job.Payload.DevBuild,
 					development:      developmentSession,
 				}),
-				"failure": map[string]any{
+			}
+			if status == "failed" {
+				completion["failure"] = map[string]any{
 					"code":    devSessionStartFailureCode(err),
 					"message": err.Error(),
-				},
-			}); completeErr != nil {
+				}
+			}
+			if completeErr := completeRunnerJob(client, options, registration, job, completion); completeErr != nil {
 				return false, completeErr
 			}
-			fmt.Fprintf(stdout, "failed dev session %s %s\n", job.ID, err.Error())
+			fmt.Fprintf(stdout, "%s dev session %s %s\n", status, job.ID, err.Error())
 			return false, nil
 		}
 	}
@@ -7200,6 +7209,7 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 			},
 		})
 	}
+	var openErr error
 	if platform == "ios" {
 		// Reap leftover CI builds from prior attempts (lease-expiry reclaims
 		// re-spawn expo run:ios on top of orphaned ones) or concurrent CI jobs
@@ -7237,21 +7247,23 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		} else {
 			shutdownOtherBootedIOSSimulators(options, providerIdentity, stdout)
 		}
-		if err := bootIOSSimulator(options, providerIdentity); err != nil {
-			fmt.Fprintf(stdout, "warning: could not boot locked simulator %s: %v\n", providerIdentity, err)
-		}
+		openErr = bootIOSSimulator(options, providerIdentity, runnerJobCancellationCheck(client, options, registration, job))
 	}
-	logPath, err := runExpoAppOpen(
-		client,
-		registration,
-		options,
-		platform,
-		appDir,
-		expoRunDeviceSelector(options, platform, job, providerIdentity),
-		port,
-		job,
-		runnerJobCancellationCheck(client, options, registration, job),
-	)
+	var logPath string
+	if openErr == nil {
+		logPath, openErr = runExpoAppOpen(
+			client,
+			registration,
+			options,
+			platform,
+			appDir,
+			expoRunDeviceSelector(options, platform, job, providerIdentity),
+			port,
+			job,
+			runnerJobCancellationCheck(client, options, registration, job),
+		)
+	}
+	err := openErr
 	if err != nil {
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
@@ -10367,11 +10379,34 @@ func grantAndroidRuntimePermissions(options runnerOnceOptions, providerIdentity 
 	}
 }
 
-func bootIOSSimulator(options runnerOnceOptions, providerIdentity string) error {
-	_ = exec.Command(options.xcrunPath, "simctl", "boot", providerIdentity).Run()
-	output, err := exec.Command(options.xcrunPath, "simctl", "bootstatus", providerIdentity, "-b").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("boot iOS simulator %s: %w: %s", providerIdentity, err, strings.TrimSpace(string(output)))
+func bootIOSSimulator(options runnerOnceOptions, providerIdentity string, cancellationCheck func() (bool, error)) error {
+	deadline := time.Now().Add(durationFromEnv("PREFLIGHT_IOS_SIMULATOR_BOOT_TIMEOUT", defaultIOSSimulatorBootTimeout))
+	for _, stage := range []string{"boot", "bootstatus"} {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("boot iOS simulator %s: %w", providerIdentity, errCommandTimedOut)
+		}
+		args := []string{"simctl", stage, providerIdentity}
+		if stage == "bootstatus" {
+			args = append(args, "-b")
+		}
+		command := exec.Command(options.xcrunPath, args...)
+		// Bound pipe draining if a simctl descendant keeps stdout/stderr open.
+		command.WaitDelay = 250 * time.Millisecond
+		var output bytes.Buffer
+		command.Stdout = &output
+		command.Stderr = &output
+		err := runCommandWithTimeoutAndCancellation(command, remaining, cancellationCheck, runnerPollInterval())
+		if err == nil {
+			continue
+		}
+		// simctl boot returns a nonzero exit for an already booted device.
+		// Only a completed boot command may fall through to the readiness check.
+		var exitError *exec.ExitError
+		if stage == "boot" && errors.As(err, &exitError) {
+			continue
+		}
+		return fmt.Errorf("boot iOS simulator %s (%s): %w: %s", providerIdentity, stage, err, strings.TrimSpace(output.String()))
 	}
 	return nil
 }
@@ -12317,7 +12352,7 @@ func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, plat
 		if strings.TrimSpace(options.xcrunPath) == "" {
 			return fmt.Errorf("open iOS development client: xcrun path is empty")
 		}
-		if err := bootIOSSimulator(options, openProviderIdentity); err != nil {
+		if err := bootIOSSimulator(options, openProviderIdentity, cancellationCheck); err != nil {
 			return fmt.Errorf("boot iOS simulator before dev-client open: %w", err)
 		}
 		if bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID); bundleID != "" {
@@ -13045,6 +13080,9 @@ func runCommandWithTimeoutAndCancellation(
 		pollInterval = defaultRunnerPollInterval
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if command.WaitDelay <= 0 {
+		command.WaitDelay = 250 * time.Millisecond
+	}
 	if err := command.Start(); err != nil {
 		return err
 	}
@@ -13058,6 +13096,12 @@ func runCommandWithTimeoutAndCancellation(
 	defer timer.Stop()
 	var ticker *time.Ticker
 	var tick <-chan time.Time
+	type cancellationResult struct {
+		cancelled bool
+		err       error
+	}
+	checkResults := make(chan cancellationResult, 1)
+	checkPending := false
 	if cancellationCheck != nil {
 		ticker = time.NewTicker(pollInterval)
 		defer ticker.Stop()
@@ -13068,18 +13112,32 @@ func runCommandWithTimeoutAndCancellation(
 		case err := <-done:
 			return err
 		case <-tick:
-			cancelled, err := cancellationCheck()
-			if err != nil {
-				return err
+			// A control-plane lookup must not block the subprocess deadline.
+			// Keep at most one check in flight; the buffered result allows a
+			// bounded HTTP lookup to finish after command teardown.
+			if !checkPending {
+				checkPending = true
+				go func() {
+					cancelled, err := cancellationCheck()
+					checkResults <- cancellationResult{cancelled: cancelled, err: err}
+				}()
 			}
-			if cancelled {
+		case result := <-checkResults:
+			checkPending = false
+			if result.err != nil {
+				terminateCommandProcess(command.Process.Pid)
+				<-done
+				return result.err
+			}
+			if result.cancelled {
 				terminateCommandProcess(command.Process.Pid)
 				<-done
 				return errCommandCancelled
 			}
 		case <-timer.C:
 			terminateCommandProcess(command.Process.Pid)
-			return fmt.Errorf("command timed out after %s", timeout)
+			<-done
+			return fmt.Errorf("%w after %s", errCommandTimedOut, timeout)
 		}
 	}
 }
@@ -13089,6 +13147,10 @@ func terminateCommandProcess(pid int) {
 	time.Sleep(50 * time.Millisecond)
 	if err := syscall.Kill(pid, 0); err == nil {
 		signalCommandProcessGroup(pid, syscall.SIGKILL)
+	} else {
+		// The leader can exit on TERM while descendants keep the owned group
+		// and output pipes alive. Kill that group without targeting a reused PID.
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 }
 

@@ -46,6 +46,7 @@ Configuration lives in `~/.config/preflight/config.json`. Useful overrides:
 | `PREFLIGHT_TOKEN` | API token, instead of the stored login |
 | `PREFLIGHT_WORKSPACE_ID` | Workspace to operate on |
 | `PREFLIGHT_MIN_FREE_DISK_GB` | Free-space floor below which a runner declines jobs |
+| `PREFLIGHT_IOS_SIMULATOR_BOOT_TIMEOUT` | Total iOS boot/readiness deadline (default `3m`); runner cancellation also stops the wait |
 | `PREFLIGHT_UPDATE_REPO` | Where `update` looks for releases |
 
 ## Running a build host
