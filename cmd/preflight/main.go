@@ -13136,7 +13136,11 @@ func runCommandWithTimeoutAndCancellation(
 	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if command.WaitDelay <= 0 {
-		command.WaitDelay = 250 * time.Millisecond
+		// Xcode's successful leader can exit before its child output closes or
+		// the redacting log writer finishes draining. Keep that drain bounded,
+		// but allow more than the simulator boot probe's explicit 250ms grace.
+		// ErrWaitDelay remains a failure; never promote an old build artifact.
+		command.WaitDelay = durationFromEnv("PREFLIGHT_COMMAND_OUTPUT_DRAIN_TIMEOUT", 5*time.Second)
 	}
 	if err := command.Start(); err != nil {
 		return err
