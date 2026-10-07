@@ -75,6 +75,19 @@ simulator builds. A configured floor also refuses work when a volume cannot
 be probed. Inspect ownership and preserve required native products before an
 explicit `preflight disk --reclaim` or `preflight cleanup builds` operation.
 
+Queued iOS simulator proofs can select a packaged preview profile with
+`prove-app --lane simulator --build-strategy local --build-profile preview-simulator`.
+The selected profile must inherit or declare `developmentClient: false`,
+`distribution: "internal"`, `ios.simulator: true`, and `APP_VARIANT: "preview"`.
+Preflight preserves that profile's environment through prebuild, CocoaPods, and
+the Release simulator build, requires an embedded `main.jsbundle`, installs it,
+and launches the bound bundle ID. The source binding records the selected
+profile and its evaluated native identity. Local readiness requires a Maestro
+flow matching that bundle; an external flow may be supplied with `--flow-path`.
+For queued execution, the workflow's Maestro suite binding must also select that
+flow and its tags. Packaged previews currently require the local queued runner
+path; EAS and standalone plans keep their development-client requirements.
+
 For a standalone simulator proof, `prove-app --standalone-run --target-key <id>`
 requires a readable Maestro flow and the simulator development profile. Choose a
 free Metro port and a fresh artifact directory. The CLI launches its own Metro,
