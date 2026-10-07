@@ -116,3 +116,7 @@ Releases are cut by pushing a `v*` tag; the workflow builds darwin/linux on
 amd64/arm64 and publishes them with checksums. The asset naming and
 `checksums.txt` format are a contract with `preflight update` — changing either
 breaks self-update for already-installed binaries.
+
+### Unity diagnostic log retention
+
+Unity editor logs are retained separately from the mutable editor log. The runner redacts a content-addressed, read-only snapshot before registering it and uploads those exact bytes. Registration alone is a local reference, with no content digest. A successful byte upload records the actual SHA-256 and size, makes the blob downloadable, and marks it uploaded. Unity log uploads are immutable: identical retries succeed; different bytes require a new artifact. Failed builds remain failed even when their diagnostic logs are retained, and an upload failure leaves the local snapshot available. Existing historical log records are preserved; recovering one creates a new artifact with provenance back to the original.

@@ -11815,6 +11815,15 @@ exit 0
 			}
 			artifactBodies = append(artifactBodies, body)
 			_, _ = fmt.Fprintf(w, `{"data":{"artifact":{"id":"pfartifact_%d","kind":%q,"uri":%q}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_artifact"}}`, len(artifactBodies), body["kind"], body["uri"])
+		case "/api/preflight/v1/runners/pfrun_cli/artifacts/pfartifact_2/blob":
+			if r.Method != http.MethodPut {
+				t.Fatalf("expected Unity log byte PUT, got %s", r.Method)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil || string(body) != "unity build log\n" {
+				t.Fatalf("unexpected retained Unity log bytes %q: %v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/api/preflight/v1/runners/pfrun_cli/jobs/pfjob_unity/complete":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -11873,7 +11882,7 @@ exit 0
 		t.Fatalf("unexpected Unity APK artifact upload %#v", artifactBodies[0])
 	}
 	if artifactBodies[1]["kind"] != "unity_build_log" ||
-		artifactBodies[1]["uri"] != logPath ||
+		!strings.HasSuffix(fmt.Sprint(artifactBodies[1]["uri"]), ".retained.log") ||
 		artifactBodies[1]["retentionClass"] != "debug" {
 		t.Fatalf("unexpected Unity log artifact upload %#v", artifactBodies[1])
 	}

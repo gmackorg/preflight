@@ -7459,7 +7459,9 @@ func handleUnityBuildPlayerJob(client *http.Client, options runnerOnceOptions, r
 		err = validateRunnerJobSourceBinding(options, job)
 	}
 	if err != nil {
-		_ = uploadUnityBuildArtifacts(client, options, registration, job, artifacts)
+		if uploadErr := uploadUnityBuildArtifacts(client, options, registration, job, artifacts); uploadErr != nil {
+			fmt.Fprintf(stdout, "warning: Unity artifact bytes were not retained remotely %s %s\n", job.ID, uploadErr.Error())
+		}
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status":     "cancelled",
@@ -7993,7 +7995,18 @@ func uploadUnityBuildArtifacts(
 		}
 	}
 	if artifacts.LogPath != "" {
-		if err := uploadRunnerArtifact(client, options, registration, job, "unity_build_log", artifacts.LogPath, "debug", metadata); err != nil {
+		snapshot, digest, err := retainUnityLogSnapshot(artifacts.LogPath)
+		if err != nil {
+			return err
+		}
+		metadata["sourceLogPath"] = artifacts.LogPath
+		metadata["snapshotDigest"] = digest
+		metadata["contentRetention"] = "local_snapshot"
+		artifact, err := uploadRunnerArtifactRecord(client, options, registration, job, "unity_build_log", snapshot, "debug", metadata)
+		if err != nil {
+			return err
+		}
+		if err := uploadRunnerArtifactBytes(client, options, registration, artifact.ID, "unity_build_log", snapshot); err != nil {
 			return err
 		}
 	}
