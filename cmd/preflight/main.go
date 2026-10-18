@@ -5567,6 +5567,12 @@ func claimAndHandleNextRunnerJob(
 	stdout io.Writer,
 	capabilities map[string]any,
 ) error {
+	// A long-running runner can cross the floor after completing its first
+	// job. Apply the same admission guard before every subsequent claim.
+	if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
+		fmt.Fprintf(stdout, "declining claims: %v\n", err)
+		return nil
+	}
 	claim, err := claimRunnerJob(client, options, registration)
 	if err != nil {
 		return err
