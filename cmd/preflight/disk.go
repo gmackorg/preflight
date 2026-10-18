@@ -42,7 +42,8 @@ func defaultReclaimRoots() []string {
 		return roots
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		roots = append(roots, filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData"))
+		// collectCleanupEntries appends DerivedData to the supplied root.
+		roots = append(roots, filepath.Join(home, "Library", "Developer", "Xcode"))
 	}
 	return roots
 }
