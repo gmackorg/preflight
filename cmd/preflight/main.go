@@ -7432,20 +7432,31 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		fmt.Fprintf(stdout, "failed Maestro smoke %s %s\n", job.ID, err.Error())
 		return nil
 	}
-	if err := uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout); err != nil {
-		// The smoke already passed (runMaestroSmoke returned no error). Artifact
-		// uploads are diagnostic (logs/junit/screenshots) and post only small
-		// metadata records; a transient control-plane deadline here must NOT fail
-		// a green test and trigger a full, expensive workflow rebuild. Log it and
-		// still report the passing result so the gate advances.
-		fmt.Fprintf(stdout, "warning: Maestro artifact upload failed (smoke passed, continuing) %s %s\n", job.ID, err.Error())
+	return completePassedMaestroRun(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout)
+}
+
+func completePassedMaestroRun(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, providerIdentity string, flowPath string, artifacts maestroRunArtifacts, stdout io.Writer) error {
+	maestro := maestroResultPayload(job, providerIdentity, flowPath, artifacts)
+	maestro["executionStatus"] = "passed"
+	maestro["evidenceStatus"] = "published"
+	if uploadErr := uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout); uploadErr != nil {
+		maestro["evidenceStatus"] = "blocked"
+		if err := completeRunnerJob(client, options, registration, job, map[string]any{
+			"status":  "failed",
+			"maestro": maestro,
+			"failure": map[string]any{"code": "maestro_evidence_upload_failed", "message": uploadErr.Error()},
+		}); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Maestro smoke passed; evidence publication blocked %s: %v (original artifacts retained at %s)\n", job.ID, uploadErr, artifacts.OutputDir)
+		return nil
 	}
 	if err := completeRunnerJob(client, options, registration, job, map[string]any{
-		"status":  "ok",
-		"maestro": maestroResultPayload(job, providerIdentity, flowPath, artifacts),
+		"status": "ok", "maestro": maestro,
 	}); err != nil {
 		return err
 	}
+
 	fmt.Fprintf(stdout, "completed Maestro smoke %s\n", job.ID)
 	return nil
 }
@@ -9094,6 +9105,9 @@ func uploadMaestroRunArtifacts(
 	stdout io.Writer,
 ) error {
 	if !runnerArtifactUploadEnabled(registration) {
+		if len(artifacts.VideoPaths) > 0 || len(artifacts.ScreenshotPaths) > 0 {
+			return fmt.Errorf("runner media publication capability is unavailable; original evidence retained")
+		}
 		return nil
 	}
 
@@ -9105,27 +9119,46 @@ func uploadMaestroRunArtifacts(
 		"targetId":         job.Payload.TargetID,
 		"providerIdentity": providerIdentity,
 	}
+	var uploadErrors []error
 	for _, artifact := range maestroArtifactUploads(artifacts) {
 		if strings.TrimSpace(artifact.URI) == "" {
 			continue
 		}
-		summary, err := uploadRunnerArtifactRecord(client, options, registration, job, artifact.Kind, artifact.URI, "diagnostic", metadata)
-		if err != nil {
-			return err
+		uploadPath := artifact.URI
+		if artifact.Kind == "video" {
+			prepared, err := prepareVideoUpload(artifact.URI, runMediaCommand)
+			if err != nil {
+				uploadErrors = append(uploadErrors, err)
+				continue
+			}
+			uploadPath = prepared
 		}
-		// The record above only carries a local node path. For media the
-		// reporting UI must actually serve — video (run verification) and
-		// screenshots (timeline) — push the bytes to R2; the blob handler
-		// rewrites the artifact uri to the servable /artifacts/<id>/blob route.
-		// Byte upload is best-effort: a passing smoke must not go red over a
-		// diagnostic-media transfer hiccup.
-		if (artifact.Kind == "video" || artifact.Kind == "screenshot") && summary.ID != "" {
-			if err := uploadRunnerArtifactBytes(client, options, registration, summary.ID, artifact.Kind, artifact.URI); err != nil {
+		artifactMetadata := make(map[string]any, len(metadata)+1)
+		for key, value := range metadata {
+			artifactMetadata[key] = value
+		}
+		if uploadPath != artifact.URI {
+			artifactMetadata["originalPath"] = artifact.URI
+		}
+		summary, err := uploadRunnerArtifactRecord(client, options, registration, job, artifact.Kind, uploadPath, "diagnostic", artifactMetadata)
+		if err != nil {
+			uploadErrors = append(uploadErrors, err)
+			continue
+		}
+		if artifact.Kind == "video" || artifact.Kind == "screenshot" {
+			if summary.ID == "" {
+				uploadErrors = append(uploadErrors, fmt.Errorf("%s registration returned no artifact id", artifact.Kind))
+				continue
+			}
+			if err := retryMediaPublication(func() error {
+				return uploadRunnerArtifactBytes(client, options, registration, summary.ID, artifact.Kind, uploadPath)
+			}); err != nil {
 				fmt.Fprintf(stdout, "maestro %s byte upload failed for %s: %v\n", artifact.Kind, summary.ID, err)
+				uploadErrors = append(uploadErrors, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(uploadErrors...)
 }
 
 type runnerArtifactUpload struct {
