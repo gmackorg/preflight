@@ -114,6 +114,43 @@ func TestMaestroArtifactPublicationPropagatesBlobFailureAndContinues(t *testing.
 	}
 }
 
+func TestMaestroUnchangedVideoRetainsOriginalPathAfterBlobUpload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "flow.mp4")
+	if err := os.WriteFile(path, []byte("small recording"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registered := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPut {
+			io.WriteString(w, `{"ok":true,"uri":"/api/preflight/v1/artifacts/pfart_video/blob"}`)
+			return
+		}
+		var payload struct {
+			URI      string `json:"uri"`
+			Metadata struct {
+				OriginalPath string `json:"originalPath"`
+			} `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.URI != path || payload.Metadata.OriginalPath != path {
+			t.Errorf("completion cannot resolve video after blob URI rewrite: %+v", payload)
+		}
+		registered = true
+		io.WriteString(w, `{"data":{"artifact":{"id":"pfart_video"}}}`)
+	}))
+	defer server.Close()
+	err := uploadMaestroRunArtifacts(server.Client(), runnerOnceOptions{apiURL: server.URL}, runnerRegistrationData{Runner: apiRunner{ID: "runner", Capabilities: map[string]any{"runnerArtifactUpload": true}}}, apiRunnerJob{ID: "job"}, "sim", "flow", maestroRunArtifacts{VideoPaths: []string{path}}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registered {
+		t.Fatal("video not registered")
+	}
+}
+
 func TestPassedMaestroWithUnpublishedEvidenceRemainsBlocked(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "screen.png")
 	if err := os.WriteFile(path, []byte("png"), 0600); err != nil {
