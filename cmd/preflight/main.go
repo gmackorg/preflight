@@ -9137,7 +9137,9 @@ func uploadMaestroRunArtifacts(
 		for key, value := range metadata {
 			artifactMetadata[key] = value
 		}
-		if uploadPath != artifact.URI {
+		// Blob publication rewrites the stored URI even when no encoding was needed.
+		// Completion still refers to the original path and must resolve that record.
+		if artifact.Kind == "video" || uploadPath != artifact.URI {
 			artifactMetadata["originalPath"] = artifact.URI
 		}
 		summary, err := uploadRunnerArtifactRecord(client, options, registration, job, artifact.Kind, uploadPath, "diagnostic", artifactMetadata)
