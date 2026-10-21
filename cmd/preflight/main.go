@@ -5273,6 +5273,7 @@ func printRunnerHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --xcrun-path <path>      xcrun executable path")
 	fmt.Fprintln(w, "  --adb-path <path>        adb executable path")
 	fmt.Fprintln(w, "  --metro-port <port>      Expo/Metro port")
+	fmt.Fprintln(w, "  --ios-simulator-build-jobs <1-32>  Limit simulator compiler parallelism (default: Xcode automatic)")
 	fmt.Fprintln(w, "  --metro-status-url <url> Override Metro status probe URL")
 	fmt.Fprintln(w, "  --host-mode <mode>       Expo host mode: lan, localhost, tunnel, or tailscale")
 }
@@ -5299,19 +5300,20 @@ func runRunnerOnce(args []string, stdout io.Writer, stderr io.Writer, client *ht
 }
 
 type runnerOnceOptions struct {
-	apiURL         string
-	token          string
-	workspaceID    string
-	workspaceRoot  string
-	hostIdentity   string
-	name           string
-	simctlJSON     string
-	xcrunPath      string
-	adbPath        string
-	metroPort      int
-	metroStatusURL string
-	hostMode       string
-	simulatorUDID  string
+	apiURL                string
+	token                 string
+	workspaceID           string
+	workspaceRoot         string
+	hostIdentity          string
+	name                  string
+	simctlJSON            string
+	xcrunPath             string
+	adbPath               string
+	metroPort             int
+	metroStatusURL        string
+	hostMode              string
+	simulatorUDID         string
+	iosSimulatorBuildJobs int
 }
 
 func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
@@ -5402,6 +5404,16 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 				return runnerOnceOptions{}, fmt.Errorf("--host-mode requires a value")
 			}
 			options.hostMode = value
+		case "--ios-simulator-build-jobs":
+			value, ok := nextFlagValue(args, &index)
+			if !ok {
+				return runnerOnceOptions{}, fmt.Errorf("--ios-simulator-build-jobs requires a value")
+			}
+			jobs, err := strconv.Atoi(value)
+			if err != nil || jobs < 1 || jobs > 32 {
+				return runnerOnceOptions{}, fmt.Errorf("--ios-simulator-build-jobs must be an integer from 1 to 32")
+			}
+			options.iosSimulatorBuildJobs = jobs
 		case "--simulator-udid":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -11725,6 +11737,9 @@ func buildAndInstallIOSSimulatorApp(
 	job apiRunnerJob,
 	cancellationCheck func() (bool, error),
 ) error {
+	if options.iosSimulatorBuildJobs < 0 || options.iosSimulatorBuildJobs > 32 {
+		return fmt.Errorf("iOS simulator build jobs must be from 1 to 32, or unset")
+	}
 	iosDir := filepath.Join(appDir, "ios")
 	workspace, err := findIOSAppWorkspace(iosDir)
 	if err != nil {
@@ -11756,6 +11771,10 @@ func buildAndInstallIOSSimulatorApp(
 		// Preserve CODE_SIGN_ENTITLEMENTS from the generated project so Xcode can
 		// produce the simulator's application identifier and configured capabilities.
 	)
+	if options.iosSimulatorBuildJobs > 0 {
+		build.Args = append(build.Args, "-jobs", strconv.Itoa(options.iosSimulatorBuildJobs))
+		_, _ = fmt.Fprintf(logFile, "xcodebuild: simulator compiler parallelism limited to %d jobs\n", options.iosSimulatorBuildJobs)
+	}
 	build.Dir = iosDir
 	build.Env = expoCommandEnv(job)
 	flushBuild := attachRedactedCommandLog(build, logFile)
