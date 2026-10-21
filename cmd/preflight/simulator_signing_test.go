@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,14 @@ import (
 )
 
 func TestSimulatorBuildKeepsProjectEntitlementsAndUsesAdHocSigning(t *testing.T) {
+	for _, jobs := range []int{0, 1, 2, 32} {
+		t.Run(fmt.Sprintf("jobs-%d", jobs), func(t *testing.T) {
+			testSimulatorBuildSigningAndConcurrency(t, jobs)
+		})
+	}
+}
+
+func testSimulatorBuildSigningAndConcurrency(t *testing.T, jobs int) {
 	appDir := t.TempDir()
 	bin := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(appDir, "ios", "Fixture.xcworkspace"), 0755); err != nil {
@@ -43,7 +52,7 @@ exit 1
 		t.Fatal(err)
 	}
 	defer log.Close()
-	if err := buildAndInstallIOSSimulatorApp(log, runnerOnceOptions{xcrunPath: xcrun}, appDir, "owned-sim", apiRunnerJob{}, nil); err != nil {
+	if err := buildAndInstallIOSSimulatorApp(log, runnerOnceOptions{xcrunPath: xcrun, iosSimulatorBuildJobs: jobs}, appDir, "owned-sim", apiRunnerJob{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(arguments)
@@ -51,6 +60,14 @@ exit 1
 		t.Fatal(err)
 	}
 	args := "\n" + string(data)
+	if jobs == 0 {
+		if strings.Contains(args, "\n-jobs\n") {
+			t.Fatal("unset limit must preserve Xcode automatic parallelism")
+		}
+	} else if !strings.Contains(args, fmt.Sprintf("\n-jobs\n%d\n", jobs)) {
+		t.Fatalf("selected compiler limit did not reach actual xcodebuild subprocess: %s", args)
+	}
+
 	for _, required := range []string{"CODE_SIGN_IDENTITY=-", "CODE_SIGNING_ALLOWED=YES", "CODE_SIGNING_REQUIRED=YES"} {
 		if !strings.Contains(args, "\n"+required+"\n") {
 			t.Errorf("simulator build must retain keychain-capable ad hoc signature; missing %s", required)

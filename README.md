@@ -134,3 +134,19 @@ breaks self-update for already-installed binaries.
 ### Unity diagnostic log retention
 
 Unity editor logs are retained separately from the mutable editor log. The runner redacts a content-addressed, read-only snapshot before registering it and uploads those exact bytes. Registration alone is a local reference, with no content digest. A successful byte upload records the actual SHA-256 and size, makes the blob downloadable, and marks it uploaded. Unity log uploads are immutable: identical retries succeed; different bytes require a new artifact. Failed builds remain failed even when their diagnostic logs are retained, and an upload failure leaves the local snapshot available. Existing historical log records are preserved; recovering one creates a new artifact with provenance back to the original.
+
+### Simulator compiler limits
+
+On memory-constrained Macs, run the official worker with an explicit compiler limit:
+
+```sh
+preflight runner once --workspace-root /path/to/source --ios-simulator-build-jobs 2
+```
+
+The optional flag accepts integers from 1 to 32 and passes `-jobs` to the iOS
+simulator's Xcode build. Invalid or missing values fail before registration or
+execution. Leaving the flag unset preserves Xcode's automatic parallelism. This
+limits simulator compilation only; it does not change production EAS submission.
+Keep disk admission/runtime guards enabled and retain partial derived data when a
+build is interrupted. Lower parallelism may reduce memory and swap pressure, but
+its effect must be measured on the actual host before repeating a failed proof.
