@@ -11553,6 +11553,10 @@ exit 0
 		t.Fatalf("expected Android dev session status ok, got %#v", devSessionResult)
 	}
 	devSession := devSessionResult["devSession"].(map[string]any)
+	if devSession["port"] != float64(19000) {
+		t.Fatalf("explicit Android Metro port was replaced: %#v", devSession["port"])
+	}
+
 	if devSession["providerIdentity"] != "emulator-5554" {
 		t.Fatalf("unexpected Android dev session payload %#v", devSession)
 	}
@@ -14291,5 +14295,47 @@ func TestPreflightAPIErrorMessageUnchanged(t *testing.T) {
 	bare := &preflightAPIError{status: 502}
 	if bare.Error() != "Preflight API returned HTTP 502" {
 		t.Fatalf("bare: got %q", bare.Error())
+	}
+}
+
+func TestAndroidMetroPortSelectionAndForeignRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		explicit  bool
+		owned     bool
+		free      bool
+		wantPort  int
+		wantError bool
+	}{
+		{name: "default", free: true, wantPort: 8081},
+		{name: "explicit", explicit: true, free: true, wantPort: 19000},
+		{name: "owned explicit reuse", explicit: true, owned: true, wantPort: 19000},
+		{name: "foreign default", wantPort: 8081, wantError: true},
+		{name: "foreign explicit", explicit: true, wantPort: 19000, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ownershipCalls, freeCalls := 0, 0
+			got, err := prepareAndroidMetroOptions(runnerOnceOptions{metroPort: 19000, metroPortExplicit: tc.explicit, hostMode: "localhost"},
+				func(url string) bool {
+					ownershipCalls++
+					if url != fmt.Sprintf("http://127.0.0.1:%d/status", tc.wantPort) {
+						t.Fatalf("wrong ownership endpoint %s", url)
+					}
+					return tc.owned
+				},
+				func(port int) bool {
+					freeCalls++
+					if port != tc.wantPort {
+						t.Fatalf("wrong collision port %d", port)
+					}
+					return tc.free
+				})
+			if (err != nil) != tc.wantError || got.metroPort != tc.wantPort {
+				t.Fatalf("port=%d error=%v", got.metroPort, err)
+			}
+			if ownershipCalls != 1 || (tc.owned && freeCalls != 0) || (!tc.owned && freeCalls != 1) {
+				t.Fatalf("ownership=%d free=%d", ownershipCalls, freeCalls)
+			}
+		})
 	}
 }
