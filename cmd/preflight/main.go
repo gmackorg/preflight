@@ -5310,6 +5310,7 @@ type runnerOnceOptions struct {
 	xcrunPath             string
 	adbPath               string
 	metroPort             int
+	metroPortExplicit     bool
 	metroStatusURL        string
 	hostMode              string
 	simulatorUDID         string
@@ -5392,6 +5393,7 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 				return runnerOnceOptions{}, fmt.Errorf("--metro-port must be a positive integer")
 			}
 			options.metroPort = port
+			options.metroPortExplicit = true
 		case "--metro-status-url":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -6561,19 +6563,16 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	// Clear only this app's dead session handle. Live sessions belong to their
 	// workflows, including simulator reviews that continue after a native build.
 	cleanupStalePreflightDevServers(appDir, stdout)
-	// An Android emulator dev-client bakes the default Metro port 8081 (paired
-	// with the REACT_NATIVE_PACKAGER_HOSTNAME=10.0.2.2 pin in expoCommandEnv), so
-	// pin Metro to 8081 to keep host+port aligned (10.0.2.2:8081). Android builds
-	// run serially on the Linux nodes, so a fixed port can't collide the way the
-	// Macs' concurrent iOS builds would.
+	// Android opens the dev client through the session's explicit deep link.
+	// Keep its historical default, but honor an operator-selected isolated port.
+	// A foreign listener belongs to another workload and must never be reaped.
 	if isAndroidEmulatorJob(job) {
-		options.metroPort = 8081
-		// Serial Android builds all pin 8081, so a prior app's Metro can squat on
-		// it and make expo decline ("Port 8081 is being used ... Skipping dev
-		// server"). Reap whatever holds 8081 unless it's our own ready dev server
-		// for THIS app (the dev_session -> simulator.open reuse case).
-		if !preflightOwnedMetroReady(client, appDir, runnerLocalDevServerURL(options)+"/status") {
-			reapMetroPort(options.metroPort, stdout)
+		var err error
+		options, err = prepareAndroidMetroOptions(options,
+			func(statusURL string) bool { return preflightOwnedMetroReady(client, appDir, statusURL) },
+			localPortIsFree)
+		if err != nil {
+			return false, err
 		}
 	}
 	// Resolve the metro port up front: reuse our own dev server on the configured
@@ -6582,11 +6581,8 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	// to start ("Skipping dev server"). Every URL below derives from the result,
 	// and the chosen port is recorded in the dev-session payload so simulator.open
 	// uses it too.
-	// Android emulator dev-clients bake Metro port 8081, so keep the pinned port
-	// (set just above) — do NOT auto-allocate a free port, or the baked 8081 and
-	// the actual Metro port diverge and the dev-client can't connect. A stale
-	// Metro on 8081 is handled by the Android-specific ownership check above;
-	// live sessions on other ports remain owned by their workflows.
+	// Android retains the selected port or refuses a foreign listener above;
+	// a successor consumes the exact port recorded in the session payload.
 	if options.metroStatusURL == "" && options.metroPort > 0 && !isAndroidEmulatorJob(job) {
 		configuredStatusURL := runnerLocalDevServerURL(options) + "/status"
 		// Reuse our own metro if it's already up on the configured port (the
@@ -12704,7 +12700,7 @@ func expoCommandEnv(job apiRunnerJob) []string {
 	// runner's LAN IP. Without this, `expo run:android` bakes the detected LAN
 	// host into the dev-client, which then can't reach Metro (ECONNREFUSED) and
 	// renders a blank screen. Pinning the packager hostname makes the built
-	// dev-client target 10.0.2.2:<metro-port> (we also pin the port to 8081).
+	// dev-client target 10.0.2.2:<metro-port>; the session deep link carries the selected port.
 	if isAndroidEmulatorJob(job) {
 		env = upsertEnv(env, "REACT_NATIVE_PACKAGER_HOSTNAME", "10.0.2.2")
 	}
@@ -13445,6 +13441,22 @@ func runnerLocalDevServerURL(options runnerOnceOptions) string {
 
 func isAndroidEmulatorJob(job apiRunnerJob) bool {
 	return jobPlatform(job) == "android" && !isDevelopmentDevSessionJob(job)
+}
+
+// prepareAndroidMetroOptions never signals or replaces a listener. The two
+// collaborators are injected so ownership and collision decisions can be tested
+// without native tools, process cleanup, or global function replacement.
+func prepareAndroidMetroOptions(options runnerOnceOptions, ownedReady func(string) bool, portFree func(int) bool) (runnerOnceOptions, error) {
+	if !options.metroPortExplicit {
+		options.metroPort = 8081
+	}
+	if ownedReady(runnerLocalDevServerURL(options) + "/status") {
+		return options, nil
+	}
+	if !portFree(options.metroPort) {
+		return options, fmt.Errorf("Android Metro port %d has no verified owned listener; choose a free --metro-port", options.metroPort)
+	}
+	return options, nil
 }
 
 func androidEmulatorDevServerURL(port int) string {

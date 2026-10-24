@@ -66,6 +66,14 @@ A runner is a long-lived process that claims jobs. On macOS it's a launchd
 agent; `ops/` has a working example plus the hourly disk sweep the build farm
 uses.
 
+For an Android emulator sharing a host with other services, select an isolated
+Metro port with `preflight runner once --metro-port 18111`. Android keeps 8081
+when the flag is omitted. Startup records the selected port in its dev session;
+native open and the development-client deep link consume that same port. An
+occupied port is reused only when its listener is verified as this app's live
+Metro process. Otherwise startup refuses the collision without terminating the
+listener; select a free port and start a new workflow.
+
 Disk is the failure mode worth knowing about: below
 `PREFLIGHT_MIN_FREE_DISK_GB` a runner *declines* work rather than failing it,
 so a host that quietly fills up looks idle instead of sick. `preflight disk`
