@@ -4,7 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +101,7 @@ func TestAndroidPackagedPreviewBuildInstallLaunch(t *testing.T) {
 		t.Run(map[bool]string{true: "embedded", false: "missing JS"}[embedded], func(t *testing.T) {
 			appDir, bin := writeAndroidPreviewFixture(t)
 			t.Setenv("apiSuffix", "must-not-expand")
+			t.Setenv("PREFLIGHT_MIN_FREE_DISK_GB", "0")
 			log := filepath.Join(t.TempDir(), "commands.log")
 			t.Setenv("NATIVE_LOG", log)
 			apk := filepath.Join(t.TempDir(), "fixture.apk")
@@ -108,7 +111,12 @@ func TestAndroidPackagedPreviewBuildInstallLaunch(t *testing.T) {
 				t.Fatal(err)
 			}
 			for path, script := range map[string]string{
-				filepath.Join(bin, "npx"): "#!/bin/sh\nprintf 'npx %s\\n' \"$*\" >> \"$NATIVE_LOG\"\n",
+				filepath.Join(bin, "npx"): `#!/bin/sh
+printf 'npx %s\n' "$*" >> "$NATIVE_LOG"
+if [ "$2" = config ]; then
+ echo '{"slug":"sortie","scheme":"sortey-dev","android":{"package":"com.gmacko.sortey.dev"},"extra":{"eas":{"projectId":"preview-project"}}}'
+fi
+`,
 				filepath.Join(appDir, "android", "gradlew"): `#!/bin/sh
 printf 'gradle %s variant=%s api=%s\n' "$*" "$APP_VARIANT" "$API_URL" >> "$NATIVE_LOG"
 case "$*" in *:app:assembleRelease*)
@@ -117,23 +125,62 @@ case "$*" in *:app:assembleRelease*)
  echo '{"applicationId":"com.gmacko.sortey.dev","variantName":"release","elements":[{"type":"SINGLE","filters":[],"outputFile":"app-release.apk"}]}' > app/build/outputs/apk/release/output-metadata.json
 esac
 `,
-				filepath.Join(bin, "adb"):   "#!/bin/sh\nprintf 'adb %s\\n' \"$*\" >> \"$NATIVE_LOG\"\nprintf 'Success\\nStatus: ok\\n'\n",
+				filepath.Join(bin, "adb"): `#!/bin/sh
+printf 'adb %s\n' "$*" >> "$NATIVE_LOG"
+case "$*" in *"emu avd name"*) printf 'Dedicated_AVD\nOK\n';; *) printf 'Success\nStatus: ok\n';; esac
+`,
 				filepath.Join(bin, "aapt2"): "#!/bin/sh\nprintf \"package: name='com.gmacko.sortey.dev' versionCode='1'\\n\"\n",
 			} {
 				if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
-			job := apiRunnerJob{}
+			job := apiRunnerJob{ID: "preview-job", Kind: "simulator.open"}
 			job.Payload.Platform = "android"
 			job.Payload.Lane = "simulator"
+			job.Payload.ProviderIdentity = "emulator-5590"
 			job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", EASProfileName: "preview-android", AndroidPackage: "com.gmacko.sortey.dev"}
-			_, err := runExpoAppOpen(nil, runnerRegistrationData{}, runnerOnceOptions{adbPath: filepath.Join(bin, "adb")}, "android", appDir, "emulator-5590", 18122, job)
-			if embedded && err != nil {
+			var completion struct {
+				Result struct {
+					Status  string `json:"status"`
+					Failure struct {
+						Message string `json:"message"`
+					} `json:"failure"`
+					SimulatorOpen struct {
+						ProviderIdentity string `json:"providerIdentity"`
+					} `json:"simulatorOpen"`
+				} `json:"result"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/complete"):
+					if err := json.NewDecoder(r.Body).Decode(&completion); err != nil {
+						t.Error(err)
+					}
+					fmt.Fprint(w, `{"data":{"job":{"id":"preview-job","status":"succeeded"}}}`)
+				case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+					fmt.Fprint(w, `{"data":{}}`)
+				case strings.HasSuffix(r.URL.Path, "/claim"):
+					fmt.Fprint(w, `{"data":null}`)
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/preview-job"):
+					fmt.Fprint(w, `{"data":{"job":{"id":"preview-job","status":"running","runnerId":"preview-runner"}}}`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected", 500)
+				}
+			}))
+			defer server.Close()
+			options := runnerOnceOptions{apiURL: server.URL, workspaceRoot: appDir, adbPath: filepath.Join(bin, "adb"), metroPort: 18122}
+			registration := runnerRegistrationData{Runner: apiRunner{ID: "preview-runner", Capabilities: map[string]any{"runnerJobHeartbeat": false}}, Token: "fixture"}
+			if err := handleSimulatorOpenJob(server.Client(), options, registration, job, &bytes.Buffer{}); err != nil {
 				t.Fatal(err)
 			}
-			if !embedded && (err == nil || !strings.Contains(err.Error(), "index.android.bundle")) {
-				t.Fatalf("missing JS did not refuse: %v", err)
+			if embedded && (completion.Result.Status != "ok" || completion.Result.SimulatorOpen.ProviderIdentity != "emulator-5590") {
+				t.Fatalf("packaged handler failed: %+v", completion.Result)
+			}
+			if !embedded && (completion.Result.Status != "failed" || !strings.Contains(completion.Result.Failure.Message, "index.android.bundle")) {
+				t.Fatalf("missing JS did not refuse: %+v", completion.Result)
 			}
 			raw, err := os.ReadFile(log)
 			if err != nil {
@@ -141,7 +188,7 @@ esac
 			}
 			commands := string(raw)
 			if !embedded {
-				if strings.Contains(commands, "adb ") {
+				if strings.Contains(commands, " install -r") || strings.Contains(commands, " shell am start") {
 					t.Fatalf("invalid APK reached device: %s", commands)
 				}
 				return
