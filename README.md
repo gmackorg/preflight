@@ -97,6 +97,16 @@ For queued execution, the workflow's Maestro suite binding must also select that
 flow and its tags. Packaged previews currently require the local queued runner
 path; EAS and standalone plans keep their development-client requirements.
 
+Android emulator proofs can use `--platform android --lane simulator
+--build-strategy local --build-profile preview-android` with an explicit
+`developmentClient: false`, `distribution: "internal"`, `android.buildType:
+"apk"`, and `APP_VARIANT: "preview"` profile. The queued runner prebuilds,
+assembles the Release APK, checks its generated application ID and embedded
+`assets/index.android.bundle`, installs on the selected emulator, and launches
+only the bound package. Split APK outputs, physical-device preview lanes, EAS,
+and standalone packaged plans are refused. Existing Android development-client
+profiles retain their build and Metro launch behavior.
+
 For a standalone simulator proof, `prove-app --standalone-run --target-key <id>`
 requires a readable Maestro flow and the simulator development profile. Choose a
 free Metro port and a fresh artifact directory. The CLI launches its own Metro,
