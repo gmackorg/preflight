@@ -11697,6 +11697,11 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		if err := buildSignInstallIOSDeviceApp(client, registration, logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
 			return logPath, fmt.Errorf("build/sign/install iOS device app: %w%s", err, commandLogExcerpt(logFile))
 		}
+	} else if isPackagedAndroidSimulatorJob(job) {
+		flushExpoRunLog()
+		if err := buildAndInstallAndroidPreview(logFile, options, appDir, providerIdentity, job, cancellationCheck); err != nil {
+			return logPath, fmt.Errorf("build/install Android preview: %w%s", err, commandLogExcerpt(logFile))
+		}
 	} else {
 		// Android. Both iOS lanes are handled above and never reach `expo run`,
 		// so the iOS development-client false-negative fallback that used to sit
@@ -12411,6 +12416,13 @@ func expoRunAndroidArgs(providerIdentity string, port int) []string {
 }
 
 func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, platform string, providerIdentity string, port int, job apiRunnerJob, cancellationCheck func() (bool, error)) error {
+	if isPackagedAndroidSimulatorJob(job) {
+		packageID := job.Payload.SourceBinding.AndroidPackage
+		if !strings.HasPrefix(providerIdentity, "emulator-") || !androidPreviewPackagePattern.MatchString(packageID) {
+			return fmt.Errorf("packaged Android preview requires an emulator and bound package")
+		}
+		return runAndroidPreviewADB(logFile, options, cancellationCheck, "Status: ok", "-s", providerIdentity, "shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", packageID)
+	}
 	if isPackagedIOSSimulatorJob(job) {
 		bundleID := strings.TrimSpace(job.Payload.SourceBinding.IOSBundleID)
 		if bundleID == "" {
@@ -12727,7 +12739,7 @@ func expoDevelopmentVariant(job apiRunnerJob) bool {
 }
 
 // Preview simulator profiles produce a packaged app with embedded JavaScript.
-// Keep physical development targets and Android on their existing dev-client path.
+// Physical development targets retain their existing dev-client path.
 func isPackagedIOSSimulatorProfile(profile easBuildProfile, platform string, lane string) bool {
 	return platform == "ios" && lane == "simulator" &&
 		profile.DevelopmentClient != nil && !*profile.DevelopmentClient &&
@@ -14973,8 +14985,8 @@ func buildLocalReadinessReport(options proveAppOptions, binding sourceBinding) l
 		profile, ok := easConfig.Build[binding.EASProfileName]
 		addCheck("eas_profile", ok && binding.EASProfileName != "", fmt.Sprintf("selected EAS profile %q", binding.EASProfileName))
 		if ok {
-			packagedPreview := isPackagedIOSSimulatorProfile(profile, binding.Platform, binding.Lane)
-			addCheck("eas_development_client", easProfileDevelopmentClient(profile) || packagedPreview, "EAS profile enables developmentClient or a packaged iOS preview simulator build")
+			packagedPreview := isPackagedSimulatorProfile(profile, binding.Platform, binding.Lane)
+			addCheck("eas_development_client", easProfileDevelopmentClient(profile) || packagedPreview, "EAS profile enables developmentClient or a packaged preview simulator build")
 			addCheck("eas_internal_distribution", profile.Distribution == "" || profile.Distribution == "internal", "EAS profile uses internal distribution")
 			if binding.Platform == "ios" {
 				simulator := profile.IOS.Simulator != nil && *profile.IOS.Simulator
@@ -17617,10 +17629,10 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 		if isProductionBuildProfile(requested) {
 			return sourceBinding{}, fmt.Errorf("production profiles require the separate store build workflow")
 		}
-		if !easProfileDevelopmentClient(profile) && !isPackagedIOSSimulatorProfile(profile, options.platform, options.lane) {
-			return sourceBinding{}, fmt.Errorf("EAS profile %q must enable developmentClient or target a packaged iOS preview simulator", requested)
+		if !easProfileDevelopmentClient(profile) && !isPackagedSimulatorProfile(profile, options.platform, options.lane) {
+			return sourceBinding{}, fmt.Errorf("EAS profile %q must enable developmentClient or target a packaged preview simulator", requested)
 		}
-		if isPackagedIOSSimulatorProfile(profile, options.platform, options.lane) && (options.buildStrategy == "eas" || options.standalonePlan) {
+		if isPackagedSimulatorProfile(profile, options.platform, options.lane) && (options.buildStrategy == "eas" || options.standalonePlan) {
 			return sourceBinding{}, fmt.Errorf("packaged preview simulator profiles require the local queued runner workflow")
 		}
 		selectedEASProfile = makeSelectedEASProfile(requested, profile, options.platform)
