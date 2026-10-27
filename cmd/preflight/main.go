@@ -7271,7 +7271,7 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 			options,
 			platform,
 			appDir,
-			expoRunDeviceSelector(options, platform, job, providerIdentity),
+			providerIdentity,
 			port,
 			job,
 			runnerJobCancellationCheck(client, options, registration, job),
@@ -11652,7 +11652,13 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		cancellationCheck = cancellationChecks[0]
 	}
 
-	command := exec.Command("npx", expoRunArgs(platform, providerIdentity, port)...)
+	// Expo resolves Android --device by AVD name. Keep that selector local to
+	// Expo: packaged installs and ADB launches require the original serial.
+	expoDevice := providerIdentity
+	if platform == "android" && !isPackagedAndroidSimulatorJob(job) {
+		expoDevice = expoRunDeviceSelector(options, platform, job, providerIdentity)
+	}
+	command := exec.Command("npx", expoRunArgs(platform, expoDevice, port)...)
 	command.Dir = appDir
 	command.Env = expoCommandEnv(job)
 	if platform == "ios" {
