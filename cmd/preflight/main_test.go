@@ -7587,7 +7587,10 @@ func TestProveAppRejectsNonExpoPackageBeforeCallingAPI(t *testing.T) {
 	}
 }
 
-func TestClaimRunnerJobPrefersStreamBeforeClaimingLease(t *testing.T) {
+// PREFLT-51: the stream answer never changed what the runner did (it claimed
+// either way), so claiming no longer pays for a stream request first, even
+// when the server advertises runnerJobStream.
+func TestClaimRunnerJobClaimsWithoutStreamingFirst(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The runner streams command output to /logs for whatever job is in
@@ -7642,17 +7645,14 @@ func TestClaimRunnerJobPrefersStreamBeforeClaimingLease(t *testing.T) {
 		t.Fatalf("claim runner job: %v", err)
 	}
 	if claim == nil || claim.Job.ID != "pfjob_probe" {
-		t.Fatalf("expected streamed job to be claimed, got %#v", claim)
+		t.Fatalf("expected job to be claimed, got %#v", claim)
 	}
-	if strings.Join(calls, "\n") != strings.Join([]string{
-		"GET /api/preflight/v1/runners/pfrun_cli/jobs/stream",
-		"POST /api/preflight/v1/runners/pfrun_cli/jobs/claim",
-	}, "\n") {
-		t.Fatalf("expected stream before claim, got %v", calls)
+	if strings.Join(calls, "\n") != "POST /api/preflight/v1/runners/pfrun_cli/jobs/claim" {
+		t.Fatalf("expected only the claim, got %v", calls)
 	}
 }
 
-func TestClaimRunnerJobFallsBackToClaimWhenStreamUnavailable(t *testing.T) {
+func TestClaimRunnerJobIgnoresAnUnavailableStream(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The runner streams command output to /logs for whatever job is in
@@ -7696,13 +7696,10 @@ func TestClaimRunnerJobFallsBackToClaimWhenStreamUnavailable(t *testing.T) {
 		t.Fatalf("claim runner job: %v", err)
 	}
 	if claim == nil || claim.Job.ID != "pfjob_probe" {
-		t.Fatalf("expected fallback claim, got %#v", claim)
+		t.Fatalf("expected claim, got %#v", claim)
 	}
-	if strings.Join(calls, "\n") != strings.Join([]string{
-		"GET /api/preflight/v1/runners/pfrun_cli/jobs/stream",
-		"POST /api/preflight/v1/runners/pfrun_cli/jobs/claim",
-	}, "\n") {
-		t.Fatalf("expected stream fallback before claim, got %v", calls)
+	if strings.Join(calls, "\n") != "POST /api/preflight/v1/runners/pfrun_cli/jobs/claim" {
+		t.Fatalf("expected only the claim, got %v", calls)
 	}
 }
 

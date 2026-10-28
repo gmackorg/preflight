@@ -5261,7 +5261,7 @@ func printRunnerHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: preflight runner <command>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  once  Register, claim one local work sequence, and exit")
+	fmt.Fprintln(w, "  once  Register, claim one local work sequence (polling with backoff while idle), and exit")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Options for once:")
 	fmt.Fprintln(w, "  --api-url <url>          Preflight API URL or PREFLIGHT_API_URL")
@@ -5276,6 +5276,9 @@ func printRunnerHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --ios-simulator-build-jobs <1-32>  Limit simulator compiler parallelism (default: Xcode automatic)")
 	fmt.Fprintln(w, "  --metro-status-url <url> Override Metro status probe URL")
 	fmt.Fprintln(w, "  --host-mode <mode>       Expo host mode: lan, localhost, tunnel, or tailscale")
+	fmt.Fprintln(w, "  --idle-wait <duration>   Keep polling this long when idle before exiting (default 10m, 0 = claim once; PREFLIGHT_RUNNER_IDLE_WAIT)")
+	fmt.Fprintln(w, "  --idle-poll-min <dur>    First idle poll interval (default 10s; PREFLIGHT_RUNNER_IDLE_POLL_MIN)")
+	fmt.Fprintln(w, "  --idle-poll-max <dur>    Idle poll interval ceiling (default 60s; PREFLIGHT_RUNNER_IDLE_POLL_MAX)")
 }
 
 func runRunnerOnce(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -5315,6 +5318,9 @@ type runnerOnceOptions struct {
 	hostMode              string
 	simulatorUDID         string
 	iosSimulatorBuildJobs int
+	// idle controls how long an empty `runner once` keeps polling for work
+	// before exiting (PREFLT-51, runner_idle.go).
+	idle runnerIdlePolicy
 }
 
 func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
@@ -5331,9 +5337,16 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 		metroPort:     8091,
 		hostMode:      "lan",
 		simulatorUDID: os.Getenv("PREFLIGHT_SIMULATOR_UDID"),
+		idle:          defaultRunnerIdlePolicy(),
 	}
 
 	for index := 0; index < len(args); index += 1 {
+		if handled, err := parseRunnerIdleFlag(args, &index, &options.idle); handled {
+			if err != nil {
+				return runnerOnceOptions{}, err
+			}
+			continue
+		}
 		switch args[index] {
 		case "--api-url":
 			value, ok := nextFlagValue(args, &index)
@@ -5564,6 +5577,14 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	claim, err := claimRunnerJob(client, options, registration)
 	if err != nil {
 		return err
+	}
+	if claim == nil {
+		// Stay registered and poll with backoff instead of exiting into the
+		// supervisor's register-everything loop (PREFLT-51).
+		claim, err = waitForIdleRunnerJob(client, options, registration, stdout)
+		if err != nil {
+			return err
+		}
 	}
 	if claim == nil {
 		fmt.Fprintln(stdout, "no runner jobs available")
@@ -6356,13 +6377,13 @@ func reconcileRunnerStartup(client *http.Client, options runnerOnceOptions, regi
 }
 
 func claimRunnerJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData) (*runnerClaimData, error) {
-	if runnerJobStreamEnabled(registration) {
-		available, err := streamRunnerJobAvailable(client, options, registration)
-		if err == nil && !available {
-			// The stream is only an optimization. A stale stream projection must
-			// not hide queued jobs from the authoritative claim endpoint.
-		}
-	}
+	// The claim endpoint is authoritative and answers "nothing queued" itself.
+	// This used to GET /jobs/stream first whenever the server advertised
+	// runnerJobStream, then claim regardless of the answer (a stale stream must
+	// not hide queued work), so every poll paid for the stream's full queue
+	// restore for nothing. The stream is not a long poll: it returns a snapshot
+	// and closes. PREFLT-51 dropped the call; streamRunnerJobAvailable stays for
+	// a future push transport.
 	data, err := postPreflightJSON(
 		client,
 		runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/jobs/claim", registration.Runner.ID)),
