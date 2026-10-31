@@ -7730,7 +7730,7 @@ func TestRunnerJobCancellationCheckHeartbeatsRunningJobLease(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	cancelled, err := runnerJobCancellationCheck(
+	cancelled, err := runnerJobCancellationCheckWithClock(
 		server.Client(),
 		runnerOnceOptions{apiURL: server.URL},
 		runnerRegistrationData{
@@ -7743,6 +7743,7 @@ func TestRunnerJobCancellationCheckHeartbeatsRunningJobLease(t *testing.T) {
 			Token: "runner_token",
 		},
 		apiRunnerJob{ID: "pfjob_long", Kind: "maestro.run", Status: "running"},
+		func() time.Time { return time.Date(2026, 5, 20, 12, 1, 0, 0, time.UTC) },
 	)()
 
 	if err != nil {

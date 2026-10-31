@@ -5927,15 +5927,21 @@ type runnerClaimData struct {
 }
 
 type apiRunnerJob struct {
-	ID          string           `json:"id"`
-	WorkspaceID string           `json:"workspaceId"`
-	AppID       string           `json:"appId"`
-	WorkflowID  string           `json:"workflowId"`
-	Kind        string           `json:"kind"`
-	Status      string           `json:"status"`
-	TargetID    string           `json:"targetId"`
-	Payload     runnerJobPayload `json:"payload"`
-	Result      map[string]any   `json:"result"`
+	ID              string           `json:"id"`
+	WorkspaceID     string           `json:"workspaceId"`
+	AppID           string           `json:"appId"`
+	WorkflowID      string           `json:"workflowId"`
+	Kind            string           `json:"kind"`
+	Status          string           `json:"status"`
+	TargetID        string           `json:"targetId"`
+	RunnerID        string           `json:"runnerId"`
+	LeaseOwner      string           `json:"leaseOwner"`
+	ClaimedAt       string           `json:"claimedAt"`
+	Attempt         int              `json:"attempt"`
+	LeaseExpiresAt  string           `json:"leaseExpiresAt"`
+	LastHeartbeatAt string           `json:"lastHeartbeatAt"`
+	Payload         runnerJobPayload `json:"payload"`
+	Result          map[string]any   `json:"result"`
 }
 
 type runnerJobPayload struct {
@@ -6675,6 +6681,9 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 
 	if providerIdentity != "" && shouldBootIOSSimulator(job) {
 		if err := bootIOSSimulator(options, providerIdentity, runnerJobCancellationCheck(client, options, registration, job)); err != nil {
+			if jobLeaseLost(err) {
+				return false, err
+			}
 			status := "failed"
 			if errors.Is(err, errCommandCancelled) {
 				status = "cancelled"
@@ -6729,6 +6738,9 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 			runnerPollInterval(),
 		); err != nil {
 			terminateExpoDevServer(startedDevServer)
+			if jobLeaseLost(err) {
+				return false, err
+			}
 			if errors.Is(err, errCommandCancelled) {
 				if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 					"status": "cancelled",
@@ -7286,14 +7298,8 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 	}
 	var openErr error
 	if platform == "ios" {
-		// Reap leftover CI builds from prior attempts (lease-expiry reclaims
-		// re-spawn expo run:ios on top of orphaned ones) or concurrent CI jobs
-		// before starting ours. Concurrent xcodebuild invocations share Xcode's
-		// ModuleCache build-session and deadlock (SwiftBuild stalls at 0% CPU),
-		// which makes the build wedge, the lease expire, and the job restack —
-		// a self-sustaining thrash. simulator.open is serial per host, so nothing
-		// for this job is running yet; every CI build process here is an orphan or
-		// a competitor and is safe to kill. Serializes iOS builds on the host.
+		// Retire only verified stale work from this checkout. Other runners
+		// may build concurrently on the host and must keep their processes.
 		cleanupStaleCiBuildProcesses(stdout, preflightCiCheckoutSegment(appDir))
 
 		if err := ensureXcodeEnvNodeBinary(appDir, stdout); err != nil {
@@ -7340,6 +7346,9 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 	}
 	err := openErr
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status":        "cancelled",
@@ -7477,6 +7486,9 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		runnerJobCancellationCheck(client, options, registration, job),
 	)
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		_ = uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout)
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
@@ -7545,6 +7557,9 @@ func handleUnityBuildPlayerJob(client *http.Client, options runnerOnceOptions, r
 		err = validateRunnerJobSourceBinding(options, job)
 	}
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		if uploadErr := uploadUnityBuildArtifacts(client, options, registration, job, artifacts); uploadErr != nil {
 			fmt.Fprintf(stdout, "warning: Unity artifact bytes were not retained remotely %s %s\n", job.ID, uploadErr.Error())
 		}
@@ -8267,6 +8282,9 @@ func handleOtaJob(client *http.Client, options runnerOnceOptions, registration r
 	}
 
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status": "cancelled",
@@ -8509,6 +8527,9 @@ func handleFastlaneJob(client *http.Client, options runnerOnceOptions, registrat
 		args...,
 	)
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status": "cancelled",
@@ -8647,6 +8668,9 @@ func handleEASSubmitJob(client *http.Client, options runnerOnceOptions, registra
 		args...,
 	)
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status": "cancelled",
@@ -9694,22 +9718,7 @@ func heartbeatRunnerJob(client *http.Client, options runnerOnceOptions, registra
 }
 
 func runnerJobCancellationCheck(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob) func() (bool, error) {
-	return func() (bool, error) {
-		var read apiRunnerJob
-		var err error
-		if runnerJobHeartbeatEnabled(registration) {
-			read, err = heartbeatRunnerJob(client, options, registration, job)
-			if err != nil {
-				read, err = readRunnerJob(client, options, registration, job)
-			}
-		} else {
-			read, err = readRunnerJob(client, options, registration, job)
-		}
-		if err != nil {
-			return false, nil
-		}
-		return read.Status == "cancelled", nil
-	}
+	return runnerJobCancellationCheckWithClock(client, options, registration, job, time.Now)
 }
 
 func claimAndHandleDevelopmentAfterReadiness(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
@@ -9826,6 +9835,9 @@ func handleEASBuildDevJob(client *http.Client, options runnerOnceOptions, regist
 		buildArgs...,
 	)
 	if err != nil {
+		if jobLeaseLost(err) {
+			return err
+		}
 		if errors.Is(err, errCommandCancelled) {
 			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 				"status":   "cancelled",

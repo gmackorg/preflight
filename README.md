@@ -110,6 +110,12 @@ Bounded build commands also terminate descendants left in their own process
 group after either successful or failed completion. Persistent Metro sessions
 have a separate lifecycle; unrelated process groups are preserved.
 
+Native commands also stop when the control plane revokes their job or device
+lease, requeues or finishes the job, or returns a different claim identity.
+The runner preserves the server's state instead of submitting a stale completion.
+Temporary heartbeat/read failures are tolerated only until the last confirmed
+lease expires or its heartbeat becomes five minutes stale, whichever comes first.
+
 Queued iOS simulator proofs can select a packaged preview profile with
 `prove-app --lane simulator --build-strategy local --build-profile preview-simulator`.
 The selected profile must inherit or declare `developmentClient: false`,
