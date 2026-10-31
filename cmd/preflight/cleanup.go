@@ -83,6 +83,9 @@ func collectCleanupEntries(root string, includeDiskImages bool) []cleanupEntry {
 }
 
 func cleanupBuilds(root string, maxAge time.Duration, dryRun, includeDiskImages bool, stdout io.Writer) (int, error) {
+	if maxAge <= 0 {
+		return 0, fmt.Errorf("cleanup max age must be positive")
+	}
 	cutoff := time.Now().Add(-maxAge)
 	removed := 0
 	for _, entry := range collectCleanupEntries(root, includeDiskImages) {
@@ -92,12 +95,18 @@ func cleanupBuilds(root string, maxAge time.Duration, dryRun, includeDiskImages 
 		if dryRun {
 			fmt.Fprintf(stdout, "would remove %s (age %s)\n",
 				entry.path, time.Since(entry.modTime).Round(time.Hour))
+			removed++
 			continue
 		}
 		if err := os.RemoveAll(entry.path); err != nil {
 			return removed, fmt.Errorf("remove %s: %w", entry.path, err)
 		}
 		removed++
+	}
+	nativeRemoved, err := cleanupNativeBuildCaches(root, cutoff, dryRun, stdout)
+	removed += nativeRemoved
+	if err != nil {
+		return removed, err
 	}
 	if !dryRun {
 		noun := "entries"
@@ -229,7 +238,7 @@ func hostCacheRoots() []string {
 func runCleanup(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(stdout, "Usage: preflight cleanup builds --root <dir> [--max-age 24h] [--dry-run] [--include-disk-images]")
-		fmt.Fprintln(stdout, "Prune stale regenerable build caches (DerivedData, tmp, CocoaPods, module caches).")
+		fmt.Fprintln(stdout, "Prune stale regenerable build caches; app roots also reclaim inactive Preflight native intermediates while retaining products and logs.")
 		if len(args) == 0 {
 			return 2
 		}
