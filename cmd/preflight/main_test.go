@@ -14247,13 +14247,15 @@ func TestAcquireCheckoutLockKeyedPerAppDirectory(t *testing.T) {
 	releaseB()
 }
 
-func TestAcquireCheckoutLockProceedsWhenUnlockable(t *testing.T) {
-	// A lock file that cannot be created must not take the runner offline.
+func TestAcquireCheckoutLockRefusesWhenUnlockable(t *testing.T) {
+	// Failure to establish a mutex must never authorize concurrent mutation.
 	release, err := acquireCheckoutLock(filepath.Join(t.TempDir(), "does", "not", "exist"), time.Second)
-	if err != nil {
-		t.Fatalf("must degrade to unlocked, got %v", err)
+	if err == nil {
+		if release != nil {
+			release()
+		}
+		t.Fatal("unverifiable checkout ownership must refuse the build")
 	}
-	release()
 }
 
 // Several runner agents share each Mac and poll independently, so losing a race

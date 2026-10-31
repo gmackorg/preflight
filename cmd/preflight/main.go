@@ -11453,7 +11453,7 @@ func terminateExpoDevServer(process *expoDevServerProcess) {
 // a readable reason instead of sitting on a lease until it expires.
 const checkoutLockWait = 90 * time.Second
 
-// acquireCheckoutLock takes an exclusive, host-wide lock on one CI checkout and
+// acquireCheckoutLock takes an exclusive lock on one checkout and
 // returns the release function.
 //
 // concurrentPreflightBuildActive and cleanupStaleCiBuildProcesses already guard
@@ -11473,14 +11473,13 @@ const checkoutLockWait = 90 * time.Second
 // and proceed. This is a real mutex, held for the whole mutate-the-checkout
 // span, keyed per app directory so unrelated apps still build in parallel.
 //
-// If the lock file cannot be created at all the work proceeds unlocked: a
-// read-only or unusual filesystem should not take the farm offline, and the
-// pre-existing behaviour was unlocked anyway.
+// If ownership cannot be established, refuse this build instead of mutating
+// the checkout without a mutex. Unrelated checkouts remain available.
 func acquireCheckoutLock(lockDir string, wait time.Duration) (func(), error) {
 	lockPath := filepath.Join(lockDir, "checkout.lock")
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		return func() {}, nil
+		return nil, fmt.Errorf("establish checkout ownership at %s: %w", lockPath, err)
 	}
 	release := func() {
 		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
@@ -11539,17 +11538,6 @@ func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
 	}
 }
 
-// cleanupStaleCiBuildProcesses kills leftover `expo run:ios` and `xcodebuild`
-// processes from PRIOR or CONCURRENT preflight CI builds. On a single macOS host,
-// parallel xcodebuild invocations share Xcode's ModuleCache build-session file and
-// deadlock (SwiftBuild stalls mid-compile at 0% CPU), and lease-expiry reclaims
-// re-spawn expo run:ios on top of the orphaned attempt — stacking builds until the
-// host thrashes. simulator.open runs serially per runner host, so when a build
-// reaches this point nothing for the current job exists yet: every matching CI
-// build process is an orphan or a competing build and is safe to reap. Non-CI
-// builds (no /.preflight-ci/ in the command, e.g. a developer's local build) are
-// never touched. Killing the expo/xcodebuild process group cascades to its clang
-// children; the shared SwiftBuild XPC service idles once xcodebuild exits.
 // concurrentPreflightBuildActive reports whether another runner on this host is
 // mid-build: a live `expo run:ios`/`xcodebuild` for a .preflight-ci checkout whose
 // segment differs from the current job's. Used to avoid host-wide simulator
@@ -11574,12 +11562,20 @@ func concurrentPreflightBuildActive(currentSegment string) bool {
 	return false
 }
 
-func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
-	out, err := exec.Command("ps", "-eo", "pid=,ppid=,command=").Output()
-	if err != nil {
-		return
+// Only orphaned builds from the identified checkout are cleanup candidates.
+// An isolated checkout cannot infer ownership of CI processes from their names.
+type staleCIBuildProcess struct {
+	pid     int
+	segment string
+}
+
+func staleCIBuildProcesses(processList string, currentSegment string) []staleCIBuildProcess {
+	var processes []staleCIBuildProcess
+	// A local checkout outside .preflight-ci has no authority over CI builds.
+	if strings.TrimSpace(currentSegment) == "" {
+		return nil
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(processList, "\n") {
 		if !strings.Contains(line, "/.preflight-ci/") {
 			continue
 		}
@@ -11590,9 +11586,8 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
 		// Multi-runner-per-host safety: only reap builds for THIS job's checkout
 		// (orphans/re-spawns of the same app). A build for a DIFFERENT app is a
 		// concurrent runner's in-flight work — killing it would wedge the other
-		// runner. When currentSegment is empty (unknown), fall back to the legacy
-		// reap-all behavior for single-runner hosts.
-		if currentSegment != "" && seg != currentSegment {
+		// runner. Unknown checkout ownership never permits host-wide cleanup.
+		if seg != currentSegment {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSpace(line))
@@ -11611,8 +11606,19 @@ func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
 		if convErr != nil || ppid != 1 {
 			continue
 		}
-		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", seg, pid)
-		terminateCommandProcess(pid)
+		processes = append(processes, staleCIBuildProcess{pid: pid, segment: seg})
+	}
+	return processes
+}
+
+func cleanupStaleCiBuildProcesses(stdout io.Writer, currentSegment string) {
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return
+	}
+	for _, process := range staleCIBuildProcesses(string(out), currentSegment) {
+		fmt.Fprintf(stdout, "reaping stale CI build process for %s (pid %d)\n", process.segment, process.pid)
+		terminateCommandProcess(process.pid)
 	}
 }
 
