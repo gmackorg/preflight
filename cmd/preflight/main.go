@@ -5267,6 +5267,7 @@ func printRunnerHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --api-url <url>          Preflight API URL or PREFLIGHT_API_URL")
 	fmt.Fprintln(w, "  --workspace-id <id>      ForgeGraph workspace ID")
 	fmt.Fprintln(w, "  --workspace-root <path>  Workspace root this runner can access")
+	fmt.Fprintln(w, "  --workflow-id <id>       Claim only this workflow (requires server support)")
 	fmt.Fprintln(w, "  --host-identity <name>   Stable local host identity")
 	fmt.Fprintln(w, "  --name <name>            Runner display name")
 	fmt.Fprintln(w, "  --simctl-json <path>     Use a simctl JSON fixture instead of xcrun")
@@ -5307,6 +5308,7 @@ type runnerOnceOptions struct {
 	token                 string
 	workspaceID           string
 	workspaceRoot         string
+	workflowID            string
 	hostIdentity          string
 	name                  string
 	simctlJSON            string
@@ -5366,6 +5368,12 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 				return runnerOnceOptions{}, fmt.Errorf("--workspace-root requires a value")
 			}
 			options.workspaceRoot = value
+		case "--workflow-id":
+			value, ok := nextFlagValue(args, &index)
+			if !ok || strings.TrimSpace(value) == "" {
+				return runnerOnceOptions{}, fmt.Errorf("--workflow-id requires a nonempty value")
+			}
+			options.workflowID = strings.TrimSpace(value)
 		case "--host-identity":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -5535,6 +5543,9 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 		return err
 	}
 	fmt.Fprintf(stdout, "registered runner %s\n", registration.Runner.ID)
+	if err := requireRunnerWorkflowClaimScope(options, registration); err != nil {
+		return err
+	}
 
 	// Pull the fleet's shared signing identity into a dedicated keychain so
 	// device/TestFlight builds sign without per-machine manual provisioning.
@@ -5901,8 +5912,9 @@ func localPidFileIsStale(path string) (bool, error) {
 }
 
 type runnerRegistrationData struct {
-	Runner apiRunner `json:"runner"`
-	Token  string    `json:"token"`
+	Runner      apiRunner `json:"runner"`
+	Token       string    `json:"token"`
+	ClaimScopes []string  `json:"claimScopes"`
 }
 
 type apiRunner struct {
@@ -6377,6 +6389,9 @@ func reconcileRunnerStartup(client *http.Client, options runnerOnceOptions, regi
 }
 
 func claimRunnerJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData) (*runnerClaimData, error) {
+	if err := requireRunnerWorkflowClaimScope(options, registration); err != nil {
+		return nil, err
+	}
 	// The claim endpoint is authoritative and answers "nothing queued" itself.
 	// This used to GET /jobs/stream first whenever the server advertised
 	// runnerJobStream, then claim regardless of the answer (a stale stream must
@@ -6384,14 +6399,18 @@ func claimRunnerJob(client *http.Client, options runnerOnceOptions, registration
 	// restore for nothing. The stream is not a long poll: it returns a snapshot
 	// and closes. PREFLT-51 dropped the call; streamRunnerJobAvailable stays for
 	// a future push transport.
+	payload := map[string]any{
+		"workspaceRoot": options.workspaceRoot,
+		"leaseOwner":    runnerLeaseOwner(options),
+	}
+	if options.workflowID != "" {
+		payload["workflowId"] = options.workflowID
+	}
 	data, err := postPreflightJSON(
 		client,
 		runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/jobs/claim", registration.Runner.ID)),
 		registration.Token,
-		map[string]any{
-			"workspaceRoot": options.workspaceRoot,
-			"leaseOwner":    runnerLeaseOwner(options),
-		},
+		payload,
 	)
 	if err != nil {
 		return nil, err
@@ -6407,7 +6426,22 @@ func claimRunnerJob(client *http.Client, options runnerOnceOptions, registration
 	if claim.Job.ID == "" {
 		return nil, fmt.Errorf("runner claim response did not include a job ID")
 	}
+	if options.workflowID != "" && claim.Job.WorkflowID != options.workflowID {
+		return nil, fmt.Errorf("server returned job %s outside selected workflow %s; coordinator reconciliation required", claim.Job.ID, options.workflowID)
+	}
 	return &claim, nil
+}
+
+func requireRunnerWorkflowClaimScope(options runnerOnceOptions, registration runnerRegistrationData) error {
+	if options.workflowID == "" {
+		return nil
+	}
+	for _, scope := range registration.ClaimScopes {
+		if scope == "workflow" {
+			return nil
+		}
+	}
+	return fmt.Errorf("server does not advertise workflow-scoped claims; upgrade the control plane before using --workflow-id")
 }
 
 type runnerJobStreamEvent struct {
@@ -6431,6 +6465,9 @@ func runnerArtifactUploadEnabled(registration runnerRegistrationData) bool {
 }
 
 func streamRunnerJobAvailable(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData) (bool, error) {
+	if err := requireRunnerWorkflowClaimScope(options, registration); err != nil {
+		return false, err
+	}
 	endpoint := runnerEndpoint(
 		options.apiURL,
 		fmt.Sprintf("/api/preflight/v1/runners/%s/jobs/stream", registration.Runner.ID),
@@ -6441,6 +6478,9 @@ func streamRunnerJobAvailable(client *http.Client, options runnerOnceOptions, re
 	}
 	query := parsed.Query()
 	query.Set("workspaceRoot", options.workspaceRoot)
+	if options.workflowID != "" {
+		query.Set("workflowId", options.workflowID)
+	}
 	parsed.RawQuery = query.Encode()
 
 	request, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
