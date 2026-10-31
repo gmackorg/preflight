@@ -194,3 +194,10 @@ limits simulator compilation only; it does not change production EAS submission.
 Keep disk admission/runtime guards enabled and retain partial derived data when a
 build is interrupted. Lower parallelism may reduce memory and swap pressure, but
 its effect must be measured on the actual host before repeating a failed proof.
+
+For a task-owned worker on a shared host, add `--workflow-id <id>` to claim
+only that proof workflow. The control plane filters before acquiring a lease,
+including stream offers and lease recovery. The runner refuses this option
+against a server that does not advertise workflow claim support. Checkout,
+capability, source and resource admission checks still apply; this option does
+not reserve the host or increase its build capacity.
