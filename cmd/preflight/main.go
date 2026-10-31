@@ -13240,6 +13240,10 @@ func runCommandWithTimeoutAndCancellation(
 	if err := command.Start(); err != nil {
 		return err
 	}
+	// A successful leader can leave descendants without inherited stdout.
+	// WaitDelay cannot see them; release only this command's owned group on
+	// every completion path, without falling back to a possibly reused PID.
+	defer cleanupCompletedCommandGroup(command.Process.Pid)
 
 	done := make(chan error, 1)
 	go func() {
@@ -13294,6 +13298,14 @@ func runCommandWithTimeoutAndCancellation(
 			return fmt.Errorf("%w after %s", errCommandTimedOut, timeout)
 		}
 	}
+}
+
+func cleanupCompletedCommandGroup(groupID int) {
+	if groupID <= 0 || syscall.Kill(-groupID, syscall.SIGTERM) != nil {
+		return
+	}
+	time.Sleep(50 * time.Millisecond)
+	_ = syscall.Kill(-groupID, syscall.SIGKILL)
 }
 
 func terminateCommandProcess(pid int) {

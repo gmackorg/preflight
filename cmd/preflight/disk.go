@@ -75,12 +75,21 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		case "--root":
 			if value, ok := nextFlagValue(args, &i); ok {
 				roots = append(roots, value)
+			} else {
+				fmt.Fprintln(stderr, "--root requires a directory")
+				return 2
 			}
 		case "--max-age":
 			if value, ok := nextFlagValue(args, &i); ok {
-				if parsed, err := time.ParseDuration(value); err == nil {
-					maxAge = parsed
+				parsed, err := time.ParseDuration(value)
+				if err != nil || parsed <= 0 {
+					fmt.Fprintln(stderr, "--max-age must be a positive duration")
+					return 2
 				}
+				maxAge = parsed
+			} else {
+				fmt.Fprintln(stderr, "--max-age requires a positive duration")
+				return 2
 			}
 		}
 	}
@@ -143,17 +152,23 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 	}
 
 	reclaimed := 0
+	cleanupFailed := false
+	cleanupOutput := stdout
+	if jsonOut {
+		cleanupOutput = io.Discard
+	}
 	if reclaim {
 		for _, root := range roots {
 			if _, err := os.Stat(root); err != nil {
 				continue
 			}
-			n, err := cleanupBuilds(root, maxAge, dryRun, false, stdout)
+			n, err := cleanupBuilds(root, maxAge, dryRun, false, cleanupOutput)
+			reclaimed += n
 			if err != nil {
 				fmt.Fprintf(stderr, "sweep %s: %v\n", root, err)
+				cleanupFailed = true
 				continue
 			}
-			reclaimed += n
 		}
 
 		// DerivedData alone is not where the space goes. On labtop the managed
@@ -167,7 +182,7 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		// is safe; pnpm refetches on the next install. Only run it under
 		// pressure, since a warm store is worth a lot to build times.
 		if free, err := freeBytesForPath("/"); err == nil && free/bytesPerGiB < pnpmStorePruneFloorGb() {
-			if pruned := prunePnpmStore(dryRun, stdout, stderr); pruned {
+			if pruned := prunePnpmStore(dryRun, cleanupOutput, stderr); pruned {
 				reclaimed++
 			}
 		}
@@ -184,16 +199,24 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 	}
 
 	if jsonOut {
-		return writeJSON(stdout, map[string]any{
+		code := writeJSON(stdout, map[string]any{
 			"volumes":        volumes,
 			"reclaimedItems": reclaimed,
+			"cleanupFailed":  cleanupFailed,
 			"nodes":          nodes,
 			"summary":        summary,
 		})
+		if code == 0 && cleanupFailed {
+			return 1
+		}
+		return code
 	}
 
 	fmt.Fprintf(stdout, "%-44s %-10s %s\n", "VOLUME", "FREE", "STATE")
 	exit := 0
+	if cleanupFailed {
+		exit = 1
+	}
 	for _, volume := range volumes {
 		if !volume.Reachable {
 			fmt.Fprintf(stdout, "%-44s %-10s %s\n", truncate(volume.Path, 44), "-", "unreadable")

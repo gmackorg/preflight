@@ -84,6 +84,32 @@ simulator builds. A configured floor also refuses work when a volume cannot
 be probed. Inspect ownership and preserve required native products before an
 explicit `preflight disk --reclaim` or `preflight cleanup builds` operation.
 
+For queued iOS builds, pass the **app directory** (the directory containing
+`.preflight`) as the cleanup root:
+
+```sh
+preflight cleanup builds --root /path/to/checkout/apps/mobile --max-age 24h --dry-run
+preflight cleanup builds --root /path/to/checkout/apps/mobile --max-age 24h
+```
+
+This also reclaims stale `Build/Intermediates.noindex`, `ModuleCache.noindex`,
+`Index.noindex` and `SDKStatCaches.noindex` inside Preflight's simulator/device
+DerivedData directories. Maintenance takes the builder's checkout mutex and
+skips a checkout that is building. Every descendant must be older than the
+cutoff; an old parent directory alone does not establish inactivity. Installable
+`Build/Products`, build logs, recordings and source are retained. Linked generated
+paths or an unusable mutex refuse native cleanup. Dry runs count the selected
+entries without creating a mutex or deleting resources. This does not scan
+other checkouts or change the retention of shared Xcode caches.
+`preflight disk --reclaim --root <app-directory>` uses the same native cleanup;
+its JSON output remains parseable, reports dry-run candidate counts, and exits
+unsuccessfully if cleanup fails. Invalid or non-positive retention is refused
+before maintenance starts.
+
+Bounded build commands also terminate descendants left in their own process
+group after either successful or failed completion. Persistent Metro sessions
+have a separate lifecycle; unrelated process groups are preserved.
+
 Queued iOS simulator proofs can select a packaged preview profile with
 `prove-app --lane simulator --build-strategy local --build-profile preview-simulator`.
 The selected profile must inherit or declare `developmentClient: false`,
