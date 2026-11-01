@@ -6888,6 +6888,12 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 		devBuild:         job.Payload.DevBuild,
 		development:      developmentSession,
 	})
+	// Only a server started by this job grants cleanup ownership. Reused
+	// listeners retain their original owner and may have other borrowers.
+	if startedDevServer != nil {
+		devSessionPayload["pid"] = startedDevServer.pid
+		devSessionPayload["pidFilePath"] = filepath.Join(appDir, ".preflight", "expo-dev-session.pid")
+	}
 	devSessionArtifacts, err := prepareAndUploadDevSessionArtifacts(client, options, registration, job, appDir, devSessionPayload, startedDevServer)
 	if err != nil {
 		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{

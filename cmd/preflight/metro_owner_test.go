@@ -201,9 +201,11 @@ func TestDevSessionStartAllocatesNewMetroInsteadOfReusingOtherApp(t *testing.T) 
 	var completed struct {
 		Result struct {
 			DevSession struct {
-				Status    string `json:"status"`
-				Port      int    `json:"port"`
-				StatusURL string `json:"statusUrl"`
+				Status      string `json:"status"`
+				Port        int    `json:"port"`
+				StatusURL   string `json:"statusUrl"`
+				PID         int    `json:"pid"`
+				PIDFilePath string `json:"pidFilePath"`
 			} `json:"devSession"`
 		} `json:"result"`
 	}
@@ -219,7 +221,7 @@ func TestDevSessionStartAllocatesNewMetroInsteadOfReusingOtherApp(t *testing.T) 
 	t.Cleanup(server.Close)
 	options := runnerOnceOptions{apiURL: server.URL, workspaceRoot: appDir, hostMode: "localhost", metroPort: port}
 	registration := runnerRegistrationData{Runner: apiRunner{ID: "pfrun_owner"}, Token: "test_token"}
-	job := apiRunnerJob{ID: "pfjob_owner", Kind: "dev_session.start", Payload: runnerJobPayload{
+	job := apiRunnerJob{ID: "pfjob_owner", WorkflowID: "workflow_owner", Kind: "dev_session.start", Payload: runnerJobPayload{
 		Platform: "ios", Lane: "development", SourceBinding: runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", AppScheme: "forgegraph"},
 	}}
 	var stdout bytes.Buffer
@@ -244,6 +246,33 @@ func TestDevSessionStartAllocatesNewMetroInsteadOfReusingOtherApp(t *testing.T) 
 	}
 	if !preflightOwnedMetroReady(http.DefaultClient, appDir, result.StatusURL) {
 		t.Fatal("newly recorded listener must belong to the requested app")
+	}
+	content, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil || result.PID != pid || result.PID <= 0 || result.PIDFilePath != pidPath {
+		t.Fatalf("completion must report the actual owned process and PID file: result=%+v pid=%d err=%v", result, pid, err)
+	}
+	ownerContent, err := os.ReadFile(filepath.Join(appDir, ".preflight", "expo-dev-session-owner.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner devSessionProcessOwner
+	if err := json.Unmarshal(ownerContent, &owner); err != nil || owner.PID != result.PID || owner.WorkflowID != job.WorkflowID || owner.RunnerJobID != job.ID {
+		t.Fatalf("reported process must match the durable ownership receipt: %+v err=%v", owner, err)
+	}
+	// A second workflow may borrow the same healthy server, but it must not
+	// receive a process handle that makes it appear to own that server.
+	options.metroPort = result.Port
+	borrower := job
+	borrower.ID, borrower.WorkflowID = "pfjob_borrower", "workflow_borrower"
+	completed.Result.DevSession.PID = 0
+	completed.Result.DevSession.PIDFilePath = ""
+	continued, err = handleDevSessionStartJob(server.Client(), options, registration, borrower, &stdout)
+	if err != nil || !continued || completed.Result.DevSession.Status != "reused" || completed.Result.DevSession.PID != 0 || completed.Result.DevSession.PIDFilePath != "" {
+		t.Fatalf("borrowed session must not acquire cleanup ownership: result=%+v continued=%v err=%v", completed.Result.DevSession, continued, err)
 	}
 	if !metroStatusReady(http.DefaultClient, own.URL+"/status") || !metroStatusReady(http.DefaultClient, foreign.URL+"/status") {
 		t.Fatal("both pre-existing servers must remain running")
