@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -10847,6 +10848,8 @@ func TestRunnerOnceStopsPreflightOwnedDevSession(t *testing.T) {
 	writeExpoConfigIdentity(t, appDir)
 
 	command := exec.Command("sh", "-c", "sleep 60")
+	command.Dir = appDir
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
 		t.Fatalf("start child process: %v", err)
 	}
@@ -10864,6 +10867,9 @@ func TestRunnerOnceStopsPreflightOwnedDevSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := writeDevSessionProcessOwner(appDir, command.Process.Pid, apiRunnerJob{}); err != nil {
+		t.Fatal(err)
+	}
 	completedStop := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The runner streams command output to /logs for whatever job is in

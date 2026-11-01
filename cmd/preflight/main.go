@@ -6081,6 +6081,7 @@ type runnerJobNetworkPolicy struct {
 }
 
 type runnerJobDevSession struct {
+	RunnerJobID    string `json:"runnerJobId"`
 	Status         string `json:"status"`
 	URL            string `json:"url"`
 	AdvertisedURL  string `json:"advertisedUrl"`
@@ -6629,6 +6630,11 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	appDir := appDirectoryForJob(options, job)
 	// Clear only this app's dead session handle. Live sessions belong to their
 	// workflows, including simulator reviews that continue after a native build.
+	releaseOwner, ownerErr := lockDevSessionProcessOwner(appDir)
+	if ownerErr != nil {
+		return false, ownerErr
+	}
+	defer releaseOwner()
 	cleanupStalePreflightDevServers(appDir, stdout)
 	// Android opens the dev client through the session's explicit deep link.
 	// Keep its historical default, but honor an operator-selected isolated port.
@@ -6721,6 +6727,17 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 
 	sessionStatus := "reused"
 	var startedDevServer *expoDevServerProcess
+	keepStartedSession := false
+	defer func() {
+		if startedDevServer != nil && !keepStartedSession {
+			terminateExpoDevServer(startedDevServer)
+			pidPath := filepath.Join(appDir, ".preflight", "expo-dev-session.pid")
+			if content, err := os.ReadFile(pidPath); err == nil && strings.TrimSpace(string(content)) == strconv.Itoa(startedDevServer.pid) {
+				_ = os.Remove(pidPath)
+				_ = os.Remove(filepath.Join(appDir, ".preflight", "expo-dev-session-owner.json"))
+			}
+		}
+	}()
 	if !preflightOwnedMetroReady(client, appDir, statusURL) {
 		sessionStatus = "started"
 		if err := requireAppDirectory(appDir); err != nil {
@@ -6852,6 +6869,11 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 		return false, nil
 	}
 
+	if startedDevServer == nil {
+		if err := recordDevSessionBorrower(appDir, job); err != nil {
+			return false, err
+		}
+	}
 	devSessionPayload := devSessionResultPayload(devSessionResultInput{
 		status:           sessionStatus,
 		localURL:         localDevServerURL,
@@ -6883,12 +6905,17 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	}
 	applyDevSessionArtifacts(devSessionPayload, devSessionArtifacts)
 
-	if err := completeRunnerJob(client, options, registration, job, map[string]any{
+	completed, err := completeRunnerJobWithResponse(client, options, registration, job, map[string]any{
 		"status":     "ok",
 		"devSession": devSessionPayload,
-	}); err != nil {
+	})
+	if err != nil {
 		return false, err
 	}
+	if completed.Job.Status == "cancelled" || completed.Job.Status == "failed" || completed.Job.Status == "expired" {
+		return false, nil
+	}
+	keepStartedSession = true
 	fmt.Fprintf(stdout, "started dev session %s %s\n", job.ID, advertisedURL)
 	return true, nil
 }
@@ -6914,7 +6941,7 @@ func handleDevSessionStopJob(client *http.Client, options runnerOnceOptions, reg
 	}
 
 	appDir := appDirectoryForJob(options, job)
-	outcome, err := stopPreflightOwnedDevSession(appDir, job.Payload.DevSession.PID)
+	outcome, err := stopVerifiedDevSession(appDir, job)
 	if err != nil {
 		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
 			"status":     "failed",
@@ -7350,10 +7377,10 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 			return err
 		}
 		if errors.Is(err, errCommandCancelled) {
-			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			if completeErr := completeCancelledJobAndCleanup(client, options, registration, job, map[string]any{
 				"status":        "cancelled",
 				"simulatorOpen": simulatorOpenResultPayload(job, platform, providerIdentity, appDir, port, logPath),
-			}); completeErr != nil {
+			}, stdout); completeErr != nil {
 				return completeErr
 			}
 			fmt.Fprintf(stdout, "cancelled simulator app open %s\n", job.ID)
@@ -7491,10 +7518,10 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		}
 		_ = uploadMaestroRunArtifacts(client, options, registration, job, providerIdentity, flowPath, artifacts, stdout)
 		if errors.Is(err, errCommandCancelled) {
-			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
+			if completeErr := completeCancelledJobAndCleanup(client, options, registration, job, map[string]any{
 				"status":  "cancelled",
 				"maestro": maestroResultPayload(job, providerIdentity, flowPath, artifacts),
-			}); completeErr != nil {
+			}, stdout); completeErr != nil {
 				return completeErr
 			}
 			fmt.Fprintf(stdout, "cancelled Maestro smoke %s\n", job.ID)
@@ -11449,6 +11476,11 @@ func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJ
 		_ = logFile.Close()
 		terminateExpoDevServer(process)
 		return nil, fmt.Errorf("write Expo dev session pid: %w", err)
+	}
+	if err := writeDevSessionProcessOwner(appDir, command.Process.Pid, job); err != nil {
+		_ = logFile.Close()
+		terminateExpoDevServer(process)
+		return nil, fmt.Errorf("record Expo development session ownership: %w", err)
 	}
 	if err := logFile.Close(); err != nil {
 		terminateExpoDevServer(process)
