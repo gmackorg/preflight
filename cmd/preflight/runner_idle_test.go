@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -218,6 +220,59 @@ func TestRunnerOnceIdleBacksOffWithoutReregisteringOrStreaming(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "no runner jobs available") {
 		t.Fatalf("expected the idle exit message, got %s", stdout.String())
+	}
+}
+
+func TestRunnerOnceDiskPressureBacksOffWithoutClaimsUntilRecovery(t *testing.T) {
+	for _, recoverAfter := range []int{0, 3} {
+		t.Run(fmt.Sprintf("recover_after_%d", recoverAfter), func(t *testing.T) {
+			t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+			t.Setenv("PREFLIGHT_MIN_FREE_DISK_GB", "25")
+			available := uint64(10 * bytesPerGiB)
+			previousProbe := buildDiskFreeBytes
+			buildDiskFreeBytes = func(string) (uint64, error) { return available, nil }
+			t.Cleanup(func() { buildDiskFreeBytes = previousProbe })
+			delays := fakeRunnerIdleClock(t)
+			advance := runnerIdleSleep
+			runnerIdleSleep = func(delay time.Duration) {
+				advance(delay)
+				if recoverAfter > 0 && len(*delays) == recoverAfter {
+					available = 30 * bytesPerGiB
+				}
+			}
+			server, calls := idleRunnerServer(t, -1)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{
+				"runner", "once", "--api-url", server.URL, "--workspace-id", "ws",
+				"--workspace-root", t.TempDir(), "--host-identity", "idle.local", "--idle-wait", "5m",
+			}, &stdout, &stderr, server.Client())
+			if code != 0 {
+				t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+			}
+			wantDelays := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second}
+			if !reflect.DeepEqual(*delays, wantDelays) {
+				t.Fatalf("disk pressure must use the bounded idle schedule: got %v want %v", *delays, wantDelays)
+			}
+			got := calls()
+			for _, path := range []string{"register", "pfrun_idle/reconcile"} {
+				if n := countIdleRunnerCalls(got, "POST /api/preflight/v1/runners/"+path); n != 1 {
+					t.Fatalf("expected one %s through disk pressure, got %d: %v", path, n, got)
+				}
+			}
+			wantClaims := 0
+			if recoverAfter > 0 {
+				wantClaims = len(wantDelays) - recoverAfter + 1
+			}
+			if n := countIdleRunnerCalls(got, "POST /api/preflight/v1/runners/pfrun_idle/jobs/claim"); n != wantClaims {
+				t.Fatalf("claims must resume only after headroom recovery: got %d want %d: %v", n, wantClaims, got)
+			}
+			if !strings.Contains(stdout.String(), "declining claims") {
+				t.Fatalf("expected explicit disk admission refusal: %s", stdout.String())
+			}
+			if floor := os.Getenv("PREFLIGHT_MIN_FREE_DISK_GB"); floor != "25" {
+				t.Fatalf("disk recovery must preserve the admission floor: %s", floor)
+			}
+		})
 	}
 }
 

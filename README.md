@@ -84,6 +84,13 @@ simulator builds. A configured floor also refuses work when a volume cannot
 be probed. Inspect ownership and preserve required native products before an
 explicit `preflight disk --reclaim` or `preflight cleanup builds` operation.
 
+An idle runner retains its registration and liveness heartbeat while disk
+admission is refused. It rechecks space on the same 10–60 second backoff as
+empty claims, and resumes claiming only when both volumes meet the configured
+floor. The idle window stays bounded (10 minutes by default); a zero idle wait
+keeps the single-attempt behavior. No cache deletion or floor change happens
+automatically.
+
 For queued iOS builds, pass the **app directory** (the directory containing
 `.preflight`) as the cleanup root:
 
