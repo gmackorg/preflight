@@ -11,8 +11,10 @@ import (
 
 // Automatic checks only probe the build and home volumes. Cache age cannot
 // establish ownership or whether a preserved native product is still needed.
+var buildDiskFreeBytes = freeBytesForPath
+
 func ensureBuildDiskHeadroom(buildDir string, stdout io.Writer) error {
-	return ensureBuildDiskHeadroomWithProbe(buildDir, stdout, freeBytesForPath)
+	return ensureBuildDiskHeadroomWithProbe(buildDir, stdout, buildDiskFreeBytes)
 }
 
 func ensureBuildDiskHeadroomWithProbe(buildDir string, stdout io.Writer, freeFn func(string) (uint64, error)) error {

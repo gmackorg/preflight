@@ -126,9 +126,9 @@ func nextRunnerIdleDelay(previous time.Duration, policy runnerIdlePolicy) time.D
 	return next
 }
 
-// waitForIdleRunnerJob polls the claim endpoint with backoff after an empty
-// claim. It returns nil without error when the idle window ends or the host
-// starts declining work, and the caller exits so the supervisor re-registers.
+// waitForIdleRunnerJob backs off after an empty claim or disk admission
+// refusal. Low disk skips claims while registration and heartbeats remain
+// active. When the bounded idle window ends, the supervisor re-registers.
 func waitForIdleRunnerJob(
 	client *http.Client,
 	options runnerOnceOptions,
@@ -149,7 +149,7 @@ func waitForIdleRunnerJob(
 		runnerIdleSleep(delay)
 		if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
 			fmt.Fprintf(stdout, "declining claims: %v\n", err)
-			return nil, nil
+			continue
 		}
 		claim, err := claimRunnerJob(client, options, registration)
 		if err != nil || claim != nil {
