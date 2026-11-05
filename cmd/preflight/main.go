@@ -106,6 +106,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runApps(args[1:], stdout, stderr, client)
 	case "build":
 		return runBuild(args[1:], stdout, stderr, client)
+	case "cancel":
+		return runCancelWorkOrder(args[1:], stdout, stderr, client)
 	case "queue":
 		return runQueue(args[1:], stdout, stderr, client)
 	case "nodes":
@@ -165,6 +167,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist/doctor/screenshots/submit-for-review)")
 	fmt.Fprintln(w, "  fleet         Fleet cockpit: `fleet next` = per-app next action + owner")
 	fmt.Fprintln(w, "  build         Queue a build/test work order on the build farm")
+	fmt.Fprintln(w, "  cancel        Cancel a work order and its active workflow")
 	fmt.Fprintln(w, "  queue         Build-farm queue: what is queued/running/blocked, and why")
 	fmt.Fprintln(w, "  nodes         Build-farm machines: engines, free disk, agents, live jobs")
 	fmt.Fprintln(w, "  integrations  Probe the Preflight API and its upstreams")

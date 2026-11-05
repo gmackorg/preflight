@@ -8,9 +8,21 @@ build and test jobs, and gives you a view of the farm from a terminal.
 preflight nodes            # machines: engines, free disk, agents, live jobs
 preflight queue            # what is queued/running/blocked, and why
 preflight build --app <id> # queue a build/test work order
+preflight build --app <id> --profile development-device # choose a device profile
+preflight cancel <pfwo_id> # cancel one work order and its active workflow
 preflight disk             # free space here and across the farm
 preflight integrations     # is the API and its upstreams reachable
 ```
+
+`build` and `device_test` use device development profiles. `simulator_test` and
+`e2e_suite` use simulator profiles. `--profile` (also `--build-profile`) selects
+an exact compatible EAS profile, including its inherited environment and app
+identity. Incompatible or store profiles fail before queueing; production and
+TestFlight builds use the separate store build workflow.
+
+`cancel` uses the configured workspace and cancels the active workflow before
+recording work-order cancellation. If recording fails, retry the same command.
+It preserves work orders that have already succeeded or failed.
 
 ## Install
 
