@@ -103,16 +103,18 @@ var workOrderKinds = []string{
 }
 
 type workOrder struct {
-	ID            string `json:"id"`
-	AppID         string `json:"appId"`
-	Kind          string `json:"kind"`
-	Platform      string `json:"platform"`
-	Status        string `json:"status"`
-	PriorityClass string `json:"priorityClass"`
-	BuildProvider string `json:"buildProvider"`
-	BlockedReason string `json:"blockedReason"`
-	RequestedBy   string `json:"requestedBy"`
-	CreatedAt     string `json:"createdAt"`
+	ID               string `json:"id"`
+	WorkspaceID      string `json:"workspaceId"`
+	ActiveWorkflowID string `json:"activeWorkflowId"`
+	AppID            string `json:"appId"`
+	Kind             string `json:"kind"`
+	Platform         string `json:"platform"`
+	Status           string `json:"status"`
+	PriorityClass    string `json:"priorityClass"`
+	BuildProvider    string `json:"buildProvider"`
+	BlockedReason    string `json:"blockedReason"`
+	RequestedBy      string `json:"requestedBy"`
+	CreatedAt        string `json:"createdAt"`
 }
 
 func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -126,37 +128,50 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	wait, jsonOut := false, false
 	preference := ""
 	appDir := "."
+	profile := ""
 	ciBuild := false
 
 	for i := 0; i < len(args); i++ {
-		next := func(dst *string) {
-			if value, ok := nextFlagValue(args, &i); ok {
-				*dst = value
-			}
-		}
 		switch args[i] {
-		case "--app":
-			next(&appID)
-		case "--platform":
-			next(&platform)
-		case "--runtime":
-			next(&runtime)
-		case "--kind":
-			next(&kind)
-		case "--priority-class":
-			next(&priorityClass)
-		case "--provider":
-			next(&preference)
-		case "--idempotency-key":
-			next(&idempotencyKey)
-		case "--app-dir":
-			next(&appDir)
+		case "--app", "--platform", "--runtime", "--kind", "--priority-class", "--provider", "--idempotency-key", "--app-dir", "--profile", "--build-profile":
+			flag := args[i]
+			value, ok := nextFlagValue(args, &i)
+			if !ok || strings.TrimSpace(value) == "" || strings.HasPrefix(value, "--") {
+				fmt.Fprintf(stderr, "%s requires a value\n", flag)
+				return 2
+			}
+			switch flag {
+			case "--app":
+				appID = value
+			case "--platform":
+				platform = value
+			case "--runtime":
+				runtime = value
+			case "--kind":
+				kind = value
+			case "--priority-class":
+				priorityClass = value
+			case "--provider":
+				preference = value
+			case "--idempotency-key":
+				idempotencyKey = value
+			case "--app-dir":
+				appDir = value
+			case "--profile", "--build-profile":
+				profile = value
+			}
 		case "--ci":
 			ciBuild = true
 		case "--wait":
 			wait = true
 		case "--json":
 			jsonOut = true
+		case "--help", "-h":
+			printBuildHelp(stdout)
+			return 0
+		default:
+			fmt.Fprintf(stderr, "unknown build argument %q\n", args[i])
+			return 2
 		}
 	}
 
@@ -182,14 +197,25 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	// so an approximate binding would queue an order no runner can claim.
 	// Derived with the same discoverSourceBinding() prove-app uses, rather than
 	// a second implementation that could drift from it.
+	// Match planWorkOrderDispatch: device builds use the development lane,
+	// while simulator/e2e proofs use the simulator lane.
+	lane := "development"
+	if kind == "simulator_test" || kind == "e2e_suite" {
+		lane = "simulator"
+	}
 	binding, bindingErr := discoverSourceBinding(proveAppOptions{
-		appDir:   appDir,
-		platform: platform,
-		lane:     "simulator",
+		appDir:       appDir,
+		platform:     platform,
+		lane:         lane,
+		buildProfile: profile,
 	})
 	if bindingErr != nil {
 		fmt.Fprintf(stderr, "cannot describe the app source: %v\n", bindingErr)
 		fmt.Fprintf(stderr, "run this from the app package, or pass --app-dir <path-to-expo-app>\n")
+		return 2
+	}
+	if err := validateWorkOrderProfile(appDir, platform, lane, binding.EASProfileName); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 
@@ -270,7 +296,7 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		token:       ctx.token,
 		workspaceID: ctx.workspaceID,
 		platform:    platform,
-		lane:        "simulator",
+		lane:        lane,
 	}, binding); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
@@ -374,6 +400,9 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --app <id>             app to build (required)")
 	fmt.Fprintln(w, "  --platform ios|android default ios")
 	fmt.Fprintln(w, "  --runtime <name>       app runtime, default expo")
+	fmt.Fprintln(w, "  --profile <name>       exact compatible EAS profile (alias --build-profile)")
+	fmt.Fprintln(w, "                         build/device_test use device profiles; simulator_test/e2e_suite use simulator profiles")
+	fmt.Fprintln(w, "                         store/production builds require the separate store build workflow")
 	fmt.Fprintln(w, "  --kind <kind>          default build; one of:")
 	fmt.Fprintf(w, "                         %s\n", strings.Join(workOrderKinds, ", "))
 	fmt.Fprintln(w, "  --priority-class <c>   background|normal|… default normal")
