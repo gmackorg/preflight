@@ -213,6 +213,9 @@ func (lease *simlockRunnerLease) configure(options *runnerOnceOptions) (func(), 
 		return nil, err
 	}
 	lease.shimDir = dir
+	if err := os.MkdirAll(filepath.Join(dir, "android", "avd"), 0700); err != nil {
+		return nil, err
+	}
 	identity := "preflight:" + options.hostIdentity + ":" + strconv.Itoa(os.Getpid()) + ":" + lease.workflowID
 	prefix := "#!/bin/sh\nexport PATH=" + simlockShellQuote(os.Getenv("PATH")) + "\nexport SIMLOCK_AGENT_ID=" + simlockShellQuote(identity) + "\nexec " + simlockShellQuote(binary) + " --local "
 	scripts := map[string]string{
@@ -404,4 +407,14 @@ func runWithSimlockRunnerLease(client *http.Client, options runnerOnceOptions, r
 	defer undo()
 	defer clearSimlockDiscoveryTargets(client, options, registration, output)
 	return run(options)
+}
+
+// Maestro analytics reads every .android/avd entry even with analytics off.
+// A broken foreign AVD symlink must not prevent a leased-device run starting.
+func simlockMaestroEnv(base []string, lease *simlockRunnerLease) []string {
+	env := maestroCommandEnv(base)
+	if lease == nil {
+		return env
+	}
+	return upsertEnvValues(env, map[string]string{"ANDROID_USER_HOME": filepath.Join(lease.shimDir, "android"), "ANDROID_AVD_HOME": filepath.Join(lease.shimDir, "android", "avd")})
 }

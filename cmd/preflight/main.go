@@ -12762,7 +12762,7 @@ func acceptIOSDevClientOpenDialog(logFile *os.File, udid string, options runnerO
 			return
 		}
 	}
-	command.Env = maestroCommandEnv(os.Environ())
+	command.Env = simlockMaestroEnv(os.Environ(), options.simlockLease)
 	flush := attachRedactedCommandLog(command, logFile)
 	if err := runCommandWithTimeoutAndCancellation(command, 2*time.Minute, nil, runnerPollInterval()); err != nil {
 		fmt.Fprintf(logFile, "dev-client open-dialog accept tap reported: %v (continuing)\n", err)
@@ -13099,7 +13099,7 @@ func runMaestroSmoke(
 	}
 	command.Args = append(command.Args, flowPath)
 	command.Dir = root
-	command.Env = maestroCommandEnv(os.Environ())
+	command.Env = simlockMaestroEnv(os.Environ(), options.simlockLease)
 	flushLog := attachRedactedCommandLog(command, logFile)
 	var cancellationCheck func() (bool, error)
 	if len(cancellationChecks) > 0 {

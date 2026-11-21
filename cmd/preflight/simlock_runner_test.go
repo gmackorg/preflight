@@ -343,3 +343,22 @@ func TestSimlockWorkflowRetainsLeaseScopeAndReleasesOnRunError(t *testing.T) {
 		t.Error("terminal path did not release lease", err)
 	}
 }
+
+func TestSimlockMaestroDoesNotReadForeignAVDMetadata(t *testing.T) {
+	lease := &simlockRunnerLease{shimDir: t.TempDir()}
+	env := simlockMaestroEnv([]string{"ANDROID_USER_HOME=/broken-foreign", "ANDROID_AVD_HOME=/another-foreign", "KEEP=present"}, lease)
+	values := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if values["ANDROID_USER_HOME"] != filepath.Join(lease.shimDir, "android") || values["ANDROID_AVD_HOME"] != filepath.Join(lease.shimDir, "android", "avd") || values["KEEP"] != "present" {
+		t.Fatalf("Maestro inherited foreign AVD state: %v", env)
+	}
+	untouched := simlockMaestroEnv([]string{"ANDROID_USER_HOME=/physical"}, nil)
+	if !strings.Contains(strings.Join(untouched, "\n"), "ANDROID_USER_HOME=/physical") {
+		t.Fatal("non-SimLock environment was changed")
+	}
+}
