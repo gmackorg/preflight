@@ -5273,6 +5273,7 @@ func printRunnerHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --workflow-id <id>       Claim only this workflow (requires server support)")
 	fmt.Fprintln(w, "  --host-identity <name>   Stable local host identity")
 	fmt.Fprintln(w, "  --name <name>            Runner display name")
+	fmt.Fprintln(w, "  --simlock                Lease simulators/emulators from the local SimLock worker")
 	fmt.Fprintln(w, "  --simctl-json <path>     Use a simctl JSON fixture instead of xcrun")
 	fmt.Fprintln(w, "  --xcrun-path <path>      xcrun executable path")
 	fmt.Fprintln(w, "  --adb-path <path>        adb executable path")
@@ -5307,6 +5308,8 @@ func runRunnerOnce(args []string, stdout io.Writer, stderr io.Writer, client *ht
 }
 
 type runnerOnceOptions struct {
+	simlock               bool
+	simlockLease          *simlockRunnerLease
 	apiURL                string
 	token                 string
 	workspaceID           string
@@ -5337,6 +5340,7 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 		workspaceRoot: os.Getenv("PREFLIGHT_WORKSPACE_ROOT"),
 		hostIdentity:  hostIdentity,
 		name:          "Preflight Runner",
+		simlock:       os.Getenv("PREFLIGHT_SIMLOCK") == "1",
 		xcrunPath:     "xcrun",
 		adbPath:       "adb",
 		metroPort:     8091,
@@ -5389,6 +5393,8 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 				return runnerOnceOptions{}, fmt.Errorf("--name requires a value")
 			}
 			options.name = value
+		case "--simlock":
+			options.simlock = true
 		case "--simctl-json":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -5502,6 +5508,9 @@ func parseRunnerOnceOptions(args []string) (runnerOnceOptions, error) {
 		options.hostMode = "lan"
 	}
 
+	if options.simlock && (options.simulatorUDID != "" || options.simctlJSON != "") {
+		return runnerOnceOptions{}, fmt.Errorf("--simlock cannot be combined with a simulator UDID or inventory fixture")
+	}
 	return options, nil
 }
 
@@ -6439,6 +6448,11 @@ func claimRunnerJob(client *http.Client, options runnerOnceOptions, registration
 	if options.workflowID != "" && claim.Job.WorkflowID != options.workflowID {
 		return nil, fmt.Errorf("server returned job %s outside selected workflow %s; coordinator reconciliation required", claim.Job.ID, options.workflowID)
 	}
+	if options.simlockLease != nil && simlockDeviceJob(claim.Job) {
+		if err := options.simlockLease.validateJob(claim.Job); err != nil {
+			return nil, err
+		}
+	}
 	return &claim, nil
 }
 
@@ -6977,6 +6991,11 @@ func handleDevSessionStopJob(client *http.Client, options runnerOnceOptions, reg
 }
 
 func handleDevSessionOpenJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
+		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
+			return handleDevSessionOpenJob(client, scoped, registration, job, stdout)
+		})
+	}
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
@@ -7304,6 +7323,11 @@ func claimAndHandleSimulatorOpen(client *http.Client, options runnerOnceOptions,
 }
 
 func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
+		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
+			return handleSimulatorOpenJob(client, scoped, registration, job, stdout)
+		})
+	}
 	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
@@ -7488,6 +7512,11 @@ func claimAndHandleMaestroRun(client *http.Client, options runnerOnceOptions, re
 }
 
 func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
+		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
+			return handleMaestroRunJob(client, scoped, registration, job, stdout)
+		})
+	}
 	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
@@ -9754,7 +9783,15 @@ func heartbeatRunnerJob(client *http.Client, options runnerOnceOptions, registra
 }
 
 func runnerJobCancellationCheck(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob) func() (bool, error) {
-	return runnerJobCancellationCheckWithClock(client, options, registration, job, time.Now)
+	check := runnerJobCancellationCheckWithClock(client, options, registration, job, time.Now)
+	return func() (bool, error) {
+		if options.simlockLease != nil {
+			if err := options.simlockLease.alive(); err != nil {
+				return false, err
+			}
+		}
+		return check()
+	}
 }
 
 func claimAndHandleDevelopmentAfterReadiness(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
@@ -10233,6 +10270,11 @@ func easBuildSetupRequired(err error, job apiRunnerJob, profileName string) map[
 }
 
 func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
+	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
+		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
+			return handleDeviceDiscoveryJob(client, scoped, registration, job, stdout)
+		})
+	}
 	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
@@ -10281,6 +10323,9 @@ func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, re
 }
 
 func reportDiscoveryTargets(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob) (runnerTargetsData, error) {
+	if options.simlockLease != nil {
+		return reportSimlockDiscoveryTargets(client, options, registration)
+	}
 	if job.Payload.Platform == "android" {
 		adbDevicesOutput, err := loadADBDevices(options)
 		if err != nil {
@@ -12604,7 +12649,7 @@ func openExpoDevelopmentClient(logFile *os.File, options runnerOnceOptions, plat
 		// launcher, never loads the JS bundle, and the Maestro smoke times out
 		// waiting for the app's first screen. Best-effort accept it here so the
 		// bundle starts loading before maestro.run begins.
-		acceptIOSDevClientOpenDialog(logFile, openProviderIdentity)
+		acceptIOSDevClientOpenDialog(logFile, openProviderIdentity, options)
 		return nil
 	default:
 		return nil
@@ -12690,7 +12735,7 @@ func rebuildDeepLinkWithScheme(deepLinkURL string, scheme string) string {
 // and the tap is optional: when no dialog is present (e.g. the `expo run:ios`
 // open path already foregrounded the app) it is a harmless no-op, so this never
 // regresses apps that launch cleanly.
-func acceptIOSDevClientOpenDialog(logFile *os.File, udid string) {
+func acceptIOSDevClientOpenDialog(logFile *os.File, udid string, options runnerOnceOptions) {
 	maestroPath, err := exec.LookPath("maestro")
 	if err != nil {
 		fmt.Fprintf(logFile, "skip dev-client open-dialog accept: maestro not on PATH: %v\n", err)
@@ -12711,6 +12756,12 @@ func acceptIOSDevClientOpenDialog(logFile *os.File, udid string) {
 	}
 	_ = flow.Close()
 	command := exec.Command(maestroPath, "--device", udid, "--platform", "ios", "test", flowPath)
+	if options.simlockLease != nil {
+		if err := isolateSimlockIOSMaestro(command); err != nil {
+			fmt.Fprintf(logFile, "skip dev-client open-dialog accept: %v\n", err)
+			return
+		}
+	}
 	command.Env = maestroCommandEnv(os.Environ())
 	flush := attachRedactedCommandLog(command, logFile)
 	if err := runCommandWithTimeoutAndCancellation(command, 2*time.Minute, nil, runnerPollInterval()); err != nil {
@@ -13013,6 +13064,18 @@ func runMaestroSmoke(
 		"--output",
 		relativeReportPath,
 	)
+	if options.simlockLease != nil && jobPlatform(job) == "android" {
+		args, err := simlockAndroidMaestroArgs(providerIdentity)
+		if err != nil {
+			return artifacts, err
+		}
+		command.Args = append([]string{command.Path}, append(args, command.Args[5:]...)...)
+	}
+	if options.simlockLease != nil && jobPlatform(job) == "ios" {
+		if err := isolateSimlockIOSMaestro(command); err != nil {
+			return artifacts, err
+		}
+	}
 	appID := resolveMaestroAppID(options, job, providerIdentity)
 	// Android 13+ shows a runtime POST_NOTIFICATIONS system dialog on first
 	// launch. It belongs to a different package (permissioncontroller), so a

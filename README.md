@@ -226,3 +226,23 @@ including stream offers and lease recovery. The runner refuses this option
 against a server that does not advertise workflow claim support. Checkout,
 capability, source and resource admission checks still apply; this option does
 not reserve the host or increase its build capacity.
+
+
+### Shared SimLock devices
+
+`preflight runner once --simlock` (or `PREFLIGHT_SIMLOCK=1`) leases a local
+simulator/emulator for its workflow, renews it through native build and Maestro
+validation, and returns it on exit. T3 Code can keep using its SimLock gateway;
+local and gateway clients consume the same worker slots. Do not pass a pinned
+simulator UDID with this mode. Workflow-scoped claims must be supported by the
+control plane. Resuming a job tied to an expired device requires rediscovery.
+
+iOS requires Xcode 27+ for the isolated device set. Maestro's iOS process runs
+with Android ADB/console ports denied through macOS `sandbox-exec`, so its
+cross-platform discovery cannot probe another client's Android device.
+Android Maestro uses the grant's direct emulator endpoint rather than default
+ADB discovery. The existing physical-device lanes are unchanged.
+
+Run `go test ./...` for the runner checks. On a configured worker, opt into the
+real lease/Settings-flow check with `PREFLIGHT_SIMLOCK_LIVE=ios` or `android`
+and `go test ./cmd/preflight -run '^TestSimlockLive$' -v -count=1`.
