@@ -362,3 +362,61 @@ func TestSimlockMaestroDoesNotReadForeignAVDMetadata(t *testing.T) {
 		t.Fatal("non-SimLock environment was changed")
 	}
 }
+
+func TestSimlockDiscoveryLeaseSpansNextClaim(t *testing.T) {
+	for _, dispatch := range []string{"generic", "development"} {
+		t.Run(dispatch, func(t *testing.T) {
+			dir := t.TempDir()
+			released := filepath.Join(dir, "released")
+			grant := simlockTestGrant(t, "android")
+			data, _ := json.Marshal(grant)
+			fake := "#!/bin/sh\ntrap 'touch " + simlockShellQuote(released) + "; exit 0' TERM\necho " + simlockShellQuote(string(data)) + "\nwhile :; do sleep 0.1; done\n"
+			if err := os.WriteFile(filepath.Join(dir, "simlock"), []byte(fake), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			claimed := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/targets/android-emulators"):
+					_, _ = w.Write([]byte(`{"data":{"targets":[{"id":"ours","providerIdentity":"emulator-5580","kind":"android_emulator","platform":"android","availability":"available"}]}}`))
+				case strings.HasSuffix(r.URL.Path, "/targets/ours/lock"):
+					_, _ = w.Write([]byte(`{"data":{"target":{"id":"ours","displayName":"Pixel 9"}}}`))
+				case strings.HasSuffix(r.URL.Path, "/claim"):
+					claimed = true
+					if _, err := os.Stat(released); err == nil {
+						t.Error("discovery released SimLock before the next job claim")
+					}
+					var body struct {
+						WorkflowID string `json:"workflowId"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if body.WorkflowID != "ours" {
+						t.Error("continuation lost SimLock workflow scope")
+					}
+					_, _ = w.Write([]byte(`{"data":null}`))
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			job := apiRunnerJob{ID: "discover", WorkflowID: "ours", Kind: "device.discover", Payload: runnerJobPayload{Platform: "android", Lane: "simulator", TargetClass: "simulator", SourceBinding: runnerJobSourceBinding{WorkspaceRoot: dir}}}
+			options := runnerOnceOptions{simlock: true, apiURL: server.URL, workspaceRoot: dir, hostIdentity: "test"}
+			var err error
+			if dispatch == "generic" {
+				err = handleRunnerClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, map[string]any{})
+			} else {
+				err = handleDevelopmentLaneClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, false)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !claimed {
+				t.Error("discovery did not continue")
+			}
+			if _, err := os.Stat(released); err != nil {
+				t.Error("lease did not release after sequence", err)
+			}
+		})
+	}
+}

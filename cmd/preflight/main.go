@@ -5651,6 +5651,11 @@ func handleRunnerClaim(
 	stdout io.Writer,
 	capabilities map[string]any,
 ) error {
+	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
+		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
+			return handleRunnerClaim(client, scoped, registration, job, stdout, capabilities)
+		})
+	}
 	// Track this as the in-flight job so a shutdown signal can release its lock.
 	markRunnerJobActive(client, options, registration, job)
 	defer clearRunnerJobActive()
@@ -10184,6 +10189,11 @@ func handleDevelopmentLaneClaim(
 	stdout io.Writer,
 	allowBuild bool,
 ) error {
+	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
+		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
+			return handleDevelopmentLaneClaim(client, scoped, registration, job, stdout, allowBuild)
+		})
+	}
 	switch job.Kind {
 	case "eas.build.dev":
 		if !allowBuild {
@@ -10270,11 +10280,6 @@ func easBuildSetupRequired(err error, job apiRunnerJob, profileName string) map[
 }
 
 func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
-	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
-		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
-			return handleDeviceDiscoveryJob(client, scoped, registration, job, stdout)
-		})
-	}
 	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
