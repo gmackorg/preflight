@@ -1141,16 +1141,10 @@ func waitForStoreBuild(client *http.Client, input apiCommandInput, appID string,
 	last := storeBuildRow{ID: buildID}
 	lastState := ""
 	for {
-		data, err := getPreflightWorkspaceJSON(client, input.endpoint("/api/v1/apps/"+url.PathEscape(appID)+"/builds?limit=50"), input.options["token"], input.workspaceID())
+		data, err := getPreflightWorkspaceJSON(client, input.endpoint("/api/preflight/v1/apps/"+url.PathEscape(appID)+"/store-builds/"+url.PathEscape(buildID)), input.options["token"], input.workspaceID())
 		if err == nil {
-			var builds []storeBuildRow
-			if decodeErr := json.Unmarshal(data, &builds); decodeErr == nil {
-				for _, build := range builds {
-					if build.ID == buildID {
-						last = build
-						break
-					}
-				}
+			if status, decodeErr := decodeStoreBuildStatus(data); decodeErr == nil {
+				last = status
 			}
 		}
 		state := last.Status + "/" + last.StoreUploadStatus
@@ -1166,6 +1160,37 @@ func waitForStoreBuild(client *http.Client, input apiCommandInput, appID string,
 		}
 		time.Sleep(pollInterval)
 	}
+}
+
+// storeBuildStatusResponse is GET /api/preflight/v1/apps/:id/store-builds/:buildId.
+type storeBuildStatusResponse struct {
+	Build             storeBuildRow `json:"build"`
+	StoreUploadStatus string        `json:"storeUploadStatus"`
+	ASCBuildID        string        `json:"ascBuildId"`
+	PlayVersionCode   string        `json:"playVersionCode"`
+	PlayReleaseStatus string        `json:"playReleaseStatus"`
+	Workflow          *struct {
+		Failure *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"failure"`
+	} `json:"workflow"`
+}
+
+func decodeStoreBuildStatus(data json.RawMessage) (storeBuildRow, error) {
+	var response storeBuildStatusResponse
+	if err := json.Unmarshal(data, &response); err != nil {
+		return storeBuildRow{}, err
+	}
+	build := response.Build
+	build.StoreUploadStatus = firstNonEmpty(response.StoreUploadStatus, build.StoreUploadStatus)
+	build.ASCBuildID = firstNonEmpty(response.ASCBuildID, build.ASCBuildID)
+	build.PlayVersionCode = firstNonEmpty(response.PlayVersionCode, build.PlayVersionCode)
+	build.PlayReleaseStatus = firstNonEmpty(response.PlayReleaseStatus, build.PlayReleaseStatus)
+	if response.Workflow != nil && response.Workflow.Failure != nil && build.ErrorMessage == "" {
+		build.ErrorMessage = strings.TrimSpace(response.Workflow.Failure.Code + ": " + response.Workflow.Failure.Message)
+	}
+	return build, nil
 }
 
 func storeBuildTerminal(build storeBuildRow, platform string) (bool, error) {

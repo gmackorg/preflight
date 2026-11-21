@@ -338,12 +338,12 @@ func storeBuildRoutes(platform string, progression []string) map[string]any {
 	polls := 0
 	return map[string]any{
 		"POST /api/preflight/v1/apps/pfapp_one/store-builds": `{"build":{"id":"pfbuild_1","platform":"` + platform + `","version":"1.4.0","buildNumber":"42","status":"queued","storeUploadStatus":"queued"},"workflow":{"id":"pfw_store"},"runnerJob":{"id":"pfjob_store","kind":"store.build","status":"queued"}}`,
-		"GET /api/v1/apps/pfapp_one/builds": func(*http.Request, []byte) string {
+		"GET /api/preflight/v1/apps/pfapp_one/store-builds/pfbuild_1": func(*http.Request, []byte) string {
 			mu.Lock()
 			defer mu.Unlock()
 			step := progression[min(polls, len(progression)-1)]
 			polls++
-			return `[{"id":"pfbuild_other","status":"completed"},` + step + `]`
+			return `{"build":` + step + `,"runnerJobs":[]}`
 		},
 	}
 }
