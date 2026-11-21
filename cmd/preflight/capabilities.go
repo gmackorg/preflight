@@ -31,7 +31,6 @@ import (
 var candidateLocalTools = []string{
 	"adb",
 	"avdmanager",
-	"eas",
 	"emulator",
 	"expo",
 	"fastlane",

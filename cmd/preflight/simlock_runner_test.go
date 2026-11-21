@@ -364,7 +364,9 @@ func TestSimlockMaestroDoesNotReadForeignAVDMetadata(t *testing.T) {
 }
 
 func TestSimlockDiscoveryLeaseSpansNextClaim(t *testing.T) {
-	for _, dispatch := range []string{"generic", "development"} {
+	// The development-lane dispatcher went away with eas.build.dev (PREFLT-66);
+	// discovery continues through the generic claim handler only.
+	for _, dispatch := range []string{"generic"} {
 		t.Run(dispatch, func(t *testing.T) {
 			dir := t.TempDir()
 			released := filepath.Join(dir, "released")
@@ -402,12 +404,7 @@ func TestSimlockDiscoveryLeaseSpansNextClaim(t *testing.T) {
 			defer server.Close()
 			job := apiRunnerJob{ID: "discover", WorkflowID: "ours", Kind: "device.discover", Payload: runnerJobPayload{Platform: "android", Lane: "simulator", TargetClass: "simulator", SourceBinding: runnerJobSourceBinding{WorkspaceRoot: dir}}}
 			options := runnerOnceOptions{simlock: true, apiURL: server.URL, workspaceRoot: dir, hostIdentity: "test"}
-			var err error
-			if dispatch == "generic" {
-				err = handleRunnerClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, map[string]any{})
-			} else {
-				err = handleDevelopmentLaneClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, false)
-			}
+			err := handleRunnerClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, map[string]any{})
 			if err != nil {
 				t.Fatal(err)
 			}

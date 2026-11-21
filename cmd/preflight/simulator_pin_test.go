@@ -44,7 +44,7 @@ func TestPinnedSimulatorMissingFromInventoryFailsClosed(t *testing.T) {
 
 func TestPinnedSimulatorRejectsForeignDeviceJobsBeforeSourceOrNativeCommands(t *testing.T) {
 	options := runnerOnceOptions{simulatorUDID: "PINNED", xcrunPath: filepath.Join(t.TempDir(), "no-live-xcrun")}
-	for _, kind := range []string{"simulator.open", "maestro.run", "dev_session.start", "dev_session.open", "eas.build.dev"} {
+	for _, kind := range []string{"simulator.open", "maestro.run", "dev_session.start", "dev_session.open"} {
 		job := apiRunnerJob{Kind: kind, Payload: runnerJobPayload{Platform: "ios", Lane: "simulator", ProviderIdentity: "OTHER"}}
 		if err := validateRunnerJobSourceBinding(options, job); err == nil {
 			t.Errorf("%s accepted foreign simulator", kind)

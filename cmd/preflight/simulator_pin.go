@@ -12,7 +12,7 @@ func validatePinnedSimulatorJob(options runnerOnceOptions, job apiRunnerJob) err
 		return nil
 	}
 	switch job.Kind {
-	case "simulator.open", "maestro.run", "dev_session.start", "dev_session.open", "eas.build.dev":
+	case "simulator.open", "maestro.run", "dev_session.start", "dev_session.open":
 		if !strings.EqualFold(pinned, provider) {
 			return sourceBindingMismatch("simulatorUDID", pinned, provider)
 		}

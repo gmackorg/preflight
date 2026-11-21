@@ -39,8 +39,6 @@ import (
 
 const contractVersion = "2026-05-20"
 const defaultMaestroSmokeTimeout = 10 * time.Minute
-const defaultEASReadinessTimeout = 2 * time.Minute
-const defaultEASBuildTimeout = 45 * time.Minute
 const defaultExpoConfigTimeout = 30 * time.Second
 
 // A cold Metro bundle for a real Expo app outruns two minutes. streamConductor
@@ -1329,12 +1327,6 @@ func runProvidersVerify(args []string, stdout io.Writer, stderr io.Writer, clien
 	if options["provider"] == "android_local" {
 		return runProvidersVerifyAndroidLocal(options, credentialRefs, stdout, stderr, client)
 	}
-	if options["provider"] == "expo" {
-		return runProvidersVerifyExpo(options, credentialRefs, stdout, stderr, client)
-	}
-	if options["provider"] == "eas" {
-		return runProvidersVerifyEAS(options, credentialRefs, stdout, stderr, client)
-	}
 	if options["provider"] == "google_play" {
 		return runProvidersVerifyGooglePlay(options, credentialRefs, stdout, stderr, client)
 	}
@@ -1391,141 +1383,6 @@ func runProvidersVerify(args []string, stdout io.Writer, stderr io.Writer, clien
 				"apiURL": strings.TrimRight(options["ascAPIURL"], "/"),
 				"keyId":  options["keyId"],
 			},
-		},
-		stdout,
-		stderr,
-	)
-}
-
-func runProvidersVerifyExpo(options map[string]string, credentialRefs []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	_, env, err := providerExpoToken(options)
-	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
-		return 2
-	}
-
-	output, commandErr := runEASCommandWithEnv(providerAppDir(options), env, "whoami")
-	accountName := strings.TrimSpace(string(output))
-	probe := providerProbeResult{
-		Status: "ready",
-		Facts: map[string]any{
-			"accountName":      accountName,
-			"credentialSource": "preflight_secret_ref",
-			"tokenEnv":         providerExpoTokenEnv(options),
-			"cliCommand":       "eas whoami",
-			"nonInteractive":   true,
-		},
-	}
-	if commandErr != nil {
-		probe = providerProbeResult{
-			Status:         "blocked",
-			BlockerCode:    "expo_token_auth_failed",
-			BlockerMessage: commandErr.Error(),
-			Facts: map[string]any{
-				"credentialSource": "preflight_secret_ref",
-				"tokenEnv":         providerExpoTokenEnv(options),
-				"cliCommand":       "eas whoami",
-				"nonInteractive":   true,
-			},
-		}
-	}
-	providerStatus := "connected"
-	if probe.Status != "ready" {
-		providerStatus = "degraded"
-	}
-	externalIDs := map[string]string{}
-	if accountName != "" {
-		externalIDs["accountName"] = accountName
-	}
-
-	return recordProviderVerification(
-		client,
-		options,
-		credentialRefs,
-		providerVerificationRecord{
-			Provider:       "expo",
-			ProviderStatus: providerStatus,
-			ExternalIDs:    externalIDs,
-			Capabilities:   []string{"expo.api.auth", "expo.account.read"},
-			Readiness:      probe,
-			Capability:     "expo.api.auth",
-			AdapterVersion: "preflight-cli@expo.v1",
-			Facts:          probe.Facts,
-		},
-		stdout,
-		stderr,
-	)
-}
-
-func runProvidersVerifyEAS(options map[string]string, credentialRefs []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	_, env, err := providerExpoToken(options)
-	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
-		return 2
-	}
-
-	appDir := providerAppDir(options)
-	output, commandErr := runEASCommandWithEnv(appDir, env, "config", "--json", "--non-interactive")
-	externalIDs := map[string]string{}
-	facts := map[string]any{
-		"appDir":           appDir,
-		"credentialSource": "preflight_secret_ref",
-		"tokenEnv":         providerExpoTokenEnv(options),
-		"cliCommand":       "eas config --json --non-interactive",
-		"nonInteractive":   true,
-	}
-	probe := providerProbeResult{Status: "ready"}
-	if commandErr != nil {
-		probe = providerProbeResult{
-			Status:         "blocked",
-			BlockerCode:    "eas_non_interactive_probe_failed",
-			BlockerMessage: commandErr.Error(),
-			Facts:          facts,
-		}
-	} else {
-		parsedExternalIDs, parsedFacts, parseErr := parseEASProviderConfigOutput(output)
-		for key, value := range parsedExternalIDs {
-			externalIDs[key] = value
-		}
-		for key, value := range parsedFacts {
-			facts[key] = value
-		}
-		if parseErr != nil {
-			probe = providerProbeResult{
-				Status:         "blocked",
-				BlockerCode:    "eas_config_parse_failed",
-				BlockerMessage: parseErr.Error(),
-				Facts:          facts,
-			}
-		} else if strings.TrimSpace(externalIDs["projectId"]) == "" {
-			probe = providerProbeResult{
-				Status:         "blocked",
-				BlockerCode:    "eas_project_id_missing",
-				BlockerMessage: "EAS config did not include extra.eas.projectId.",
-				Facts:          facts,
-			}
-		} else {
-			probe.Facts = facts
-		}
-	}
-	providerStatus := "connected"
-	if probe.Status != "ready" {
-		providerStatus = "degraded"
-	}
-
-	return recordProviderVerification(
-		client,
-		options,
-		credentialRefs,
-		providerVerificationRecord{
-			Provider:       "eas",
-			ProviderStatus: providerStatus,
-			ExternalIDs:    externalIDs,
-			Capabilities:   []string{"eas.cli.auth", "eas.project.config"},
-			Readiness:      probe,
-			Capability:     "eas.project.config",
-			AdapterVersion: "preflight-cli@eas.v1",
-			Facts:          probe.Facts,
 		},
 		stdout,
 		stderr,
@@ -2020,10 +1877,6 @@ func providerVerificationCredentialFlowNextAction(record providerVerificationRec
 		return "ready"
 	}
 	switch record.Provider {
-	case "expo":
-		return "preflight credentials create --provider expo --purpose api_token --key EXPO_TOKEN --lane development --value-env EXPO_TOKEN"
-	case "eas":
-		return "preflight providers verify --provider eas --credential-ref <EXPO_TOKEN_SECRET_REF> --app-dir <APP_DIR>"
 	case "google_oauth", "apple_oauth":
 		return "preflight oauth-clients configure --app-dir <APP_DIR> --all-required"
 	case "app_store_connect":
@@ -2056,85 +1909,6 @@ func providerVerificationCredentialFlowMetadata(record providerVerificationRecor
 		metadata["facts"] = record.Readiness.Facts
 	}
 	return metadata
-}
-
-func providerExpoTokenEnv(options map[string]string) string {
-	if value := strings.TrimSpace(options["tokenEnv"]); value != "" {
-		return value
-	}
-	return "EXPO_TOKEN"
-}
-
-func providerExpoToken(options map[string]string) (string, map[string]string, error) {
-	envName := providerExpoTokenEnv(options)
-	token := strings.TrimSpace(os.Getenv(envName))
-	if token == "" {
-		return "", nil, fmt.Errorf("environment variable %s is empty", envName)
-	}
-	return token, map[string]string{"EXPO_TOKEN": token}, nil
-}
-
-func providerAppDir(options map[string]string) string {
-	if value := strings.TrimSpace(options["appDir"]); value != "" {
-		return value
-	}
-	return "."
-}
-
-func parseEASProviderConfigOutput(output []byte) (map[string]string, map[string]any, error) {
-	var decoded map[string]any
-	if err := decodeEASJSONOutput(output, &decoded); err != nil {
-		return nil, nil, fmt.Errorf("decode EAS config JSON output: %w", err)
-	}
-	expoConfig, _ := decoded["expo"].(map[string]any)
-	if expoConfig == nil {
-		expoConfig = decoded
-	}
-
-	projectID := readNestedMapString(expoConfig, "extra", "eas", "projectId")
-	if projectID == "" {
-		projectID = readNestedMapString(decoded, "extra", "eas", "projectId")
-	}
-	owner := readMapString(expoConfig, "owner")
-	slug := readMapString(expoConfig, "slug")
-	name := readMapString(expoConfig, "name")
-	profiles := easProviderBuildProfiles(decoded)
-
-	externalIDs := map[string]string{}
-	if projectID != "" {
-		externalIDs["projectId"] = projectID
-	}
-	if owner != "" {
-		externalIDs["owner"] = owner
-	}
-	if slug != "" {
-		externalIDs["slug"] = slug
-	}
-
-	return externalIDs, map[string]any{
-		"projectId":         projectID,
-		"owner":             owner,
-		"slug":              slug,
-		"name":              name,
-		"buildProfileCount": len(profiles),
-		"buildProfiles":     profiles,
-	}, nil
-}
-
-func easProviderBuildProfiles(config map[string]any) []string {
-	var build map[string]any
-	if easConfig, ok := config["eas"].(map[string]any); ok {
-		build, _ = easConfig["build"].(map[string]any)
-	}
-	if build == nil {
-		build, _ = config["build"].(map[string]any)
-	}
-	profiles := make([]string, 0, len(build))
-	for profile := range build {
-		profiles = append(profiles, profile)
-	}
-	sort.Strings(profiles)
-	return profiles
 }
 
 func runProviderLocalCommand(name string, args ...string) (string, error) {
@@ -4568,9 +4342,6 @@ func readSetupWorkflow(client *http.Client, options setupOptions) (setupWorkflow
 func setupRequiredJob(read setupWorkflowRead) (apiRunnerJob, map[string]any, error) {
 	for index := len(read.RunnerJobs) - 1; index >= 0; index -= 1 {
 		job := read.RunnerJobs[index]
-		if job.Kind != "eas.readiness.probe" && job.Kind != "eas.build.dev" {
-			continue
-		}
 		if job.Result == nil || job.Result["status"] != "setup_required" {
 			continue
 		}
@@ -4580,7 +4351,7 @@ func setupRequiredJob(read setupWorkflowRead) (apiRunnerJob, map[string]any, err
 		}
 		return job, setupRequired, nil
 	}
-	return apiRunnerJob{}, nil, fmt.Errorf("workflow is not blocked on EAS setup")
+	return apiRunnerJob{}, nil, fmt.Errorf("workflow is not blocked on setup")
 }
 
 func setupAppDir(options setupOptions, job apiRunnerJob) (string, error) {
@@ -4733,8 +4504,6 @@ func validateGuidedSetupCommand(parts []string) error {
 	switch parts[0] {
 	case "preflight":
 		return validatePreflightSetupCommand(parts)
-	case "eas":
-		return validateEASSetupCommand(parts)
 	case "expo":
 		return validateExpoSetupCommand(parts)
 	case "gcloud":
@@ -4756,19 +4525,14 @@ func validateGuidedSetupCommand(parts []string) error {
 
 func validateNPXSetupCommand(parts []string) error {
 	if len(parts) < 2 {
-		return fmt.Errorf("setup command %q is missing an Expo or EAS tool", parts[0])
+		return fmt.Errorf("setup command %q is missing an Expo tool", parts[0])
 	}
 	switch parts[1] {
 	case "expo":
 		if len(parts) < 3 {
-			return fmt.Errorf("setup command %q is missing an Expo or EAS tool", parts[0])
+			return fmt.Errorf("setup command %q is missing an Expo tool", parts[0])
 		}
 		return validateExpoSetupCommand(append([]string{"expo"}, parts[2:]...))
-	case "eas-cli":
-		if len(parts) < 3 {
-			return fmt.Errorf("setup command %q is missing an EAS action", strings.Join(parts[:2], " "))
-		}
-		return validateEASSetupCommand(append([]string{"eas"}, parts[2:]...))
 	default:
 		return fmt.Errorf("setup command %q is not allowlisted", strings.Join(parts[:2], " "))
 	}
@@ -4790,18 +4554,6 @@ func validateExpoSetupCommand(parts []string) error {
 	}
 	switch parts[1] {
 	case "install", "doctor":
-		return nil
-	default:
-		return fmt.Errorf("setup command %q is not allowlisted", strings.Join(parts[:2], " "))
-	}
-}
-
-func validateEASSetupCommand(parts []string) error {
-	if len(parts) < 2 {
-		return fmt.Errorf("setup command %q is missing an EAS action", parts[0])
-	}
-	switch parts[1] {
-	case "build", "build:configure", "credentials", "credentials:configure-build", "device:create":
 		return nil
 	default:
 		return fmt.Errorf("setup command %q is not allowlisted", strings.Join(parts[:2], " "))
@@ -5117,9 +4869,9 @@ func recordSetupTranscript(
 	redactedContent string,
 	changedFiles []string,
 ) (setupTranscriptRecordData, error) {
-	summary := "EAS setup command completed."
+	summary := "Setup command completed."
 	if status != "completed" {
-		summary = "EAS setup command failed."
+		summary = "Setup command failed."
 	}
 	data, err := postPreflightJSON(
 		client,
@@ -5237,7 +4989,7 @@ func stringSliceFromMap(value map[string]any, key string) []string {
 }
 
 func redactSetupTranscriptText(value string) string {
-	redacted := regexp.MustCompile(`(?i)\b(EAS_TOKEN|EXPO_TOKEN|SENTRY_AUTH_TOKEN|ASC_API_KEY|APP_STORE_CONNECT_API_KEY|GOOGLE_PLAY_SERVICE_ACCOUNT)\s*=\s*([^\s&]+)`).ReplaceAllString(value, "$1=[REDACTED]")
+	redacted := regexp.MustCompile(`(?i)\b([A-Z0-9_]*_TOKEN|ASC_API_KEY|APP_STORE_CONNECT_API_KEY|GOOGLE_PLAY_SERVICE_ACCOUNT)\s*=\s*([^\s&]+)`).ReplaceAllString(value, "$1=[REDACTED]")
 	redacted = regexp.MustCompile(`(?i)\b(Authorization:\s*Bearer\s+)([^\s]+)`).ReplaceAllString(redacted, "$1[REDACTED]")
 	redacted = regexp.MustCompile(`(?i)([?&](?:access_token|token|auth|api_key|secret|signature|key)=)([^&#\s]+)`).ReplaceAllString(redacted, "$1[REDACTED]")
 	redacted = regexp.MustCompile(`(?i)(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|private[_-]?key|signing[_-]?secret|client[_-]?secret)["']?\s*[:=]\s*["']?)([^"',\s}]+)(["']?)`).ReplaceAllString(redacted, "$1[REDACTED]$3")
@@ -5676,13 +5428,6 @@ func handleRunnerClaim(
 		}
 		fmt.Fprintf(stdout, "completed capability probe %s\n", job.ID)
 		return claimAndHandleNextRunnerJob(client, options, registration, stdout, capabilities)
-	case "eas.readiness.probe":
-		if err := handleEASReadinessProbeJob(client, options, registration, job, stdout); err != nil {
-			return err
-		}
-		return claimAndHandleNextRunnerJob(client, options, registration, stdout, capabilities)
-	case "eas.build.dev":
-		return handleEASBuildDevJob(client, options, registration, job, stdout)
 	case "device.discover":
 		if err := handleDeviceDiscoveryJob(client, options, registration, job, stdout); err != nil {
 			return err
@@ -5711,8 +5456,6 @@ func handleRunnerClaim(
 		return handleUnityReadinessJob(client, options, registration, job, stdout)
 	case "fastlane.produce", "fastlane.metadata", "fastlane.screenshots":
 		return handleFastlaneJob(client, options, registration, job, stdout)
-	case "eas.submit":
-		return handleEASSubmitJob(client, options, registration, job, stdout)
 	case "ota.export", "ota.publish", "ota.fingerprint":
 		return handleOtaJob(client, options, registration, job, stdout)
 	case "store.build":
@@ -5733,8 +5476,6 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 		"android.sdk.management",
 		"apple_oauth.management",
 		"app_store_connect.api",
-		"eas.development",
-		"eas.cli",
 		"expo.dev_client",
 		"expo.dev_server",
 		"expo.local_build",
@@ -6613,31 +6354,6 @@ func completeCapabilityProbe(client *http.Client, options runnerOnceOptions, reg
 	})
 }
 
-func claimAndHandleDevSessionStart(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
-	claim, err := claimRunnerJob(client, options, registration)
-	if err != nil {
-		return err
-	}
-	if claim == nil {
-		return nil
-	}
-	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
-	if claim.Job.Kind != "dev_session.start" {
-		return fmt.Errorf("unsupported runner job kind %q", claim.Job.Kind)
-	}
-	continueWorkflow, err := handleDevSessionStartJob(client, options, registration, claim.Job, stdout)
-	if err != nil {
-		return err
-	}
-	if !continueWorkflow {
-		return nil
-	}
-	if isDevelopmentDevSessionJob(claim.Job) {
-		return claimAndHandleDevSessionOpen(client, options, registration, stdout)
-	}
-	return claimAndHandleSimulatorOpen(client, options, registration, stdout)
-}
-
 func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) (bool, error) {
 	defer startJobHeartbeat(client, options, registration, job)()
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
@@ -6965,21 +6681,6 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 	return true, nil
 }
 
-func claimAndHandleDevSessionOpen(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
-	claim, err := claimRunnerJob(client, options, registration)
-	if err != nil {
-		return err
-	}
-	if claim == nil {
-		return nil
-	}
-	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
-	if claim.Job.Kind != "dev_session.open" {
-		return fmt.Errorf("unsupported runner job kind %q", claim.Job.Kind)
-	}
-	return handleDevSessionOpenJob(client, options, registration, claim.Job, stdout)
-}
-
 func handleDevSessionStopJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
 	if err := validateRunnerJobSourceBinding(options, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
@@ -7188,35 +6889,9 @@ func resolveAndroidAPKPath(appDir string, job apiRunnerJob, installURL string) (
 		return path, nil
 	}
 
-	buildID := readMapString(job.Payload.DevBuild, "buildId")
-	if buildID == "" {
-		return "", fmt.Errorf("Android development build did not include a local APK path or EAS build id")
-	}
-	output, err := runEASCommandWithTimeoutAndCancellation(
-		appDir,
-		easBuildTimeout(),
-		nil,
-		nil,
-		"build:download",
-		"--build-id",
-		buildID,
-		"--json",
-		"--non-interactive",
-	)
-	if err != nil {
-		return "", fmt.Errorf("download Android development build artifact: %w", err)
-	}
-	apkPath, err := parseEASBuildDownloadOutput(output)
-	if err != nil {
-		return "", err
-	}
-	if !filepath.IsAbs(apkPath) {
-		apkPath = filepath.Join(appDir, apkPath)
-	}
-	if err := ensureAPKExists(apkPath); err != nil {
-		return "", err
-	}
-	return apkPath, nil
+	// Development APKs are built on the runner (expo prebuild + gradle); the
+	// install URL is the local file path that build recorded.
+	return "", fmt.Errorf("Android development build did not include a local APK path")
 }
 
 func localAndroidAPKPath(installURL string) (string, bool) {
@@ -7243,57 +6918,6 @@ func ensureAPKExists(path string) error {
 		return fmt.Errorf("Android APK artifact path is a directory: %s", path)
 	}
 	return nil
-}
-
-func parseEASBuildDownloadOutput(output []byte) (string, error) {
-	trimmed := bytes.TrimSpace(output)
-	if len(trimmed) == 0 {
-		return "", fmt.Errorf("EAS build download output was empty")
-	}
-	var decoded any
-	if err := json.Unmarshal(trimmed, &decoded); err != nil {
-		path := string(trimmed)
-		if strings.HasSuffix(strings.ToLower(path), ".apk") {
-			return path, nil
-		}
-		return "", fmt.Errorf("decode EAS build download JSON output: %w", err)
-	}
-
-	switch value := decoded.(type) {
-	case string:
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value), nil
-		}
-	case map[string]any:
-		if path := readEASDownloadPath(value); path != "" {
-			return path, nil
-		}
-	case []any:
-		for _, item := range value {
-			if record, ok := item.(map[string]any); ok {
-				if path := readEASDownloadPath(record); path != "" {
-					return path, nil
-				}
-			}
-		}
-	}
-	return "", fmt.Errorf("EAS build download output did not include an APK path")
-}
-
-func readEASDownloadPath(record map[string]any) string {
-	for _, key := range []string{"path", "artifactPath", "applicationArchivePath"} {
-		if value := readMapString(record, key); value != "" {
-			return value
-		}
-	}
-	if artifacts, ok := record["artifacts"].(map[string]any); ok {
-		for _, key := range []string{"applicationArchivePath", "artifactPath", "path"} {
-			if value := readMapString(artifacts, key); value != "" {
-				return value
-			}
-		}
-	}
-	return ""
 }
 
 func androidDevelopmentOpenFailureCode(err error) string {
@@ -7327,21 +6951,6 @@ func developmentOpenTargetClass(job apiRunnerJob) string {
 		return "ios_simulator"
 	}
 	return "ios_device"
-}
-
-func claimAndHandleSimulatorOpen(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
-	claim, err := claimRunnerJob(client, options, registration)
-	if err != nil {
-		return err
-	}
-	if claim == nil {
-		return nil
-	}
-	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
-	if claim.Job.Kind != "simulator.open" {
-		return fmt.Errorf("unsupported runner job kind %q", claim.Job.Kind)
-	}
-	return handleSimulatorOpenJob(client, options, registration, claim.Job, stdout)
 }
 
 func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
@@ -8654,190 +8263,6 @@ func handleFastlaneJob(client *http.Client, options runnerOnceOptions, registrat
 	return nil
 }
 
-// handleEASSubmitJob runs the one-click distribute: `eas build:submit --id
-// <easBuildId>` against an already-FINISHED EAS build. The submit profile in
-// the app's eas.json resolves ASC credentials via EXPO_ASC_* env placeholders,
-// which this handler materializes from the runner's PREFLIGHT_ASC_* env.
-// NOTE: eas-cli's own error/success message is unreliable for submits — the
-// server-side ASC reconciler is the source of truth for the final state; this
-// handler reports transport-level success/failure only.
-func handleEASSubmitJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
-	defer startJobHeartbeat(client, options, registration, job)()
-
-	easBuildID := strings.TrimSpace(job.Payload.EASBuildID)
-	if easBuildID == "" {
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":  "failed",
-			"failure": map[string]any{"code": "eas_submit_payload_invalid", "message": "eas.submit requires easBuildId"},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed eas.submit job %s missing easBuildId\n", job.ID)
-		return nil
-	}
-
-	appDir := appDirectoryForJob(options, job)
-
-	// A server-initiated distribute points at a Preflight CI checkout that may be
-	// absent or stale (cleaned under disk pressure — the dir can exist without a
-	// .git or eas.json). Make it match the source binding's commit before we
-	// read eas.json. Clone/reset only, no dependency install: submit reads
-	// eas.json/app.config and needs no node_modules, and a frozen install here
-	// would fail on any lockfile drift.
-	checkoutRoot := strings.TrimSpace(job.Payload.SourceBinding.WorkspaceRoot)
-	if checkoutRoot == "" {
-		checkoutRoot = options.workspaceRoot
-	}
-	if checkoutErr := ensureEASSubmitCheckout(checkoutRoot, job.Payload.SourceBinding); checkoutErr != nil {
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":  "failed",
-			"failure": map[string]any{"code": "eas_submit_checkout_failed", "message": checkoutErr.Error()},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed eas.submit job %s checkout: %s\n", job.ID, checkoutErr.Error())
-		return nil
-	}
-
-	easEnv, err := easSecretEnvForJob(client, options, registration, job)
-	if err != nil {
-		return err
-	}
-
-	// Headless ASC auth: write the API key JSON next to the app and expose the
-	// EXPO_ASC_* env the fleet's eas.json submit profiles reference. Missing
-	// ASC env is not fatal here — the submit profile may embed credentials.
-	if ascKeyPath, keyErr := writeASCApiKeyFile(appDir); keyErr != nil {
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":  "failed",
-			"failure": map[string]any{"code": "asc_auth_failed", "message": keyErr.Error()},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed eas.submit job %s %s\n", job.ID, keyErr.Error())
-		return nil
-	} else if ascKeyPath != "" {
-		easEnv["EXPO_ASC_API_KEY_PATH"] = ascKeyPath
-		if keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID")); keyID != "" {
-			easEnv["EXPO_ASC_KEY_ID"] = keyID
-		}
-		if issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID")); issuerID != "" {
-			easEnv["EXPO_ASC_ISSUER_ID"] = issuerID
-		}
-	}
-
-	// eas-cli reads the App Store Connect API key ONLY from eas.json's submit
-	// profile — not from env vars (the EXPO_ASC_* above) and not from CLI flags
-	// (build:submit has none). So a non-interactive submit fails with "App Store
-	// Connect API Keys cannot be set up in --non-interactive mode" unless the
-	// key is present in eas.json. Inject it from the runner's PREFLIGHT_ASC_*
-	// env into the checkout's eas.json before submitting.
-	if err := ensureEASSubmitASCKey(appDir, strings.TrimSpace(job.Payload.Profile)); err != nil {
-		fmt.Fprintf(stdout, "warning: eas.submit job %s could not inject ASC key into eas.json: %v\n", job.ID, err)
-	}
-
-	args := []string{
-		"build:submit",
-		"--platform", jobPlatformForEAS(job),
-		"--id", easBuildID,
-		"--non-interactive",
-		"--wait",
-	}
-	if profile := strings.TrimSpace(job.Payload.Profile); profile != "" {
-		args = append(args, "--profile", profile)
-	}
-
-	output, err := runEASCommandWithTimeoutAndCancellation(
-		appDir,
-		easSubmitTimeout(),
-		runnerJobCancellationCheck(client, options, registration, job),
-		easEnv,
-		args...,
-	)
-	if err != nil {
-		if jobLeaseLost(err) {
-			return err
-		}
-		if errors.Is(err, errCommandCancelled) {
-			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-				"status": "cancelled",
-			}); completeErr != nil {
-				return completeErr
-			}
-			fmt.Fprintf(stdout, "cancelled eas.submit job %s\n", job.ID)
-			return nil
-		}
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status": "failed",
-			"failure": map[string]any{
-				"code":    easSubmitFailureCode(err),
-				"message": err.Error(),
-			},
-			"output": truncateRunnerOutput(string(output)),
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed eas.submit job %s %s\n", job.ID, err.Error())
-		return nil
-	}
-
-	result := map[string]any{
-		"status":       "ok",
-		"submissionId": job.Payload.SubmissionID,
-		"easBuildId":   easBuildID,
-		"output":       truncateRunnerOutput(string(output)),
-	}
-	if ascSubmissionID := parseEASSubmitSubmissionID(string(output)); ascSubmissionID != "" {
-		result["ascSubmissionId"] = ascSubmissionID
-	}
-	if completeErr := completeRunnerJob(client, options, registration, job, result); completeErr != nil {
-		return completeErr
-	}
-	fmt.Fprintf(stdout, "completed eas.submit job %s (build %s)\n", job.ID, easBuildID)
-	return nil
-}
-
-func easSubmitTimeout() time.Duration {
-	if raw := strings.TrimSpace(os.Getenv("PREFLIGHT_EAS_SUBMIT_TIMEOUT")); raw != "" {
-		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
-			return parsed
-		}
-	}
-	return 30 * time.Minute
-}
-
-func easSubmitFailureCode(err error) string {
-	if err == nil {
-		return "eas_submit_failed"
-	}
-	message := err.Error()
-	if strings.Contains(message, "executable file not found") {
-		return "eas_cli_missing"
-	}
-	if strings.Contains(message, "command timed out") {
-		return "eas_submit_timeout"
-	}
-	if strings.Contains(message, "Invalid username and password") ||
-		strings.Contains(message, "authentication") ||
-		strings.Contains(message, "401") {
-		return "asc_auth_failed"
-	}
-	return "eas_submit_failed"
-}
-
-// parseEASSubmitSubmissionID pulls the EAS submission id out of eas-cli's
-// output (the /accounts/<acct>/projects/<proj>/submissions/<uuid> URL it
-// prints, or a bare "Submission ID" line). Best-effort: empty when absent.
-func parseEASSubmitSubmissionID(output string) string {
-	if match := regexp.MustCompile(`/submissions/([0-9a-fA-F-]{36})`).FindStringSubmatch(output); len(match) == 2 {
-		return match[1]
-	}
-	if match := regexp.MustCompile(`(?i)submission(?:\s+id)?[:\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`).FindStringSubmatch(output); len(match) == 2 {
-		return match[1]
-	}
-	return ""
-}
-
 func fastlaneFailureCode(err error) string {
 	if err == nil {
 		return "fastlane_failed"
@@ -9147,61 +8572,6 @@ func writeASCApiKeyFile(appDir string) (string, error) {
 		return "", err
 	}
 	return out, nil
-}
-
-// ensureEASSubmitASCKey injects App Store Connect API key credentials into the
-// checkout's eas.json submit profile so `eas build:submit --non-interactive`
-// can authenticate. eas-cli reads the ASC key ONLY from eas.json (not env, not
-// flags), so the fleet's runner-provided PREFLIGHT_ASC_* env is otherwise
-// unusable for submit. No-op when the env is incomplete, there is no eas.json,
-// or the profile already declares its own ascApiKeyPath.
-func ensureEASSubmitASCKey(appDir, profile string) error {
-	keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID"))
-	issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID"))
-	keyPath := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_PATH"))
-	if keyID == "" || issuerID == "" || keyPath == "" {
-		return nil
-	}
-	if strings.HasPrefix(keyPath, "~/") {
-		if home, homeErr := os.UserHomeDir(); homeErr == nil {
-			keyPath = filepath.Join(home, keyPath[2:])
-		}
-	}
-	if profile == "" {
-		profile = "production"
-	}
-	easJSONPath := filepath.Join(appDir, "eas.json")
-	raw, err := os.ReadFile(easJSONPath)
-	if err != nil {
-		return nil // no eas.json here — let eas-cli surface its own error
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil
-	}
-	nestedMap := func(parent map[string]any, key string) map[string]any {
-		if existing, ok := parent[key].(map[string]any); ok {
-			return existing
-		}
-		created := map[string]any{}
-		parent[key] = created
-		return created
-	}
-	ios := nestedMap(nestedMap(nestedMap(doc, "submit"), profile), "ios")
-	if _, ok := ios["ascApiKeyPath"]; ok {
-		return nil // app declares its own ASC key — respect it
-	}
-	ios["ascApiKeyPath"] = keyPath
-	ios["ascApiKeyId"] = keyID
-	ios["ascApiKeyIssuerId"] = issuerID
-	// An appleId in the submit profile forces Apple-ID (app-specific-password)
-	// auth, which cannot be set up non-interactively and shadows the API key.
-	delete(ios, "appleId")
-	patched, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(easJSONPath, append(patched, '\n'), 0o644)
 }
 
 func runFastlaneCommand(appDir string, cancellationCheck func() (bool, error), args ...string) ([]byte, error) {
@@ -9816,363 +9186,6 @@ func runnerJobCancellationCheck(client *http.Client, options runnerOnceOptions, 
 	}
 }
 
-func claimAndHandleDevelopmentAfterReadiness(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
-	claim, err := claimRunnerJob(client, options, registration)
-	if err != nil {
-		return err
-	}
-	if claim == nil {
-		return nil
-	}
-	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
-	return handleDevelopmentLaneClaim(client, options, registration, claim.Job, stdout, true)
-}
-
-func handleEASReadinessProbeJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
-		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
-	}
-
-	appDir := appDirectoryForJob(options, job)
-	profileName := easProfileNameForJob(job)
-	easEnv, err := easSecretEnvForJob(client, options, registration, job)
-	if err != nil {
-		return err
-	}
-	if jobRequiresPreflightExpoToken(job) && strings.TrimSpace(easEnv["EXPO_TOKEN"]) == "" {
-		setupRequired := expoTokenCredentialSetupRequired(options, job, "expo_token_secret_required", "Create a Preflight-owned Expo API token before EAS runs.")
-		if err := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":        "setup_required",
-			"setupRequired": setupRequired,
-		}); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "EAS setup required %s %s\n", job.ID, setupRequired["code"])
-		return nil
-	}
-	readiness, setupRequired := probeEASDevelopmentReadinessWithEnv(appDir, job.Payload.SourceBinding, profileName, job.Payload.TargetClass, jobPlatform(job), easEnv)
-	if setupRequired != nil {
-		setupRequired = contextualizeExpoTokenSetupRequired(setupRequired, options, job)
-		if err := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":        "setup_required",
-			"setupRequired": setupRequired,
-		}); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "EAS setup required %s %s\n", job.ID, setupRequired["code"])
-		return nil
-	}
-
-	result := map[string]any{
-		"status":    "ok",
-		"readiness": readiness,
-	}
-	if devBuild, ok := readiness["devBuild"].(map[string]any); ok {
-		result["devBuild"] = devBuild
-	}
-	if err := completeRunnerJob(client, options, registration, job, result); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "verified EAS readiness %s %s\n", job.ID, profileName)
-	return nil
-}
-
-func handleEASBuildDevJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
-	defer startJobHeartbeat(client, options, registration, job)()
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
-		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
-	}
-
-	appDir := appDirectoryForJob(options, job)
-	profileName := easProfileNameForJob(job)
-	// Production builds are produced only through CI. A runner outside a CI
-	// context must refuse the production profile rather than minting a store
-	// build locally — the Mobile Production Build workflow is the sanctioned path.
-	if isProductionBuildProfile(profileName) && !runningInCI() {
-		setupRequired := map[string]any{
-			"code": "production_build_ci_only",
-			"message": "Production builds run only through CI. Trigger the Mobile Production Build workflow " +
-				"instead of building the production profile on a runner.",
-			"commands": []string{"gh workflow run mobile-production.yml"},
-		}
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":        "setup_required",
-			"easBuild":      easBuildResultPayload(job, profileName),
-			"setupRequired": setupRequired,
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "production build refused (CI-only) %s %s\n", job.ID, profileName)
-		return nil
-	}
-	easEnv, err := easSecretEnvForJob(client, options, registration, job)
-	if err != nil {
-		return err
-	}
-	if jobRequiresPreflightExpoToken(job) && strings.TrimSpace(easEnv["EXPO_TOKEN"]) == "" {
-		setupRequired := expoTokenCredentialSetupRequired(options, job, "expo_token_secret_required", "Create a Preflight-owned Expo API token before EAS runs.")
-		if err := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":        "setup_required",
-			"easBuild":      easBuildResultPayload(job, profileName),
-			"setupRequired": setupRequired,
-		}); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "EAS setup required %s %s\n", job.ID, setupRequired["code"])
-		return nil
-	}
-	buildArgs := easBuildCommandArgs(job, profileName)
-	output, err := runEASCommandWithTimeoutAndCancellation(
-		appDir,
-		easBuildTimeout(),
-		runnerJobCancellationCheck(client, options, registration, job),
-		easEnv,
-		buildArgs...,
-	)
-	if err != nil {
-		if jobLeaseLost(err) {
-			return err
-		}
-		if errors.Is(err, errCommandCancelled) {
-			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-				"status":   "cancelled",
-				"easBuild": easBuildResultPayload(job, profileName),
-			}); completeErr != nil {
-				return completeErr
-			}
-			fmt.Fprintf(stdout, "cancelled EAS development build %s\n", job.ID)
-			return nil
-		}
-		wrappedErr := fmt.Errorf("run EAS development build: %w", err)
-		if setupRequired := easBuildSetupRequired(wrappedErr, job, profileName); setupRequired != nil {
-			setupRequired = contextualizeExpoTokenSetupRequired(setupRequired, options, job)
-			if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-				"status":        "setup_required",
-				"easBuild":      easBuildResultPayload(job, profileName),
-				"setupRequired": setupRequired,
-			}); completeErr != nil {
-				return completeErr
-			}
-			fmt.Fprintf(stdout, "EAS setup required %s %s\n", job.ID, setupRequired["code"])
-			return nil
-		}
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":   "failed",
-			"easBuild": easBuildResultPayload(job, profileName),
-			"failure": map[string]any{
-				"code":    easBuildFailureCode(wrappedErr),
-				"message": wrappedErr.Error(),
-			},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed EAS development build %s %s\n", job.ID, wrappedErr.Error())
-		return nil
-	}
-
-	devBuild, err := parseEASBuildOutput(output, profileName)
-	if err != nil {
-		return err
-	}
-	artifacts, err := writeEASBuildArtifacts(options, job, buildArgs, output, easEnv)
-	if err != nil {
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":   "failed",
-			"easBuild": easBuildResultPayload(job, profileName),
-			"failure": map[string]any{
-				"code":    "artifact_write_failed",
-				"message": err.Error(),
-			},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed EAS artifact write %s %s\n", job.ID, err.Error())
-		return nil
-	}
-	if err := uploadEASBuildArtifacts(client, options, registration, job, devBuild, artifacts); err != nil {
-		if completeErr := completeRunnerJob(client, options, registration, job, map[string]any{
-			"status":   "failed",
-			"easBuild": easBuildResultPayload(job, profileName),
-			"failure": map[string]any{
-				"code":    "artifact_upload_failed",
-				"message": err.Error(),
-			},
-		}); completeErr != nil {
-			return completeErr
-		}
-		fmt.Fprintf(stdout, "failed EAS artifact upload %s %s\n", job.ID, err.Error())
-		return nil
-	}
-	devBuild["outputPath"] = artifacts.OutputPath
-	devBuild["logPath"] = artifacts.LogPath
-	if err := completeRunnerJob(client, options, registration, job, map[string]any{
-		"status":   "ok",
-		"devBuild": devBuild,
-	}); err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "completed EAS development build %s %s\n", job.ID, devBuild["buildId"])
-	return claimAndHandlePostEASBuildDev(client, options, registration, stdout)
-}
-
-func easBuildCommandArgs(job apiRunnerJob, profileName string) []string {
-	return []string{
-		"build",
-		"--platform",
-		jobPlatformForEAS(job),
-		"--profile",
-		profileName,
-		"--json",
-		"--non-interactive",
-		"--wait",
-	}
-}
-
-type easBuildArtifacts struct {
-	OutputPath string
-	LogPath    string
-}
-
-func writeEASBuildArtifacts(options runnerOnceOptions, job apiRunnerJob, args []string, output []byte, env map[string]string) (easBuildArtifacts, error) {
-	root := job.Payload.SourceBinding.WorkspaceRoot
-	if root == "" {
-		root = options.workspaceRoot
-	}
-	runDir := filepath.Join(root, ".preflight", "eas", job.ID)
-	artifacts := easBuildArtifacts{
-		OutputPath: filepath.Join(runDir, "eas-build-output.json"),
-		LogPath:    filepath.Join(runDir, "eas-build.log"),
-	}
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return easBuildArtifacts{}, fmt.Errorf("create EAS artifact directory: %w", err)
-	}
-	redactedOutput := redactCommandOutput(string(output), env)
-	if err := os.WriteFile(artifacts.OutputPath, []byte(redactedOutput), 0o644); err != nil {
-		return easBuildArtifacts{}, fmt.Errorf("write EAS build output artifact: %w", err)
-	}
-	logContent := strings.Join([]string{
-		"$ eas " + strings.Join(args, " "),
-		redactedOutput,
-	}, "\n")
-	if err := os.WriteFile(artifacts.LogPath, []byte(logContent), 0o644); err != nil {
-		return easBuildArtifacts{}, fmt.Errorf("write EAS build log artifact: %w", err)
-	}
-	return artifacts, nil
-}
-
-func uploadEASBuildArtifacts(
-	client *http.Client,
-	options runnerOnceOptions,
-	registration runnerRegistrationData,
-	job apiRunnerJob,
-	devBuild map[string]any,
-	artifacts easBuildArtifacts,
-) error {
-	if !runnerArtifactUploadEnabled(registration) {
-		return nil
-	}
-	metadata := map[string]any{
-		"platform":    jobPlatformForEAS(job),
-		"profile":     easProfileNameForJob(job),
-		"targetClass": job.Payload.TargetClass,
-	}
-	if buildID := readMapString(devBuild, "buildId"); buildID != "" {
-		metadata["buildId"] = buildID
-	}
-	for _, artifact := range []runnerArtifactUpload{
-		{Kind: "tool_output", URI: artifacts.OutputPath},
-		{Kind: "log", URI: artifacts.LogPath},
-	} {
-		if err := uploadRunnerArtifact(client, options, registration, job, artifact.Kind, artifact.URI, "diagnostic", metadata); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func easSecretEnvForJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob) (map[string]string, error) {
-	env := map[string]string{}
-	for _, secretReference := range job.Payload.SecretReferences {
-		key := strings.TrimSpace(secretReference.Key)
-		if key == "" {
-			continue
-		}
-		if !isSafeEnvironmentKey(key) {
-			return nil, fmt.Errorf("secret reference %s has invalid environment key %q", secretReference.ID, key)
-		}
-		reveal, err := revealRunnerJobSecret(client, options, registration, job, secretReference.ID)
-		if err != nil {
-			return nil, fmt.Errorf("reveal secret %s for job %s: %w", secretReference.ID, job.ID, err)
-		}
-		env[key] = reveal.Value
-	}
-	return env, nil
-}
-
-func jobRequiresPreflightExpoToken(job apiRunnerJob) bool {
-	for _, required := range job.Payload.RequiredSecretReferences {
-		if required.Required &&
-			required.Provider == "expo" &&
-			required.Purpose == "api_token" &&
-			required.Key == "EXPO_TOKEN" {
-			return true
-		}
-	}
-	return false
-}
-
-func expoTokenCredentialSetupRequired(options runnerOnceOptions, job apiRunnerJob, code string, message string) map[string]any {
-	return setupRequired(code, message, expoTokenCredentialCreateCommand(options, job))
-}
-
-func contextualizeExpoTokenSetupRequired(setupRequired map[string]any, options runnerOnceOptions, job apiRunnerJob) map[string]any {
-	code := stringFromMap(setupRequired, "code")
-	if code != "expo_token_auth_failed" && code != "expo_token_secret_required" {
-		return setupRequired
-	}
-	contextualized := map[string]any{}
-	for key, value := range setupRequired {
-		contextualized[key] = value
-	}
-	contextualized["commands"] = []string{expoTokenCredentialCreateCommand(options, job)}
-	return contextualized
-}
-
-func expoTokenCredentialCreateCommand(options runnerOnceOptions, job apiRunnerJob) string {
-	workspaceID := strings.TrimSpace(options.workspaceID)
-	if workspaceID == "" {
-		workspaceID = strings.TrimSpace(job.WorkspaceID)
-	}
-	parts := []string{
-		"preflight",
-		"credentials",
-		"create",
-	}
-	if strings.TrimSpace(options.apiURL) != "" {
-		parts = append(parts, "--api-url", strings.TrimSpace(options.apiURL))
-	}
-	if workspaceID != "" {
-		parts = append(parts, "--workspace-id", workspaceID)
-	}
-	if strings.TrimSpace(job.AppID) != "" {
-		parts = append(parts, "--app-id", strings.TrimSpace(job.AppID))
-	}
-	parts = append(
-		parts,
-		"--provider",
-		"expo",
-		"--purpose",
-		"api_token",
-		"--key",
-		"EXPO_TOKEN",
-		"--lane",
-		"development",
-		"--value-env",
-		"EXPO_TOKEN",
-	)
-	return strings.Join(parts, " ")
-}
-
 func isSafeEnvironmentKey(key string) bool {
 	if key == "" {
 		return false
@@ -10184,116 +9197,6 @@ func isSafeEnvironmentKey(key string) bool {
 		return false
 	}
 	return true
-}
-
-func claimAndHandlePostEASBuildDev(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) error {
-	claim, err := claimRunnerJob(client, options, registration)
-	if err != nil {
-		return err
-	}
-	if claim == nil {
-		return nil
-	}
-	fmt.Fprintf(stdout, "claimed job %s %s\n", claim.Job.ID, claim.Job.Kind)
-	return handleDevelopmentLaneClaim(client, options, registration, claim.Job, stdout, false)
-}
-
-func handleDevelopmentLaneClaim(
-	client *http.Client,
-	options runnerOnceOptions,
-	registration runnerRegistrationData,
-	job apiRunnerJob,
-	stdout io.Writer,
-	allowBuild bool,
-) error {
-	if options.simlock && simlockDeviceJob(job) && options.simlockLease == nil {
-		return runWithSimlockRunnerLease(client, options, registration, job, stdout, func(scoped runnerOnceOptions) error {
-			return handleDevelopmentLaneClaim(client, scoped, registration, job, stdout, allowBuild)
-		})
-	}
-	switch job.Kind {
-	case "eas.build.dev":
-		if !allowBuild {
-			return fmt.Errorf("unsupported runner job kind %q", job.Kind)
-		}
-		return handleEASBuildDevJob(client, options, registration, job, stdout)
-	case "device.discover":
-		if err := handleDeviceDiscoveryJob(client, options, registration, job, stdout); err != nil {
-			return err
-		}
-		return claimAndHandleDevSessionStart(client, options, registration, stdout)
-	case "dev_session.start":
-		continueWorkflow, err := handleDevSessionStartJob(client, options, registration, job, stdout)
-		if err != nil {
-			return err
-		}
-		if !continueWorkflow {
-			return nil
-		}
-		if isDevelopmentDevSessionJob(job) {
-			return claimAndHandleDevSessionOpen(client, options, registration, stdout)
-		}
-		return claimAndHandleSimulatorOpen(client, options, registration, stdout)
-	case "dev_session.open":
-		return handleDevSessionOpenJob(client, options, registration, job, stdout)
-	case "dev_session.stop":
-		return handleDevSessionStopJob(client, options, registration, job, stdout)
-	default:
-		return fmt.Errorf("unsupported runner job kind %q", job.Kind)
-	}
-}
-
-func easBuildResultPayload(job apiRunnerJob, profileName string) map[string]any {
-	return map[string]any{
-		"profile":     profileName,
-		"platform":    jobPlatformForEAS(job),
-		"targetClass": readMapString(job.Payload.Readiness, "targetClass"),
-	}
-}
-
-func easBuildFailureCode(err error) string {
-	if err == nil {
-		return "eas_build_failed"
-	}
-	message := err.Error()
-	if strings.Contains(message, "command timed out") {
-		return "eas_build_timeout"
-	}
-	if strings.Contains(message, "executable file not found") || strings.Contains(message, "no such file") {
-		return "eas_cli_missing"
-	}
-	return "eas_build_failed"
-}
-
-func easBuildSetupRequired(err error, job apiRunnerJob, profileName string) map[string]any {
-	if err == nil {
-		return nil
-	}
-	message := err.Error()
-	if strings.Contains(message, "EXPO_TOKEN") ||
-		strings.Contains(strings.ToLower(message), "not logged in") ||
-		strings.Contains(strings.ToLower(message), "not authenticated") {
-		return expoTokenCredentialSetupRequired(
-			runnerOnceOptions{},
-			job,
-			"expo_token_auth_failed",
-			"Create or rotate Preflight's Expo API token; EAS rejected EXPO_TOKEN.",
-		)
-	}
-	if strings.Contains(message, "Failed to set up credentials") ||
-		strings.Contains(message, "couldn't find any credentials suitable for internal distribution") ||
-		strings.Contains(message, "Run this command again in interactive mode") {
-		platform := jobPlatformForEAS(job)
-		return setupRequired(
-			"eas_credentials_setup_required",
-			fmt.Sprintf(
-				"Run EAS build interactively so Expo can configure %s internal-distribution credentials.",
-				developmentPlatformLabel(platform),
-			),
-			fmt.Sprintf("eas build --platform %s --profile %s", platform, profileName),
-		)
-	}
-	return nil
 }
 
 func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
@@ -10823,70 +9726,6 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
 	if err := ensureCiDependencies(abs, resolved, binding.PackagePath); err != nil {
 		return err
-	}
-	return nil
-}
-
-// ensureEASSubmitCheckout makes a Preflight-owned CI checkout match the source
-// binding's commit before `eas build:submit` runs. Distribute is
-// server-initiated, so unlike a build/dev job there is no live developer CWD —
-// the derived checkout may be missing or stale (the dir can survive a cleanup
-// without its .git or eas.json). It clones/resets to the commit and installs JS
-// dependencies via ensureCiDependencies: `eas build:submit` evaluates the
-// app's Expo config (app.config.ts), which imports packages, so node_modules
-// must be present. ensureCiDependencies is drift-tolerant (frozen install, then
-// a non-frozen fallback), so a checkout whose committed lockfile has drifted
-// still resolves. No-op for developer checkouts (non-.preflight-ci roots) and
-// when there is no git ref to sync to.
-func ensureEASSubmitCheckout(workspaceRoot string, binding runnerJobSourceBinding) error {
-	if strings.TrimSpace(workspaceRoot) == "" {
-		return nil
-	}
-	abs, err := filepath.Abs(workspaceRoot)
-	if err != nil {
-		return nil
-	}
-	if !pathHasSegment(abs, ciCheckoutRootSegment) {
-		return nil // developer checkout — never touch it
-	}
-	remote := strings.TrimSpace(binding.GitRemoteURL)
-	sha := strings.TrimSpace(binding.GitCommitSHA)
-	branch := strings.TrimSpace(binding.GitBranch)
-	if remote == "" || (sha == "" && branch == "") {
-		return nil
-	}
-	if _, statErr := os.Stat(filepath.Join(abs, ".git")); statErr != nil {
-		// The dir can survive a cleanup as a stale, non-git checkout (files but
-		// no .git). `git clone` refuses a non-empty target, so clear it first —
-		// safe because this only runs on a Preflight-owned .preflight-ci root.
-		if _, dirErr := os.Stat(abs); dirErr == nil {
-			if rmErr := os.RemoveAll(abs); rmErr != nil {
-				return fmt.Errorf("clear stale checkout %s: %w", abs, rmErr)
-			}
-		}
-		if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
-			return fmt.Errorf("create parent: %w", mkErr)
-		}
-		if _, cloneErr := gitRun("", "clone", remote, abs); cloneErr != nil {
-			return fmt.Errorf("clone %s: %w", remote, cloneErr)
-		}
-	}
-	if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
-		return fmt.Errorf("fetch: %w", fetchErr)
-	}
-	// A stored "HEAD" placeholder is not a resolvable ref — fall back to branch.
-	ref := sha
-	if ref == "" || strings.EqualFold(ref, "HEAD") {
-		ref = "origin/" + branch
-	}
-	if _, resetErr := gitRun(abs, "reset", "--hard", ref); resetErr != nil {
-		return fmt.Errorf("reset %s: %w", ref, resetErr)
-	}
-	// eas build:submit reads app.config.ts, which imports packages — install
-	// deps so the config evaluates. Drift-tolerant (frozen → non-frozen).
-	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
-	if depErr := ensureCiDependencies(abs, resolved, binding.PackagePath); depErr != nil {
-		return depErr
 	}
 	return nil
 }
@@ -13311,14 +12150,6 @@ func maestroSmokeTimeout() time.Duration {
 	return timeout
 }
 
-func easReadinessTimeout() time.Duration {
-	return durationFromEnv("PREFLIGHT_EAS_READINESS_TIMEOUT", defaultEASReadinessTimeout)
-}
-
-func easBuildTimeout() time.Duration {
-	return durationFromEnv("PREFLIGHT_EAS_BUILD_TIMEOUT", defaultEASBuildTimeout)
-}
-
 func expoConfigTimeout() time.Duration {
 	return durationFromEnv("PREFLIGHT_EXPO_CONFIG_TIMEOUT", defaultExpoConfigTimeout)
 }
@@ -13883,220 +12714,6 @@ func appSchemeForDevelopmentClient(sourceBinding runnerJobSourceBinding) string 
 	return "exp"
 }
 
-func probeEASDevelopmentReadiness(appDir string, sourceBinding runnerJobSourceBinding, profileName string, targetClass string, platform string) (map[string]any, map[string]any) {
-	return probeEASDevelopmentReadinessWithEnv(appDir, sourceBinding, profileName, targetClass, platform, nil)
-}
-
-func probeEASDevelopmentReadinessWithEnv(appDir string, sourceBinding runnerJobSourceBinding, profileName string, targetClass string, platform string, env map[string]string) (map[string]any, map[string]any) {
-	platform = normalizeEASPlatform(platform)
-	pkg, err := readPackageJSON(filepath.Join(appDir, "package.json"))
-	if err != nil {
-		return nil, setupRequired(
-			"expo_app_unreadable",
-			"Preflight could not read the Expo app package.json.",
-			"verify package.json",
-		)
-	}
-	if !hasDependency(pkg, "expo-dev-client") {
-		return nil, setupRequired(
-			"expo_dev_client_missing",
-			"Install expo-dev-client before creating EAS development builds.",
-			"npx expo install expo-dev-client",
-		)
-	}
-
-	easConfig, err := loadEASJSON(appDir)
-	if err != nil {
-		return nil, setupRequired(
-			"eas_json_missing",
-			"Run EAS build configuration with the human present before Preflight can build.",
-			fmt.Sprintf("npx eas-cli build:configure --platform %s", platform),
-		)
-	}
-	profile, ok := easConfig.Build[profileName]
-	if !ok {
-		return nil, setupRequired(
-			"eas_profile_missing",
-			fmt.Sprintf("Add an EAS build profile named %q for the %s Development lane.", profileName, developmentPlatformLabel(platform)),
-			"edit eas.json",
-		)
-	}
-	if !easProfileDevelopmentClient(profile) {
-		return nil, setupRequired(
-			"eas_profile_not_dev_client",
-			fmt.Sprintf("EAS profile %q must set developmentClient to true.", profileName),
-			"edit eas.json",
-		)
-	}
-	if profile.Distribution != "" && profile.Distribution != "internal" {
-		return nil, setupRequired(
-			"eas_profile_distribution_not_internal",
-			fmt.Sprintf("EAS profile %q must use internal distribution for development builds.", profileName),
-			"edit eas.json",
-		)
-	}
-	if platform == "ios" && targetClass == "device" && profile.IOS.Simulator != nil && *profile.IOS.Simulator {
-		return nil, setupRequired(
-			"eas_profile_targets_simulator",
-			fmt.Sprintf("EAS profile %q builds for iOS Simulator, not physical iPhone devices.", profileName),
-			"add development-device profile to eas.json",
-		)
-	}
-
-	account, err := runEASCommandWithEnv(appDir, env, "whoami")
-	if err != nil {
-		return nil, setupRequired(
-			"expo_token_auth_failed",
-			"Create or rotate Preflight's Expo API token; EAS rejected EXPO_TOKEN.",
-			"preflight credentials create --provider expo --purpose api_token --key EXPO_TOKEN --lane development --value-env EXPO_TOKEN",
-		)
-	}
-	buildListOutput, err := runEASCommandWithEnv(
-		appDir,
-		env,
-		easBuildListArgs(platform, profileName, targetClass)...,
-	)
-	if err != nil {
-		return nil, setupRequired(
-			"eas_project_setup_required",
-			"Run EAS build setup with the human present so Preflight can use non-interactive builds.",
-			fmt.Sprintf("npx eas-cli build:configure --platform %s", platform),
-		)
-	}
-
-	readiness := map[string]any{
-		"ready":               true,
-		"account":             strings.TrimSpace(string(account)),
-		"platform":            platform,
-		"easProfileName":      profileName,
-		"easProfileEnvDigest": digestJSON(easProfileEnv(profile, platform)),
-		"easJsonDigest":       sourceBinding.EASJSONDigest,
-		"developmentClient":   easProfileDevelopmentClient(profile),
-		"distribution":        profile.Distribution,
-		"targetClass":         normalizeTargetClass(targetClass),
-		"nonInteractive":      true,
-	}
-	if platform == "ios" {
-		readiness["iosSimulator"] = profile.IOS.Simulator != nil && *profile.IOS.Simulator
-	} else {
-		readiness["androidArtifact"] = "apk"
-	}
-	if devBuild, ok := reusableDevBuildFromEASBuildList(buildListOutput, profileName, targetClass); ok {
-		readiness["devBuild"] = devBuild
-	}
-	return readiness, nil
-}
-
-func easBuildListArgs(platform string, profileName string, targetClass string) []string {
-	args := []string{
-		"build:list",
-		"--platform",
-		platform,
-		"--build-profile",
-		profileName,
-		"--status",
-		"finished",
-	}
-	if platform == "ios" && normalizeTargetClass(targetClass) == "simulator" {
-		args = append(args, "--simulator")
-	} else {
-		args = append(args, "--distribution", "internal")
-	}
-	return append(args, "--limit", "1", "--json", "--non-interactive")
-}
-
-func reusableDevBuildFromEASBuildList(output []byte, profileName string, targetClass string) (map[string]any, bool) {
-	devBuild, err := parseEASBuildOutput(output, profileName)
-	if err != nil {
-		return nil, false
-	}
-	if readMapString(devBuild, "installUrl") == "" {
-		return nil, false
-	}
-	if easBuildArtifactExpired(readMapString(devBuild, "expirationDate")) {
-		return nil, false
-	}
-	devBuild["targetClass"] = normalizeTargetClass(targetClass)
-	devBuild["reused"] = true
-	return devBuild, true
-}
-
-func easBuildArtifactExpired(expirationDate string) bool {
-	if strings.TrimSpace(expirationDate) == "" {
-		return false
-	}
-	expiresAt, err := time.Parse(time.RFC3339, expirationDate)
-	if err != nil {
-		return true
-	}
-	return !expiresAt.After(time.Now())
-}
-
-func normalizeEASPlatform(platform string) string {
-	if platform == "android" {
-		return "android"
-	}
-	return "ios"
-}
-
-func developmentPlatformLabel(platform string) string {
-	if platform == "android" {
-		return "Android"
-	}
-	return "iOS"
-}
-
-func runEASCommand(appDir string, args ...string) ([]byte, error) {
-	return runEASCommandWithEnv(appDir, nil, args...)
-}
-
-func runEASCommandWithEnv(appDir string, env map[string]string, args ...string) ([]byte, error) {
-	return runEASCommandWithTimeoutAndCancellation(
-		appDir,
-		easReadinessTimeout(),
-		nil,
-		env,
-		args...,
-	)
-}
-
-func runEASCommandWithTimeoutAndCancellation(
-	appDir string,
-	timeout time.Duration,
-	cancellationCheck func() (bool, error),
-	env map[string]string,
-	args ...string,
-) ([]byte, error) {
-	executable, commandArgs := easCommand(args...)
-	command := exec.Command(executable, commandArgs...)
-	command.Dir = appDir
-	command.Env = easCommandEnv(os.Environ(), env)
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
-	err := runCommandWithTimeoutAndCancellation(
-		command,
-		timeout,
-		cancellationCheck,
-		runnerPollInterval(),
-	)
-	if err != nil {
-		return output.Bytes(), fmt.Errorf("%s %s failed: %w: %s", filepath.Base(executable), strings.Join(commandArgs, " "), err, redactCommandOutput(strings.TrimSpace(output.String()), env))
-	}
-	return output.Bytes(), nil
-}
-
-func easCommandEnv(base []string, env map[string]string) []string {
-	values := map[string]string{
-		"CI":                  "1",
-		"EXPO_NO_INTERACTIVE": "1",
-	}
-	for key, value := range env {
-		values[key] = value
-	}
-	return upsertEnvValues(base, values)
-}
-
 func redactCommandOutput(output string, env map[string]string) string {
 	redacted := redactSetupTranscriptText(output)
 	for _, value := range env {
@@ -14106,79 +12723,6 @@ func redactCommandOutput(output string, env map[string]string) string {
 		redacted = strings.ReplaceAll(redacted, value, "[REDACTED]")
 	}
 	return redacted
-}
-
-func easCommand(args ...string) (string, []string) {
-	if configured := strings.TrimSpace(os.Getenv("PREFLIGHT_EAS_COMMAND")); configured != "" {
-		return configured, args
-	}
-	if easPath, err := exec.LookPath("eas"); err == nil {
-		return easPath, args
-	}
-	return "npx", append([]string{"eas-cli"}, args...)
-}
-
-func parseEASBuildOutput(output []byte, profileName string) (map[string]any, error) {
-	var decoded any
-	if err := decodeEASJSONOutput(output, &decoded); err != nil {
-		return nil, fmt.Errorf("decode EAS build JSON output: %w", err)
-	}
-
-	record, ok := decoded.(map[string]any)
-	if !ok {
-		if builds, buildsOK := decoded.([]any); buildsOK && len(builds) > 0 {
-			record, ok = builds[0].(map[string]any)
-		}
-	}
-	if !ok {
-		return nil, fmt.Errorf("EAS build output did not contain a build object")
-	}
-
-	buildID := readMapString(record, "id")
-	if buildID == "" {
-		return nil, fmt.Errorf("EAS build output did not include a build id")
-	}
-	artifacts, _ := record["artifacts"].(map[string]any)
-	installURL := readMapString(artifacts, "buildUrl")
-	if installURL == "" {
-		installURL = readMapString(record, "installUrl")
-	}
-
-	return map[string]any{
-		"buildId":        buildID,
-		"profile":        profileName,
-		"platform":       readMapString(record, "platform"),
-		"status":         readMapString(record, "status"),
-		"installUrl":     installURL,
-		"buildPageUrl":   readMapString(record, "url"),
-		"expirationDate": readMapString(record, "expirationDate"),
-	}, nil
-}
-
-func decodeEASJSONOutput(output []byte, target any) error {
-	trimmed := bytes.TrimSpace(output)
-	if len(trimmed) == 0 {
-		return io.EOF
-	}
-	if err := json.Unmarshal(trimmed, target); err == nil {
-		return nil
-	}
-	var lastErr error
-	for index, char := range trimmed {
-		if char != '{' && char != '[' {
-			continue
-		}
-		decoder := json.NewDecoder(bytes.NewReader(trimmed[index:]))
-		if err := decoder.Decode(target); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-	}
-	if lastErr != nil {
-		return lastErr
-	}
-	return fmt.Errorf("EAS output did not include JSON")
 }
 
 func loadSimctlInventory(options runnerOnceOptions) (json.RawMessage, error) {
@@ -14698,7 +13242,6 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		fmt.Fprintln(stdout, "  --build-profile <name>  Select an EAS profile (preview simulator profiles build packaged apps locally)")
 		fmt.Fprintln(stdout, "  --priority <n>          scheduling priority; higher is claimed first (default: 0)")
 		fmt.Fprintln(stdout, "  --local-readiness       Validate local Expo/EAS/Maestro readiness without API calls")
-		fmt.Fprintln(stdout, "  --interactive-setup     Allow EAS credential prompts during a standalone build run")
 		fmt.Fprintln(stdout, "  --secret-ref <id>       Attach a Preflight-owned secret reference to runner jobs")
 		fmt.Fprintln(stdout, "  --wait-for-runner       Create the workflow even when no runner is currently available")
 		return 0
@@ -14778,8 +13321,6 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		case "--standalone-run":
 			options.standalonePlan = true
 			options.standaloneRun = true
-		case "--interactive-setup":
-			options.interactiveSetup = true
 		case "--target-kind":
 			value, ok := nextFlagValue(args, &index)
 			if !ok {
@@ -14951,7 +13492,8 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 
 	if options.standalonePlan {
 		if options.lane == "development" {
-			return createStandaloneDevelopmentBuildPlan(options, sourceBinding, stdout, stderr, client)
+			fmt.Fprintln(stderr, "--standalone-plan supports --lane simulator; development builds run on the queued runner workflow (prove-app --lane development)")
+			return 2
 		}
 		return createStandaloneSimulatorProofPlan(options, sourceBinding, stdout, stderr, client)
 	}
@@ -15075,7 +13617,6 @@ type proveAppOptions struct {
 	localReadiness     bool
 	standalonePlan     bool
 	standaloneRun      bool
-	interactiveSetup   bool
 	targetKind         string
 	targetKey          string
 	targetID           string
@@ -15288,34 +13829,6 @@ type simulatorProofPlanData struct {
 	Commands      []simulatorProofPlanCommand `json:"commands"`
 }
 
-type developmentBuildPlanCommand struct {
-	simulatorProofPlanCommand
-	StdoutArtifactPath string `json:"stdoutArtifactPath"`
-}
-
-type developmentBuildPlanData struct {
-	WorkflowID      string                        `json:"workflowId"`
-	Platform        string                        `json:"platform"`
-	TargetKind      string                        `json:"targetKind"`
-	RequiredSecrets []string                      `json:"requiredSecrets"`
-	Build           map[string]any                `json:"build"`
-	Installation    map[string]any                `json:"installation"`
-	Commands        []developmentBuildPlanCommand `json:"commands"`
-}
-
-type developmentSessionPlanData struct {
-	WorkflowID    string                      `json:"workflowId"`
-	Platform      string                      `json:"platform"`
-	TargetKind    string                      `json:"targetKind"`
-	TargetID      string                      `json:"targetId"`
-	AdvertisedURL string                      `json:"advertisedUrl"`
-	DeepLinkURL   string                      `json:"deepLinkUrl"`
-	QRURL         string                      `json:"qrUrl"`
-	DevSession    map[string]any              `json:"devSession"`
-	TargetSession map[string]any              `json:"targetSession"`
-	Commands      []simulatorProofPlanCommand `json:"commands"`
-}
-
 func createStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceBinding, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	if options.lane != "simulator" {
 		fmt.Fprintln(stderr, "--standalone-plan currently supports --lane simulator")
@@ -15409,112 +13922,6 @@ func createStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceB
 	return 0
 }
 
-func createStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sourceBinding, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	targetKind := strings.TrimSpace(options.targetKind)
-	if targetKind == "" {
-		if options.platform == "android" {
-			targetKind = "android_phone"
-		} else {
-			targetKind = "iphone"
-		}
-	}
-	targetID := firstNonEmpty(options.targetID, options.targetKey)
-	if options.standaloneRun && targetID == "" {
-		fmt.Fprintln(stderr, "missing --target-id")
-		return 2
-	}
-	workflowID := strings.TrimSpace(options.workflowID)
-	if workflowID == "" {
-		workflowID = "pfw_" + sanitizeID(binding.PackageName) + "_" + options.platform + "_dev"
-	}
-	appDirectory := filepath.Clean(filepath.Join(binding.WorkspaceRoot, binding.PackagePath))
-	artifactDir := strings.TrimSpace(options.artifactDir)
-	if artifactDir == "" {
-		artifactDir = filepath.Join(appDirectory, ".preflight", "development-builds", workflowID)
-	}
-	version, err := standaloneDevelopmentBuildVersion(options, appDirectory)
-	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
-		return 2
-	}
-	buildProfile := strings.TrimSpace(options.buildProfile)
-	if buildProfile == "" {
-		buildProfile = strings.TrimSpace(binding.EASProfileName)
-	}
-	if buildProfile == "" {
-		buildProfile = "development"
-	}
-	readinessOptions := options
-	readinessOptions.buildProfile = ""
-	readinessBinding, err := discoverSourceBinding(readinessOptions)
-	if err != nil {
-		fmt.Fprintf(stderr, "discover development readiness binding failed: %v\n", err)
-		return 1
-	}
-	developmentReadiness, err := readStandaloneDevelopmentReadiness(readinessOptions, readinessBinding)
-	if err != nil {
-		fmt.Fprintf(stderr, "read development readiness failed: %v\n", err)
-		return 1
-	}
-
-	payload := map[string]any{
-		"workspaceId":          options.workspaceID,
-		"workflowId":           workflowID,
-		"platform":             options.platform,
-		"targetKind":           targetKind,
-		"appDirectory":         appDirectory,
-		"buildProfile":         buildProfile,
-		"version":              version,
-		"artifactDirectory":    artifactDir,
-		"developmentReadiness": developmentReadiness,
-	}
-	if targetID != "" {
-		payload["targetId"] = targetID
-	}
-	if strings.TrimSpace(options.buildNumber) != "" {
-		payload["buildNumber"] = strings.TrimSpace(options.buildNumber)
-	}
-	if strings.TrimSpace(options.message) != "" {
-		payload["message"] = strings.TrimSpace(options.message)
-	}
-
-	endpoint := runnerEndpoint(
-		options.apiURL,
-		"/api/preflight/v1/apps/"+url.PathEscape(binding.AppID)+"/development-build-plans",
-	)
-	data, err := postPreflightWorkspaceJSON(client, endpoint, options.token, options.workspaceID, payload)
-	if err != nil {
-		fmt.Fprintf(stderr, "standalone development build plan failed: %v\n", err)
-		return 1
-	}
-	if options.json && !options.standaloneRun {
-		_, _ = fmt.Fprintln(stdout, string(data))
-		return 0
-	}
-	var response struct {
-		Plan developmentBuildPlanData `json:"plan"`
-	}
-	if err := decodeEnvelopeData(data, &response); err != nil {
-		fmt.Fprintf(stderr, "decode development build plan failed: %v\n", err)
-		return 1
-	}
-	plan := response.Plan
-	if plan.WorkflowID == "" {
-		if err := decodeEnvelopeData(data, &plan); err != nil {
-			fmt.Fprintf(stderr, "decode development build plan failed: %v\n", err)
-			return 1
-		}
-	}
-	if options.standaloneRun {
-		return executeStandaloneDevelopmentBuildPlan(options, binding, plan, stdout, stderr, client)
-	}
-	fmt.Fprintf(stdout, "development build plan %s %s %s\n", plan.WorkflowID, plan.Platform, plan.TargetKind)
-	for _, command := range plan.Commands {
-		fmt.Fprintf(stdout, "%s %s\n", command.Command, strings.Join(command.Args, " "))
-	}
-	return 0
-}
-
 func readStandaloneDevelopmentReadiness(options proveAppOptions, binding sourceBinding) (map[string]any, error) {
 	appDirectory := sourceBindingAppDirectory(binding)
 	packageConfig, err := readPackageJSON(filepath.Join(appDirectory, "package.json"))
@@ -15540,378 +13947,12 @@ func readStandaloneDevelopmentReadiness(options proveAppOptions, binding sourceB
 	}, nil
 }
 
-func standaloneDevelopmentBuildVersion(options proveAppOptions, appDirectory string) (string, error) {
-	if version := strings.TrimSpace(options.version); version != "" {
-		return version, nil
-	}
-	pkg, err := readPackageJSON(filepath.Join(appDirectory, "package.json"))
-	if err == nil && strings.TrimSpace(pkg.Version) != "" {
-		return strings.TrimSpace(pkg.Version), nil
-	}
-	return "", fmt.Errorf("missing --version and package.json version")
-}
-
-func executeStandaloneDevelopmentBuildPlan(options proveAppOptions, binding sourceBinding, plan developmentBuildPlanData, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	easBuildID := ""
-	var finalEASBuild map[string]any
-	completedCommands := make([]developmentBuildPlanCommand, 0, len(plan.Commands))
-	for _, plannedCommand := range plan.Commands {
-		_, record, err := runStandaloneDevelopmentBuildCommandForPlan(plannedCommand, easBuildID, options.interactiveSetup)
-		if err != nil {
-			fmt.Fprintf(stderr, "run %s failed: %v\n", standaloneCommandLabel(plannedCommand.simulatorProofPlanCommand), err)
-			return 1
-		}
-		completedCommands = append(completedCommands, plannedCommand)
-		if record == nil {
-			continue
-		}
-		if plannedCommand.ID == "eas_build" {
-			easBuildID = readMapString(record, "id")
-			if easBuildID == "" {
-				fmt.Fprintln(stderr, "EAS build output did not include a build id")
-				return 1
-			}
-		}
-		if plannedCommand.ID == "eas_build" || plannedCommand.ID == "eas_build_view" {
-			finalEASBuild = record
-		}
-	}
-	if finalEASBuild == nil {
-		fmt.Fprintln(stderr, "development build plan did not produce EAS build JSON")
-		return 1
-	}
-
-	planBuildID := readMapString(plan.Build, "id")
-	planInstallationID := readMapString(plan.Installation, "id")
-	targetID := firstNonEmpty(options.targetID, options.targetKey, readMapString(plan.Installation, "targetId"))
-	version := firstNonEmpty(readMapString(plan.Build, "version"), options.version)
-	if planBuildID == "" || planInstallationID == "" || targetID == "" || version == "" {
-		fmt.Fprintln(stderr, "development build result is missing plan build, installation, target, or version")
-		return 1
-	}
-	payload := map[string]any{
-		"workspaceId":        options.workspaceID,
-		"planBuildId":        planBuildID,
-		"planInstallationId": planInstallationID,
-		"workflowId":         plan.WorkflowID,
-		"targetId":           targetID,
-		"platform":           plan.Platform,
-		"buildProfile":       readMapString(plan.Build, "profile"),
-		"version":            version,
-		"easBuild":           finalEASBuild,
-	}
-	if buildNumber := readMapString(plan.Build, "buildNumber"); buildNumber != "" {
-		payload["buildNumber"] = buildNumber
-	}
-	endpoint := runnerEndpoint(
-		options.apiURL,
-		"/api/preflight/v1/apps/"+url.PathEscape(binding.AppID)+"/development-build-results",
-	)
-	if _, err := postPreflightWorkspaceJSON(client, endpoint, options.token, options.workspaceID, payload); err != nil {
-		fmt.Fprintf(stderr, "post development build result failed: %v\n", err)
-		return 1
-	}
-	for _, plannedCommand := range completedCommands {
-		if err := postStandaloneDevelopmentBuildArtifact(client, options, binding.AppID, plan, plannedCommand, easBuildID); err != nil {
-			fmt.Fprintf(stderr, "post EAS artifact failed: %v\n", err)
-			return 1
-		}
-	}
-	if readMapString(plan.Build, "profile") == "preview" {
-		fmt.Fprintf(stdout, "preview build run %s posted %s\n", plan.WorkflowID, readMapString(finalEASBuild, "id"))
-		return 0
-	}
-	if code := executeStandaloneDevelopmentSessionPlan(options, binding, plan, targetID, stdout, stderr, client); code != 0 {
-		return code
-	}
-	fmt.Fprintf(stdout, "development build run %s posted %s\n", plan.WorkflowID, readMapString(finalEASBuild, "id"))
-	return 0
-}
-
-func executeStandaloneDevelopmentSessionPlan(options proveAppOptions, binding sourceBinding, buildPlan developmentBuildPlanData, targetID string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
-	appDirectory := filepath.Clean(filepath.Join(binding.WorkspaceRoot, binding.PackagePath))
-	port := options.port
-	if port == 0 {
-		port = 8081
-	}
-	payload := map[string]any{
-		"workspaceId":  options.workspaceID,
-		"workflowId":   buildPlan.WorkflowID,
-		"platform":     buildPlan.Platform,
-		"targetKind":   buildPlan.TargetKind,
-		"targetId":     targetID,
-		"appDirectory": appDirectory,
-		"appScheme":    binding.AppScheme,
-		"port":         port,
-		"buildId":      readMapString(buildPlan.Build, "id"),
-	}
-	endpoint := runnerEndpoint(
-		options.apiURL,
-		"/api/preflight/v1/apps/"+url.PathEscape(binding.AppID)+"/development-session-plans",
-	)
-	data, err := postPreflightWorkspaceJSON(client, endpoint, options.token, options.workspaceID, payload)
-	if err != nil {
-		fmt.Fprintf(stderr, "standalone development session plan failed: %v\n", err)
-		return 1
-	}
-	var response struct {
-		Plan developmentSessionPlanData `json:"plan"`
-	}
-	if err := decodeEnvelopeData(data, &response); err != nil {
-		fmt.Fprintf(stderr, "decode development session plan failed: %v\n", err)
-		return 1
-	}
-	plan := response.Plan
-	if plan.WorkflowID == "" {
-		if err := decodeEnvelopeData(data, &plan); err != nil {
-			fmt.Fprintf(stderr, "decode development session plan failed: %v\n", err)
-			return 1
-		}
-	}
-	for _, plannedCommand := range plan.Commands {
-		if plannedCommand.Kind != "long_running" {
-			if err := runStandalonePlannedCommand(plannedCommand, simulatorOpenTimeout(), stderr); err != nil {
-				fmt.Fprintf(stderr, "run %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
-				return 1
-			}
-			continue
-		}
-		logPath := standaloneDevelopmentSessionLogPath(appDirectory, plan.WorkflowID)
-		logFile, err := openStandaloneDevelopmentSessionLog(logPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "open development session log failed: %v\n", err)
-			return 1
-		}
-		defer logFile.Close()
-		outputReady := func(output string) bool {
-			if readMapString(plan.DevSession, "hostMode") != "tunnel" {
-				return strings.TrimSpace(output) != ""
-			}
-			_, ready := expoTunnelDevServerURLFromLogContent(output)
-			return ready
-		}
-		command, observedOutput, err := startStandaloneObservedPlannedCommandWithOutput(plannedCommand, io.MultiWriter(stderr, logFile), defaultExpoDevSessionStartTimeout, outputReady)
-		if err != nil {
-			fmt.Fprintf(stderr, "start %s failed: %v\n", standaloneCommandLabel(plannedCommand), err)
-			return 1
-		}
-		defer terminateProcessGroup(command)
-		_ = logFile.Sync()
-		replacements := standaloneDevelopmentSessionReplacements(observedOutput)
-		runningDevSession := substituteStandaloneRuntimePlaceholders(mapWith(plan.DevSession, map[string]any{
-			"status": "running",
-			"pid":    command.Process.Pid,
-		}), replacements).(map[string]any)
-		artifacts, err := prepareStandaloneDevelopmentSessionArtifacts(client, options, binding, buildPlan, plan, runningDevSession, appDirectory, logPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "prepare development session artifacts failed: %v\n", err)
-			return 1
-		}
-		applyDevSessionArtifacts(runningDevSession, artifacts)
-		if err := postStandaloneRuntimeState(client, options, binding.AppID, "dev-sessions", runningDevSession); err != nil {
-			fmt.Fprintf(stderr, "post development dev session failed: %v\n", err)
-			return 1
-		}
-		if len(plan.TargetSession) > 0 {
-			targetSession := substituteStandaloneRuntimePlaceholders(mapWith(plan.TargetSession, map[string]any{
-				"status": "opening",
-			}), replacements).(map[string]any)
-			if err := postStandaloneRuntimeState(client, options, binding.AppID, "target-sessions", targetSession); err != nil {
-				fmt.Fprintf(stderr, "post development target session failed: %v\n", err)
-				return 1
-			}
-		}
-		fmt.Fprintf(stdout, "development session %s started tunnel server pid %d\n", plan.WorkflowID, command.Process.Pid)
-	}
-	return 0
-}
-
 func terminateProcessGroup(command *exec.Cmd) {
 	if command == nil || command.Process == nil {
 		return
 	}
 	_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
 	_ = command.Wait()
-}
-
-func prepareStandaloneDevelopmentSessionArtifacts(
-	client *http.Client,
-	options proveAppOptions,
-	binding sourceBinding,
-	buildPlan developmentBuildPlanData,
-	sessionPlan developmentSessionPlanData,
-	devSession map[string]any,
-	appDir string,
-	logPath string,
-) (devSessionArtifacts, error) {
-	artifacts := devSessionArtifacts{
-		LogPath: strings.TrimSpace(logPath),
-	}
-	qrPayloadPath, err := writeStandaloneDevSessionQRPayload(appDir, binding, buildPlan, sessionPlan, devSession)
-	if err != nil {
-		return artifacts, err
-	}
-	artifacts.QRPayloadPath = qrPayloadPath
-	if qrPayloadPath != "" {
-		artifactID, err := postStandaloneDevSessionQRArtifact(client, options, binding.AppID, buildPlan, sessionPlan, devSession, qrPayloadPath)
-		if err != nil {
-			return artifacts, err
-		}
-		artifacts.QRArtifactID = artifactID
-	}
-	if artifacts.LogPath != "" {
-		if err := postStandaloneDevSessionLogArtifact(client, options, binding.AppID, buildPlan, sessionPlan, devSession, artifacts.LogPath); err != nil {
-			return artifacts, err
-		}
-	}
-	return artifacts, nil
-}
-
-func standaloneDevelopmentSessionLogPath(appDir string, workflowID string) string {
-	return filepath.Join(appDir, ".preflight", "dev-sessions", workflowID, "expo-start.log")
-}
-
-func openStandaloneDevelopmentSessionLog(path string) (*os.File, error) {
-	if strings.TrimSpace(path) == "" {
-		return nil, fmt.Errorf("missing log path")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("create standalone dev session log directory: %w", err)
-	}
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-}
-
-func writeStandaloneDevSessionQRPayload(
-	appDir string,
-	binding sourceBinding,
-	buildPlan developmentBuildPlanData,
-	sessionPlan developmentSessionPlanData,
-	devSession map[string]any,
-) (string, error) {
-	if readMapString(devSession, "qrUrl") == "" {
-		return "", nil
-	}
-	payload := map[string]any{
-		"workflowId":    sessionPlan.WorkflowID,
-		"appId":         binding.AppID,
-		"buildId":       readMapString(buildPlan.Build, "id"),
-		"targetId":      sessionPlan.TargetID,
-		"targetKind":    sessionPlan.TargetKind,
-		"status":        readMapString(devSession, "status"),
-		"advertisedUrl": readMapString(devSession, "advertisedUrl"),
-		"deepLinkUrl":   readMapString(devSession, "deepLinkUrl"),
-		"qrUrl":         readMapString(devSession, "qrUrl"),
-		"installUrl":    readMapString(devSession, "installUrl"),
-		"hostMode":      readMapString(devSession, "hostMode"),
-		"sourceBinding": map[string]any{
-			"workspaceRoot": binding.WorkspaceRoot,
-			"packagePath":   binding.PackagePath,
-			"appScheme":     binding.AppScheme,
-			"expoSlug":      binding.ExpoSlug,
-		},
-	}
-	content, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode standalone dev session QR payload: %w", err)
-	}
-	path := filepath.Join(appDir, ".preflight", "dev-sessions", sessionPlan.WorkflowID, "qr-payload.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", fmt.Errorf("create standalone dev session QR artifact directory: %w", err)
-	}
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		return "", fmt.Errorf("write standalone dev session QR payload artifact: %w", err)
-	}
-	return path, nil
-}
-
-func postStandaloneDevSessionQRArtifact(
-	client *http.Client,
-	options proveAppOptions,
-	appID string,
-	buildPlan developmentBuildPlanData,
-	sessionPlan developmentSessionPlanData,
-	devSession map[string]any,
-	path string,
-) (string, error) {
-	payload := map[string]any{
-		"kind":           "qr_code",
-		"uri":            path,
-		"retentionClass": "diagnostic",
-		"redacted":       true,
-		"contentType":    "application/json",
-		"metadata":       devSessionArtifactMetadata(devSession),
-	}
-	for key, value := range map[string]string{
-		"workflowId":   sessionPlan.WorkflowID,
-		"buildId":      readMapString(buildPlan.Build, "id"),
-		"devSessionId": readMapString(devSession, "id"),
-		"targetId":     sessionPlan.TargetID,
-	} {
-		if strings.TrimSpace(value) != "" {
-			payload[key] = value
-		}
-	}
-	if sizeBytes, ok := artifactSizeBytes(path); ok {
-		payload["sizeBytes"] = sizeBytes
-	}
-	data, err := postStandaloneRuntimeStateData(client, options, appID, "runtime-artifacts", payload)
-	if err != nil {
-		return "", err
-	}
-	var created struct {
-		ID       string `json:"id"`
-		Artifact struct {
-			ID string `json:"id"`
-		} `json:"artifact"`
-	}
-	if err := decodeEnvelopeData(data, &created); err != nil {
-		return "", err
-	}
-	if created.ID != "" {
-		return created.ID, nil
-	}
-	return created.Artifact.ID, nil
-}
-
-func postStandaloneDevSessionLogArtifact(
-	client *http.Client,
-	options proveAppOptions,
-	appID string,
-	buildPlan developmentBuildPlanData,
-	sessionPlan developmentSessionPlanData,
-	devSession map[string]any,
-	path string,
-) error {
-	payload := map[string]any{
-		"kind":           "log",
-		"uri":            path,
-		"retentionClass": "diagnostic",
-		"redacted":       true,
-		"contentType":    "text/plain",
-		"metadata":       devSessionArtifactMetadata(devSession),
-	}
-	for key, value := range map[string]string{
-		"workflowId":   sessionPlan.WorkflowID,
-		"buildId":      readMapString(buildPlan.Build, "id"),
-		"devSessionId": readMapString(devSession, "id"),
-		"targetId":     sessionPlan.TargetID,
-	} {
-		if strings.TrimSpace(value) != "" {
-			payload[key] = value
-		}
-	}
-	if sizeBytes, ok := artifactSizeBytes(path); ok {
-		payload["sizeBytes"] = sizeBytes
-	}
-	return postStandaloneRuntimeState(client, options, appID, "runtime-artifacts", payload)
-}
-
-func standaloneDevelopmentSessionReplacements(observedOutput string) map[string]string {
-	replacements := map[string]string{}
-	if tunnelURL, ok := expoTunnelDevServerURLFromLogContent(observedOutput); ok {
-		replacements["EXPO_TUNNEL_URL"] = tunnelURL
-	}
-	return replacements
 }
 
 func substituteStandaloneRuntimePlaceholders(value any, replacements map[string]string) any {
@@ -15941,305 +13982,6 @@ func substituteStandaloneRuntimePlaceholders(value any, replacements map[string]
 	default:
 		return value
 	}
-}
-
-func postStandaloneDevelopmentBuildArtifact(client *http.Client, options proveAppOptions, appID string, plan developmentBuildPlanData, plannedCommand developmentBuildPlanCommand, easBuildID string) error {
-	path := strings.TrimSpace(plannedCommand.StdoutArtifactPath)
-	if path == "" {
-		return nil
-	}
-	payload := map[string]any{
-		"kind":           "tool_output",
-		"uri":            path,
-		"retentionClass": "diagnostic",
-		"redacted":       true,
-		"metadata": map[string]any{
-			"commandId":    plannedCommand.ID,
-			"command":      plannedCommand.Command,
-			"args":         substituteStandaloneCommandArgs(plannedCommand.Args, map[string]string{"EAS_BUILD_ID": easBuildID}),
-			"platform":     plan.Platform,
-			"targetKind":   plan.TargetKind,
-			"buildProfile": readMapString(plan.Build, "profile"),
-		},
-	}
-	for key, value := range map[string]string{
-		"workflowId": plan.WorkflowID,
-		"buildId":    readMapString(plan.Build, "id"),
-		"targetId":   readMapString(plan.Installation, "targetId"),
-	} {
-		if strings.TrimSpace(value) != "" {
-			payload[key] = value
-		}
-	}
-	if contentType := standaloneArtifactContentType(path); contentType != "" {
-		payload["contentType"] = contentType
-	}
-	if sizeBytes, ok := artifactSizeBytes(path); ok {
-		payload["sizeBytes"] = sizeBytes
-	}
-	return postStandaloneRuntimeState(client, options, appID, "runtime-artifacts", payload)
-}
-
-func runStandaloneDevelopmentBuildCommandForPlan(plannedCommand developmentBuildPlanCommand, easBuildID string, interactiveSetup bool) ([]byte, map[string]any, error) {
-	if plannedCommand.ID == "eas_build_view" {
-		return pollStandaloneDevelopmentBuildView(plannedCommand, easBuildID)
-	}
-	if interactiveSetup && plannedCommand.ID == "eas_build" {
-		if _, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, true); err != nil {
-			return nil, nil, err
-		}
-		platform := standaloneCommandFlagValue(plannedCommand.Args, "--platform")
-		lookupCommand := plannedCommand
-		lookupCommand.ID = "eas_build_list"
-		lookupCommand.Args = []string{"build:list", "--platform", platform, "--limit", "1", "--json", "--non-interactive"}
-		return runStandaloneDevelopmentBuildCommandForPlan(lookupCommand, "", false)
-	}
-	output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, false)
-	if err != nil {
-		return output, nil, err
-	}
-	if err := writeStandaloneCommandArtifact(plannedCommand.StdoutArtifactPath, output, plannedCommand.Env); err != nil {
-		return output, nil, err
-	}
-	record, err := decodeStandaloneEASBuildRecord(output)
-	if err != nil {
-		return output, nil, fmt.Errorf("decode %s JSON: %w", standaloneCommandLabel(plannedCommand.simulatorProofPlanCommand), err)
-	}
-	return output, record, nil
-}
-
-func standaloneCommandFlagValue(args []string, name string) string {
-	for index := 0; index+1 < len(args); index++ {
-		if args[index] == name {
-			return args[index+1]
-		}
-	}
-	return ""
-}
-
-func pollStandaloneDevelopmentBuildView(plannedCommand developmentBuildPlanCommand, easBuildID string) ([]byte, map[string]any, error) {
-	deadline := time.Now().Add(easBuildTimeout())
-	var lastOutput []byte
-	var lastRecord map[string]any
-	for {
-		output, err := runStandaloneDevelopmentBuildCommand(plannedCommand, easBuildID, false)
-		if err != nil {
-			return output, nil, err
-		}
-		record, err := decodeStandaloneEASBuildRecord(output)
-		if err != nil {
-			return output, nil, fmt.Errorf("decode %s JSON: %w", standaloneCommandLabel(plannedCommand.simulatorProofPlanCommand), err)
-		}
-		lastOutput = output
-		lastRecord = record
-		if isTerminalEASBuildStatus(readMapString(record, "status")) {
-			if err := writeStandaloneCommandArtifact(plannedCommand.StdoutArtifactPath, output, plannedCommand.Env); err != nil {
-				return output, nil, err
-			}
-			return output, record, nil
-		}
-		if !time.Now().Before(deadline) {
-			if err := writeStandaloneCommandArtifact(plannedCommand.StdoutArtifactPath, lastOutput, plannedCommand.Env); err != nil {
-				return lastOutput, nil, err
-			}
-			return lastOutput, lastRecord, fmt.Errorf("EAS build %s did not reach a terminal status before timeout; last status %q", easBuildID, readMapString(lastRecord, "status"))
-		}
-		time.Sleep(easBuildPollInterval())
-	}
-}
-
-func decodeStandaloneEASBuildRecord(output []byte) (map[string]any, error) {
-	var decoded any
-	if err := decodeEASJSONOutput(output, &decoded); err != nil {
-		return nil, err
-	}
-	record, ok := firstEASBuildRecord(decoded)
-	if !ok {
-		return nil, fmt.Errorf("EAS output did not include a build object")
-	}
-	return record, nil
-}
-
-func runStandaloneDevelopmentBuildCommand(plannedCommand developmentBuildPlanCommand, easBuildID string, interactive bool) ([]byte, error) {
-	env, err := resolveStandalonePlanEnv(plannedCommand.Env)
-	if err != nil {
-		return nil, err
-	}
-	args := substituteStandaloneCommandArgs(plannedCommand.Args, map[string]string{
-		"EAS_BUILD_ID": easBuildID,
-	})
-	if interactive {
-		args = slices.DeleteFunc(args, func(arg string) bool {
-			return arg == "--non-interactive" || arg == "--json"
-		})
-	}
-	command := exec.Command(plannedCommand.Command, args...)
-	if strings.TrimSpace(plannedCommand.CWD) != "" {
-		command.Dir = plannedCommand.CWD
-	}
-	command.Env = easCommandEnv(os.Environ(), env)
-	if interactive {
-		command.Env = slices.DeleteFunc(command.Env, func(entry string) bool {
-			return strings.HasPrefix(entry, "CI=") || strings.HasPrefix(entry, "EXPO_NO_INTERACTIVE=")
-		})
-	}
-	var output bytes.Buffer
-	if interactive {
-		command.Stdin = os.Stdin
-		command.Stdout = os.Stdout
-		command.Stderr = os.Stderr
-	} else {
-		command.Stdout = &output
-		command.Stderr = &output
-	}
-	timeout := easReadinessTimeout()
-	if plannedCommand.ID == "eas_build" {
-		timeout = easBuildTimeout()
-	}
-	runErr := error(nil)
-	if interactive {
-		runErr = runInteractiveCommandWithTimeout(command, timeout)
-	} else {
-		runErr = runCommandWithTimeout(command, timeout)
-	}
-	if runErr != nil {
-		return output.Bytes(), fmt.Errorf("%s %s failed: %w: %s", plannedCommand.Command, strings.Join(args, " "), runErr, redactCommandOutput(strings.TrimSpace(output.String()), env))
-	}
-	return output.Bytes(), nil
-}
-
-func runInteractiveCommandWithTimeout(command *exec.Cmd, timeout time.Duration) error {
-	if err := command.Start(); err != nil {
-		return err
-	}
-	done := make(chan error, 1)
-	go func() { done <- command.Wait() }()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case err := <-done:
-		return err
-	case <-timer.C:
-		_ = command.Process.Kill()
-		<-done
-		return context.DeadlineExceeded
-	}
-}
-
-func isTerminalEASBuildStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "finished", "errored", "canceled", "cancelled":
-		return true
-	default:
-		return false
-	}
-}
-
-func easBuildPollInterval() time.Duration {
-	return durationFromEnv("PREFLIGHT_EAS_BUILD_POLL_INTERVAL", defaultRunnerPollInterval)
-}
-
-func substituteStandaloneCommandArgs(args []string, values map[string]string) []string {
-	substituted := make([]string, 0, len(args))
-	for _, arg := range args {
-		value := arg
-		for key, replacement := range values {
-			value = strings.ReplaceAll(value, "${"+key+"}", replacement)
-		}
-		substituted = append(substituted, value)
-	}
-	return substituted
-}
-
-func resolveStandalonePlanEnv(planEnv map[string]string) (map[string]string, error) {
-	resolved := make(map[string]string, len(planEnv))
-	for key, value := range planEnv {
-		secretName, ok := preflightSecretPlaceholder(value)
-		if !ok {
-			resolved[key] = value
-			continue
-		}
-		secretValue, envName := standaloneSecretValue(secretName)
-		if secretValue == "" {
-			if secretName == "expoToken" {
-				continue
-			}
-			return nil, fmt.Errorf("missing Preflight secret %s; set %s", secretName, envName)
-		}
-		resolved[key] = secretValue
-	}
-	return resolved, nil
-}
-
-func preflightSecretPlaceholder(value string) (string, bool) {
-	const prefix = "${PREFLIGHT_SECRET:"
-	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, "}") {
-		return "", false
-	}
-	name := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, prefix), "}"))
-	return name, name != ""
-}
-
-func standaloneSecretValue(secretName string) (string, string) {
-	envKey := camelTokenToEnvKey(secretName)
-	candidates := []string{
-		envKey,
-		"PREFLIGHT_SECRET_" + envKey,
-		"PREFLIGHT_SECRET_" + strings.ToUpper(strings.ReplaceAll(secretName, "-", "_")),
-	}
-	if secretName == "expoToken" {
-		candidates = append([]string{"EXPO_TOKEN", "PREFLIGHT_SECRET_EXPO_TOKEN"}, candidates...)
-	}
-	for _, candidate := range candidates {
-		if value := strings.TrimSpace(os.Getenv(candidate)); value != "" {
-			return value, candidate
-		}
-	}
-	return "", candidates[0]
-}
-
-func camelTokenToEnvKey(value string) string {
-	var builder strings.Builder
-	for index, char := range value {
-		if char >= 'A' && char <= 'Z' && index > 0 {
-			builder.WriteByte('_')
-		}
-		switch {
-		case char >= 'a' && char <= 'z':
-			builder.WriteRune(char - 'a' + 'A')
-		case char >= 'A' && char <= 'Z':
-			builder.WriteRune(char)
-		case char >= '0' && char <= '9':
-			builder.WriteRune(char)
-		default:
-			builder.WriteByte('_')
-		}
-	}
-	return builder.String()
-}
-
-func writeStandaloneCommandArtifact(path string, output []byte, env map[string]string) error {
-	if strings.TrimSpace(path) == "" {
-		return nil
-	}
-	resolvedEnv, _ := resolveStandalonePlanEnv(env)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(redactCommandOutput(string(output), resolvedEnv)), 0o644)
-}
-
-func firstEASBuildRecord(decoded any) (map[string]any, bool) {
-	record, ok := decoded.(map[string]any)
-	if ok {
-		return record, true
-	}
-	builds, ok := decoded.([]any)
-	if !ok || len(builds) == 0 {
-		return nil, false
-	}
-	record, ok = builds[0].(map[string]any)
-	return record, ok
 }
 
 func executeStandaloneSimulatorProofPlan(options proveAppOptions, binding sourceBinding, plan simulatorProofPlanData, stdout io.Writer, stderr io.Writer, client *http.Client) (exitCode int) {
@@ -18278,26 +16020,11 @@ func isProductionBuildProfile(profileName string) bool {
 		strings.HasSuffix(p, "-production")
 }
 
-// runningInCI reports whether the runner is executing inside a CI environment.
-func runningInCI() bool {
-	for _, key := range []string{"CI", "GITHUB_ACTIONS", "EAS_BUILD"} {
-		v := strings.TrimSpace(os.Getenv(key))
-		if v != "" && v != "0" && strings.ToLower(v) != "false" {
-			return true
-		}
-	}
-	return false
-}
-
 func jobPlatform(job apiRunnerJob) string {
 	if job.Payload.Platform == "android" {
 		return "android"
 	}
 	return "ios"
-}
-
-func jobPlatformForEAS(job apiRunnerJob) string {
-	return jobPlatform(job)
 }
 
 func normalizeTargetClass(value string) string {
