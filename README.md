@@ -8,17 +8,20 @@ build and test jobs, and gives you a view of the farm from a terminal.
 preflight nodes            # machines: engines, free disk, agents, live jobs
 preflight queue            # what is queued/running/blocked, and why
 preflight build --app <id> # queue a build/test work order
-preflight build --app <id> --profile development-device # choose a device profile
+preflight build store --app <id> --platform ios --lane beta --wait # signed store build + upload
 preflight cancel <pfwo_id> # cancel one work order and its active workflow
 preflight disk             # free space here and across the farm
 preflight integrations     # is the API and its upstreams reachable
 ```
 
-`build` and `device_test` use device development profiles. `simulator_test` and
-`e2e_suite` use simulator profiles. `--profile` (also `--build-profile`) selects
-an exact compatible EAS profile, including its inherited environment and app
-identity. Incompatible or store profiles fail before queueing; production and
-TestFlight builds use the separate store build workflow.
+`build` and `device_test` build a development client on the device lane;
+`simulator_test` and `e2e_suite` use the simulator lane. `--profile` (also
+`--build-profile`) names the lane profile: `development` (the default) builds a
+development client with `APP_VARIANT=development`, and a `preview`,
+`preview-*` or `*-preview` profile on a simulator kind builds a packaged app
+with embedded JavaScript (`APP_VARIANT=preview`). Production profiles fail
+before queueing; store and TestFlight/Play builds use `preflight build store`
+(see [Store builds](#store-builds-signing-push-and-ota)).
 
 `cancel` uses the configured workspace and cancels the active workflow before
 recording work-order cancellation. If recording fails, retry the same command.
@@ -61,6 +64,8 @@ Configuration lives in `~/.config/preflight/config.json`. Useful overrides:
 | `PREFLIGHT_IOS_SIMULATOR_BOOT_TIMEOUT` | Total iOS boot/readiness deadline (default `3m`); runner cancellation also stops the wait |
 | `PREFLIGHT_COMMAND_OUTPUT_DRAIN_TIMEOUT` | Output pipe drain grace after a command exits (default `5s`); an incomplete drain still fails the command. iOS boot probes retain their explicit `250ms` grace |
 | `PREFLIGHT_UPDATE_REPO` | Where `update` looks for releases |
+| `PREFLIGHT_OTA_STORE` | Runner's filesystem OTA store when the control plane has no store of its own |
+| `PREFLIGHT_OTA_SERVER_STORE` | `off` publishes OTA updates to the filesystem store, `r2` always uploads; unset asks the control plane |
 
 ## Running a build host
 
@@ -135,40 +140,156 @@ The runner preserves the server's state instead of submitting a stale completion
 Temporary heartbeat/read failures are tolerated only until the last confirmed
 lease expires or its heartbeat becomes five minutes stale, whichever comes first.
 
+### App readiness
+
+`preflight prove-app --local-readiness` (and work orders, which run the same
+discovery) checks Preflight's conventions without calling the API:
+
+- an Expo app config — `app.config.ts`, `app.config.js` or `app.json` — whose
+  `ios.bundleIdentifier` and/or `android.package` names the native app;
+- an `expo-dev-client` dependency for development-client lanes (packaged
+  preview builds do not need one) and a scheme or slug for its deep links;
+- the `.maestro/01-app-launches.yaml` smoke flow (or `--flow-path`), whose
+  `appId` matches the native app.
+
+No hosted-build config file is read: local lane settings come from the profile
+name, store lane settings from `preflight build-profiles`. Development builds
+run on the runner (`expo prebuild` + `xcodebuild`/`gradle`); `--build-strategy`
+accepts only `local`.
+
 Queued iOS simulator proofs can select a packaged preview profile with
 `prove-app --lane simulator --build-strategy local --build-profile preview-simulator`.
-The selected profile must inherit or declare `developmentClient: false`,
-`distribution: "internal"`, `ios.simulator: true`, and `APP_VARIANT: "preview"`.
-Preflight preserves that profile's environment through prebuild, CocoaPods, and
-the Release simulator build, requires an embedded `main.jsbundle`, installs it,
-and launches the bound bundle ID. The source binding records the selected
-profile and its evaluated native identity. Local readiness requires a Maestro
-flow matching that bundle; an external flow may be supplied with `--flow-path`.
-For queued execution, the workflow's Maestro suite binding must also select that
-flow and its tags. Packaged previews currently require the local queued runner
-path; EAS and standalone plans keep their development-client requirements.
+Preflight runs prebuild, CocoaPods and the Release simulator build with
+`APP_VARIANT=preview`, requires an embedded `main.jsbundle`, installs it, and
+launches the bound bundle ID. The source binding records the profile and its
+evaluated native identity. Local readiness requires a Maestro flow matching that
+bundle; an external flow may be supplied with `--flow-path`. For queued
+execution, the workflow's Maestro suite binding must also select that flow and
+its tags. Packaged previews require the local queued runner path.
 
 Android emulator proofs can use `--platform android --lane simulator
---build-strategy local --build-profile preview-android` with an explicit
-`developmentClient: false`, `distribution: "internal"`, `android.buildType:
-"apk"`, and `APP_VARIANT: "preview"` profile. The queued runner prebuilds,
-assembles the Release APK, checks its generated application ID and embedded
-`assets/index.android.bundle`, installs on the selected emulator, and launches
-only the bound package. Split APK outputs, physical-device preview lanes, EAS,
-and standalone packaged plans are refused. Existing Android development-client
-profiles retain their build and Metro launch behavior.
+--build-strategy local --build-profile preview-android`. The queued runner
+prebuilds, assembles the Release APK, checks its generated application ID and
+embedded `assets/index.android.bundle`, installs on the selected emulator, and
+launches only the bound package. Split APK outputs, physical-device preview
+lanes and standalone packaged plans are refused. Android development-client
+builds keep their build and Metro launch behavior.
 
 For a standalone simulator proof, `prove-app --standalone-run --target-key <id>`
-requires a readable Maestro flow and the simulator development profile. Choose a
-free Metro port and a fresh artifact directory. The CLI launches its own Metro,
-waits for readiness, opens the development client, and publishes Maestro reports,
-logs, screenshots and videos. A passing proof requires a fresh JUnit report with
-executed passing tests; skipped or missing tests fail the run. When the command
-exits, it stops its Metro and closes the runtime session records.
+requires a readable Maestro flow. Choose a free Metro port and a fresh artifact
+directory. The CLI launches its own Metro, waits for readiness, opens the
+development client, and publishes Maestro reports, logs, screenshots and videos.
+A passing proof requires a fresh JUnit report with executed passing tests;
+skipped or missing tests fail the run. When the command exits, it stops its
+Metro and closes the runtime session records. Standalone plans cover the
+simulator lane only; development builds use the queued runner workflow.
 
-Standalone Metro uses the selected EAS profile environment as defaults and
-preserves explicit process environment overrides, including live API URLs.
-Both source identity resolution and Metro use the development app variant.
+Standalone Metro and source identity resolution both use the development app
+variant and preserve explicit process environment overrides, including live
+API URLs.
+
+## Store builds, signing, push and OTA
+
+Store builds, their signing material, push and over-the-air updates all run
+through Preflight. Every command below takes `--api-url`, `--workspace-id` and
+`--json`, and authenticates with `PREFLIGHT_TOKEN` or the saved login.
+
+### Signing credentials
+
+The control plane keeps certificates, profiles, keystores and API keys in its
+signing vault; runners receive them per job and never store them.
+
+```sh
+preflight credentials list --app <id>                 # app + team credentials
+preflight credentials upload --kind ios_distribution_certificate --file dist.p12 --password-env P12_PASSWORD
+preflight credentials upload --kind android_upload_keystore --app <id> --file upload.jks \
+  --password-env KEYSTORE_PASSWORD --field keyAlias=upload --field keyPassword=…
+preflight credentials upload --kind asc_api_key --file AuthKey_ABC123.p8 --field keyId=ABC123 --field issuerId=…
+preflight credentials doctor --app <id>               # what a store build is missing
+preflight credentials doctor --app <id> --fix         # create bundle ids, capabilities, profiles
+```
+
+Team kinds (`asc_api_key`, `apns_key`, `ios_distribution_certificate`,
+`ios_development_certificate`, `play_service_account`) upload without `--app`;
+app kinds (`ios_provisioning_profile`, `android_upload_keystore`,
+`fcm_service_account`) need it. `credentials refs` (or `list --app-id`) still
+lists generic secret references, and `credentials create` adds one.
+
+Moving an app off its old hosted-build account is a one-time import:
+
+```sh
+preflight credentials import-eas --app <id> --expo-token-env EXPO_ACCESS_TOKEN
+preflight credentials import-eas --all                # every linked app in the workspace
+preflight build-profiles import-eas --app <id> --file <old build config> --dry-run
+```
+
+`--expo-token-env` stores the account token in the vault first; the import
+reads it from there and reports each credential as imported, unchanged,
+missing or failed.
+
+### Signing targets and build profiles
+
+```sh
+preflight signing-targets get --app <id>
+preflight signing-targets set --app <id> --file targets.json   # [{targetName, bundleId, capabilities}]
+preflight build-profiles get --app <id>
+preflight build-profiles set --app <id> --file profiles.json   # one entry per lane
+```
+
+A build profile holds a lane's (`internal`, `beta`, `store`) non-secret
+environment, the ids of secret build-environment references, the iOS scheme,
+the Gradle task, the version source and the app directory. `get --json`
+prints a document `set` accepts.
+
+### Store builds
+
+```sh
+preflight build store --app <id> --platform ios --lane beta --git-ref main --wait
+preflight build store --app <id> --platform android --lane internal --destination play_internal --wait
+```
+
+The control plane resolves the lane's build profile and signing material
+(a missing certificate, profile, keystore or upload credential fails the
+request with `signing_material_missing`), allocates the build number, and
+queues a `store.build` job. A runner checks out the ref, runs `expo prebuild`,
+then archives and exports with `xcodebuild` (iOS) or builds the bundle with
+Gradle (Android), signs with the vault material and uploads through
+`store.upload`: `altool` to TestFlight, the Google Play Developer API to the
+chosen track. `--destination none` builds without uploading. `--wait` polls
+until the build is uploaded or fails and prints the App Store Connect build id
+or the Play version code.
+
+### Push
+
+```sh
+preflight push keys create --app <id> --scope send       # server secret for the app backend
+preflight push keys create --app <id> --scope register   # public key for the mobile app
+preflight push send --app <id> --file message.json       # {to, notification, ios?, android?}
+```
+
+Push goes straight to APNs and FCM with the app's vault credentials.
+
+### OTA updates
+
+```sh
+preflight ota code-signing generate --app <id> --out certs/preflight-ota-certificate.pem
+preflight ota rollback --app <id> --channel production --to-embedded
+preflight ota rollback --app <id> --channel production --to <updateId>
+preflight ota republish --app <id> --update <updateId> --channel production --rollout 25
+```
+
+`code-signing generate` keeps the private key in the vault and prints the
+`updates.codeSigningCertificate` / `codeSigningMetadata` app config. Rollback
+takes `--to-embedded`, `--to <updateId>`, `--previous` (the default), `--pause`
+or `--resume`, for one `--platform` or both.
+
+Runners execute `ota.export` and `ota.publish` jobs. When the control plane
+serves updates from its own store (R2, reported by `/api/preflight/v1/ota/health`),
+`ota.publish` stages the update locally, uploads each asset and then the
+update record through `PUT /api/preflight/v1/apps/<id>/ota/store/<updateId>/<file>`,
+and discards the staging copy. Otherwise it publishes into the runner's
+filesystem store (`PREFLIGHT_OTA_STORE`). `PREFLIGHT_OTA_SERVER_STORE=off`
+forces the filesystem store; `=r2` forces uploads.
 
 Unity library builds use `unity.build.player` with a source-bound command plan.
 LevelForge's build entry point and HabitPlay's three native library exports are
@@ -215,7 +336,7 @@ preflight runner once --workspace-root /path/to/source --ios-simulator-build-job
 The optional flag accepts integers from 1 to 32 and passes `-jobs` to the iOS
 simulator's Xcode build. Invalid or missing values fail before registration or
 execution. Leaving the flag unset preserves Xcode's automatic parallelism. This
-limits simulator compilation only; it does not change production EAS submission.
+limits simulator compilation only; it does not change store builds.
 Keep disk admission/runtime guards enabled and retain partial derived data when a
 build is interrupted. Lower parallelism may reduce memory and swap pressure, but
 its effect must be measured on the actual host before repeating a failed proof.
