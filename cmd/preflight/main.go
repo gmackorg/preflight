@@ -5717,6 +5717,8 @@ func handleRunnerClaim(
 		return handleOtaJob(client, options, registration, job, stdout)
 	case "store.build":
 		return handleStoreBuildJob(client, options, registration, job, stdout)
+	case "store.upload":
+		return handleStoreUploadJob(client, options, registration, job, stdout)
 	default:
 		return fmt.Errorf("unsupported runner job kind %q", job.Kind)
 	}
