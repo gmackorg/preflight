@@ -7941,7 +7941,8 @@ func copyMapAny(input map[string]any) map[string]any {
 // handleOtaJob runs Preflight-native OTA jobs:
 //
 //	ota.export      — npx expo export
-//	ota.publish     — publish-local.mjs into PREFLIGHT_OTA_STORE
+//	ota.publish     — publish-local.mjs, into the control plane's OTA store
+//	                  when it has one (ota_store_upload.go), else PREFLIGHT_OTA_STORE
 //	ota.fingerprint — npx expo-updates fingerprint:generate
 func handleOtaJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
 	appDir := appDirectoryForJob(options, job)
@@ -7995,7 +7996,7 @@ func handleOtaJob(client *http.Client, options runnerOnceOptions, registration r
 			"output":         truncateRunnerOutput(string(output)),
 		}
 	case "ota.publish":
-		updateID, pubOut, pubErr := runOtaPublish(options, appDir, exportDir, appSlug, channel, platform, runtimeVersion, message, runnerJobCancellationCheck(client, options, registration, job))
+		updateID, pubOut, storeFields, pubErr := publishOtaUpdate(client, options, registration, job, appDir, exportDir, appSlug, channel, platform, runtimeVersion, message, runnerJobCancellationCheck(client, options, registration, job))
 		output, err = pubOut, pubErr
 		result = map[string]any{
 			"updateId":       updateID,
@@ -8004,8 +8005,12 @@ func handleOtaJob(client *http.Client, options runnerOnceOptions, registration r
 			"platform":       platform,
 			"channel":        channel,
 			"appSlug":        appSlug,
-			"storeRoot":      otaStoreRoot(),
 			"output":         truncateRunnerOutput(string(output)),
+		}
+		// storeRoot is only reported for the runner's filesystem store; the
+		// control plane keys server-stored updates as updates/<slug>/<id>.
+		for key, value := range storeFields {
+			result[key] = value
 		}
 	case "ota.fingerprint":
 		fp, fpOut, fpErr := runOtaFingerprint(appDir, platform, runnerJobCancellationCheck(client, options, registration, job))
@@ -8058,6 +8063,9 @@ func handleOtaJob(client *http.Client, options runnerOnceOptions, registration r
 func otaFailureCode(err error) string {
 	if err == nil {
 		return "ota_failed"
+	}
+	if isOtaStoreUploadError(err) {
+		return "ota_store_unavailable"
 	}
 	message := err.Error()
 	if strings.Contains(message, "executable file not found") || strings.Contains(message, "not found") {
@@ -8138,7 +8146,7 @@ func runOtaExport(appDir, platform, exportDir, channel, runtimeVersion string, c
 	return runCommandCollectOutput(cmd, 20*time.Minute, cancelled)
 }
 
-func runOtaPublish(options runnerOnceOptions, appDir, exportDir, appSlug, channel, platform, runtimeVersion, message string, cancelled func() (bool, error)) (string, []byte, error) {
+func runOtaPublish(options runnerOnceOptions, appDir, exportDir, appSlug, channel, platform, runtimeVersion, message string, storeRoot string, cancelled func() (bool, error)) (string, []byte, error) {
 	script, err := findOtaPublishScript(options)
 	if err != nil {
 		return "", nil, err
@@ -8160,7 +8168,7 @@ func runOtaPublish(options runnerOnceOptions, appDir, exportDir, appSlug, channe
 	cmd := exec.Command("node", args...)
 	cmd.Dir = filepath.Dir(script)
 	cmd.Env = append(os.Environ(),
-		"PREFLIGHT_OTA_STORE="+otaStoreRoot(),
+		"PREFLIGHT_OTA_STORE="+storeRoot,
 		"PREFLIGHT_OTA_RUNTIME_VERSION="+runtimeVersion,
 		"EXPO_NO_TELEMETRY=1",
 	)
