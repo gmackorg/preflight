@@ -122,6 +122,9 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		printBuildHelp(stdout)
 		return 0
 	}
+	if args[0] == "store" {
+		return runBuildStore(args[1:], stdout, stderr, client)
+	}
 	ctx := newBuildOpsContext()
 	appID, platform, runtime := "", "ios", "expo"
 	kind, priorityClass, idempotencyKey := "build", "normal", ""
@@ -395,14 +398,15 @@ func waitForWorkOrder(ctx buildOpsContext, client *http.Client, id string, stdou
 
 func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: preflight build --app <appId> [flags]")
+	fmt.Fprintln(w, "       preflight build store --app <appId> --platform ios|android --lane internal|beta|store [--wait]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Queue a work order on the build farm.")
+	fmt.Fprintln(w, "Queue a work order on the build farm. `build store --help` covers signed store builds.")
 	fmt.Fprintln(w, "  --app <id>             app to build (required)")
 	fmt.Fprintln(w, "  --platform ios|android default ios")
 	fmt.Fprintln(w, "  --runtime <name>       app runtime, default expo")
-	fmt.Fprintln(w, "  --profile <name>       exact compatible EAS profile (alias --build-profile)")
-	fmt.Fprintln(w, "                         build/device_test use device profiles; simulator_test/e2e_suite use simulator profiles")
-	fmt.Fprintln(w, "                         store/production builds require the separate store build workflow")
+	fmt.Fprintln(w, "  --profile <name>       lane profile (alias --build-profile): development (default), or")
+	fmt.Fprintln(w, "                         preview* for a packaged app on simulator_test/e2e_suite")
+	fmt.Fprintln(w, "                         store/production builds use `preflight build store`")
 	fmt.Fprintln(w, "  --kind <kind>          default build; one of:")
 	fmt.Fprintf(w, "                         %s\n", strings.Join(workOrderKinds, ", "))
 	fmt.Fprintln(w, "  --priority-class <c>   background|normal|… default normal")

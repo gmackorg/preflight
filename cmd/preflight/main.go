@@ -130,6 +130,14 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runTargets(args[1:], stdout, stderr, client)
 	case "credentials":
 		return runCredentials(args[1:], stdout, stderr, client)
+	case "signing-targets":
+		return runSigningTargets(args[1:], stdout, stderr, client)
+	case "build-profiles":
+		return runBuildProfiles(args[1:], stdout, stderr, client)
+	case "push":
+		return runPush(args[1:], stdout, stderr, client)
+	case "ota":
+		return runOTA(args[1:], stdout, stderr, client)
 	case "signing-cert":
 		return runSigningCert(args[1:], stdout, stderr, client)
 	case "providers":
@@ -164,7 +172,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  login         Authenticate with the Preflight API")
 	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist/doctor/screenshots/submit-for-review)")
 	fmt.Fprintln(w, "  fleet         Fleet cockpit: `fleet next` = per-app next action + owner")
-	fmt.Fprintln(w, "  build         Queue a build/test work order on the build farm")
+	fmt.Fprintln(w, "  build         Queue a build/test work order; `build store` builds and uploads a store binary")
 	fmt.Fprintln(w, "  cancel        Cancel a work order and its active workflow")
 	fmt.Fprintln(w, "  queue         Build-farm queue: what is queued/running/blocked, and why")
 	fmt.Fprintln(w, "  nodes         Build-farm machines: engines, free disk, agents, live jobs")
@@ -176,7 +184,11 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
 	fmt.Fprintln(w, "  capabilities  Probe /api/preflight/v1/capabilities")
 	fmt.Fprintln(w, "  targets       Register and list local simulator/device inventory")
-	fmt.Fprintln(w, "  credentials   Manage Preflight-owned credential references")
+	fmt.Fprintln(w, "  credentials   Signing credentials (list/import-eas/doctor/upload) and secret references")
+	fmt.Fprintln(w, "  signing-targets  iOS signing targets for store builds")
+	fmt.Fprintln(w, "  build-profiles   Per-lane store build settings")
+	fmt.Fprintln(w, "  push          Send native push and mint push keys")
+	fmt.Fprintln(w, "  ota           OTA code signing, rollback and republish")
 	fmt.Fprintln(w, "  providers     Manage mobile provider accounts")
 	fmt.Fprintln(w, "  sentry        Relay Sentry issues into crash/error tracking (`sentry sync`)")
 	fmt.Fprintln(w, "  crashes       AI root-cause analysis of crash issues (`crashes analyze`)")
@@ -869,11 +881,30 @@ func runCredentials(args []string, stdout io.Writer, stderr io.Writer, client *h
 		printCredentialsHelp(stdout)
 		return 0
 	}
+	if subcommandHelpRequested(args[1:]) {
+		printCredentialsHelp(stdout)
+		return 0
+	}
 	switch args[0] {
 	case "create":
 		return runCredentialsCreate(args[1:], stdout, stderr, client)
 	case "list":
+		// --app-id/--provider are the secret-reference listing's flags; the
+		// signing vault listing takes --app.
+		for _, arg := range args[1:] {
+			if arg == "--app-id" || arg == "--provider" {
+				return runCredentialsList(args[1:], stdout, stderr, client)
+			}
+		}
+		return runSigningCredentialsList(args[1:], stdout, stderr, client)
+	case "refs":
 		return runCredentialsList(args[1:], stdout, stderr, client)
+	case "import-eas":
+		return runCredentialsImportEAS(args[1:], stdout, stderr, client)
+	case "doctor":
+		return runCredentialsDoctor(args[1:], stdout, stderr, client)
+	case "upload":
+		return runCredentialsUpload(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown credentials command %q\n", args[0])
 		printCredentialsHelp(stderr)
@@ -884,9 +915,22 @@ func runCredentials(args []string, stdout io.Writer, stderr io.Writer, client *h
 func printCredentialsHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: preflight credentials <command>")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  create  Create a Preflight-owned credential reference")
-	fmt.Fprintln(w, "  list    List credential references")
+	fmt.Fprintln(w, "Signing credentials (the vault store builds sign with):")
+	fmt.Fprintln(w, "  list [--app <id>] [--include-revoked]       app + team credentials, or the workspace's")
+	fmt.Fprintln(w, "  upload --kind <kind> --file <path> [--app <id>] [--password <p>|--password-env <VAR>]")
+	fmt.Fprintln(w, "         [--team-id <id>] [--lane <lane>] [--field key=value]")
+	fmt.Fprintln(w, "         kinds: asc_api_key, apns_key, ios_distribution_certificate, ios_development_certificate,")
+	fmt.Fprintln(w, "                ios_provisioning_profile, play_service_account, fcm_service_account,")
+	fmt.Fprintln(w, "                android_upload_keystore (--field keyAlias=…, keyPassword=…)")
+	fmt.Fprintln(w, "  doctor --app <id> [--fix]                  check (and repair) everything a store build signs with")
+	fmt.Fprintln(w, "  import-eas (--app <id> | --all) [--expo-token-env <VAR> | --expo-token-ref <id>]")
+	fmt.Fprintln(w, "         one-time migration: copy signing material from an Expo account into the vault")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Secret references:")
+	fmt.Fprintln(w, "  create  Create a Preflight-owned secret reference (--provider --purpose --key --value-env)")
+	fmt.Fprintln(w, "  refs    List secret references (also: list --app-id/--provider)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "All commands take --api-url, --workspace-id and --json.")
 }
 
 func runCredentialsCreate(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
