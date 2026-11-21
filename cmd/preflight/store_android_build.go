@@ -151,7 +151,10 @@ func runAndroidStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv ma
 		return storeBuildOutcome{}, storeFailuref("signing_credential_invalid", "keystoreBase64 is not valid base64")
 	}
 
-	env := storeCommandEnv(plan.Environment, secretEnv)
+	env, err := storeCommandEnv(plan.Environment, secretEnv)
+	if err != nil {
+		return storeBuildOutcome{}, err
+	}
 	if err := runExpoStorePrebuild(rt, "android", env); err != nil {
 		return storeBuildOutcome{}, err
 	}

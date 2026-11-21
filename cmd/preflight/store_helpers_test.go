@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -305,3 +306,34 @@ func (plane *fakeStoreControlPlane) client() *storeArtifactClient {
 }
 
 func b64(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
+
+func TestExpandStorePlanEnvironmentResolvesEASStyleReferences(t *testing.T) {
+	got, err := expandStorePlanEnvironment(
+		map[string]string{
+			"SENTRY_DSN":  "${EXPO_PUBLIC_SENTRY_DSN_PROD}",
+			"API_URL":     "https://${API_HOST}/v1",
+			"APP_VARIANT": "production",
+		},
+		map[string]string{"EXPO_PUBLIC_SENTRY_DSN_PROD": "https://dsn.example", "API_HOST": "api.example.com"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["SENTRY_DSN"] != "https://dsn.example" || got["API_URL"] != "https://api.example.com/v1" || got["APP_VARIANT"] != "production" {
+		t.Fatalf("unexpected expansion: %#v", got)
+	}
+}
+
+func TestExpandStorePlanEnvironmentFailsOnUnresolvedReference(t *testing.T) {
+	_, err := expandStorePlanEnvironment(
+		map[string]string{"SENTRY_DSN": "${EXPO_PUBLIC_SENTRY_DSN_PROD}", "B": "${A_MISSING}"},
+		map[string]string{},
+	)
+	var failure *storeFailure
+	if !errors.As(err, &failure) || failure.code != "build_environment_unresolved" {
+		t.Fatalf("want build_environment_unresolved, got %v", err)
+	}
+	if !strings.Contains(failure.message, "A_MISSING, EXPO_PUBLIC_SENTRY_DSN_PROD") {
+		t.Fatalf("message should list missing names sorted: %q", failure.message)
+	}
+}

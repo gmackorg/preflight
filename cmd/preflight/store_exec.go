@@ -13,6 +13,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -83,18 +85,59 @@ func (runner *execStoreCommandRunner) Run(spec storeCommand) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
+// storeEnvReference matches ${NAME} references in build-profile values.
+var storeEnvReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandStorePlanEnvironment resolves ${NAME} references in the plan's
+// environment against the revealed secret environment, the way eas.json
+// interpolated EAS environment variables (e.g. SENTRY_DSN:
+// "${EXPO_PUBLIC_SENTRY_DSN_PROD}"). A reference with no revealed secret is
+// an error: building with the literal "${NAME}" would ship a broken value.
+func expandStorePlanEnvironment(planEnv map[string]string, secretEnv map[string]string) (map[string]string, error) {
+	expanded := make(map[string]string, len(planEnv))
+	missing := map[string]bool{}
+	for key, value := range planEnv {
+		expanded[key] = storeEnvReference.ReplaceAllStringFunc(value, func(match string) string {
+			name := storeEnvReference.FindStringSubmatch(match)[1]
+			if secret, ok := secretEnv[name]; ok {
+				return secret
+			}
+			missing[name] = true
+			return match
+		})
+	}
+	if len(missing) > 0 {
+		names := make([]string, 0, len(missing))
+		for name := range missing {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return nil, storeFailuref(
+			"build_environment_unresolved",
+			"build profile references %s, which no secret in this build provides; add them to the profile's secretEnvironmentKeys",
+			strings.Join(names, ", "),
+		)
+	}
+	return expanded, nil
+}
+
 // storeCommandEnv is the environment for prebuild/pod/xcodebuild/gradle: the
 // runner's environment, the non-interactive and locale fixes the other build
-// paths apply (see expoCommandEnv), then the plan's environment and the
-// revealed secret environment, which win.
-func storeCommandEnv(planEnv map[string]string, secretEnv map[string]string) []string {
+// paths apply (see expoCommandEnv), then the plan's environment (with ${NAME}
+// references expanded from secrets) and the revealed secret environment,
+// which win.
+func storeCommandEnv(planEnv map[string]string, secretEnv map[string]string) ([]string, error) {
+	resolved, err := expandStorePlanEnvironment(planEnv, secretEnv)
+	if err != nil {
+		return nil, err
+	}
 	env := append([]string{}, os.Environ()...)
 	env = upsertEnv(env, "EXPO_NO_INTERACTIVE", "1")
 	env = upsertEnv(env, "CI", "1")
 	if os.Getenv("LANG") == "" && os.Getenv("LC_ALL") == "" && os.Getenv("LC_CTYPE") == "" {
 		env = upsertEnv(env, "LANG", "en_US.UTF-8")
 	}
-	for key, value := range planEnv {
+	for key, value := range resolved {
 		if isSafeEnvironmentKey(key) {
 			env = upsertEnv(env, key, value)
 		}
@@ -102,7 +145,7 @@ func storeCommandEnv(planEnv map[string]string, secretEnv map[string]string) []s
 	for key, value := range secretEnv {
 		env = upsertEnv(env, key, value)
 	}
-	return env
+	return env, nil
 }
 
 // storeCleanup runs registered cleanups in reverse order exactly once. It is

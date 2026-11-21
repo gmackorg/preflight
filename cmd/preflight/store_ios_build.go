@@ -174,7 +174,10 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 	if teamID == "" {
 		teamID = cert.TeamID
 	}
-	env := storeCommandEnv(plan.Environment, secretEnv)
+	env, err := storeCommandEnv(plan.Environment, secretEnv)
+	if err != nil {
+		return storeBuildOutcome{}, err
+	}
 
 	if err := runExpoStorePrebuild(rt, "ios", env); err != nil {
 		return storeBuildOutcome{}, err
