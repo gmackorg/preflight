@@ -5241,7 +5241,9 @@ func redactSetupTranscriptText(value string) string {
 	redacted = regexp.MustCompile(`(?i)\b(Authorization:\s*Bearer\s+)([^\s]+)`).ReplaceAllString(redacted, "$1[REDACTED]")
 	redacted = regexp.MustCompile(`(?i)([?&](?:access_token|token|auth|api_key|secret|signature|key)=)([^&#\s]+)`).ReplaceAllString(redacted, "$1[REDACTED]")
 	redacted = regexp.MustCompile(`(?i)(["']?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|private[_-]?key|signing[_-]?secret|client[_-]?secret)["']?\s*[:=]\s*["']?)([^"',\s}]+)(["']?)`).ReplaceAllString(redacted, "$1[REDACTED]$3")
-	return redacted
+	// Literal values registered by the job handling them (store signing
+	// passwords, key material, OAuth tokens); see secret_redaction.go.
+	return redactRegisteredSecrets(redacted)
 }
 
 func runRunner(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -5713,6 +5715,8 @@ func handleRunnerClaim(
 		return handleEASSubmitJob(client, options, registration, job, stdout)
 	case "ota.export", "ota.publish", "ota.fingerprint":
 		return handleOtaJob(client, options, registration, job, stdout)
+	case "store.build":
+		return handleStoreBuildJob(client, options, registration, job, stdout)
 	default:
 		return fmt.Errorf("unsupported runner job kind %q", job.Kind)
 	}
@@ -5773,6 +5777,7 @@ func defaultRunnerCapabilities(hostMode string) map[string]any {
 	// than never claiming it — labnuc (Linux) advertised ios and the full macOS
 	// toolchain until 2026-08-13.
 	platforms := detectedPlatforms()
+	adapters = append(adapters, detectStoreAdapters(defaultStoreToolProbe())...)
 	adapters = filterAdaptersForPlatforms(adapters, platforms)
 
 	return map[string]any{
@@ -5812,6 +5817,7 @@ func cleanupExpiredLocalPreflightArtifacts(workspaceRoot string, ttl time.Durati
 		filepath.Join(".preflight", "dev-sessions"),
 		filepath.Join(".preflight", "eas"),
 		filepath.Join(".preflight", "maestro"),
+		filepath.Join(".preflight", "store-builds"),
 		filepath.Join(".preflight", "unity-builds"),
 	} {
 		root := filepath.Join(workspaceRoot, relativeRoot)
@@ -6007,6 +6013,15 @@ type runnerJobPayload struct {
 	BinaryBuildId  string `json:"binaryBuildId"`
 	GitCommitSha   string `json:"gitCommitSha"`
 	DependsOnJobId string `json:"dependsOnJobId"`
+	// PREFLT-66 store.build / store.upload fields (see store_job.go):
+	BuildID       string          `json:"buildId"`
+	StorePlan     json.RawMessage `json:"plan"`
+	StoreArtifact json.RawMessage `json:"artifact"`
+	BundleID      string          `json:"bundleId"`
+	ApplicationID string          `json:"applicationId"`
+	Version       string          `json:"version"`
+	BuildNumber   string          `json:"buildNumber"`
+	ReleaseNotes  string          `json:"releaseNotes"`
 }
 
 type runnerJobCommandPlan struct {
