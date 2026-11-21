@@ -162,7 +162,7 @@ func reportDepsSnapshot(client *http.Client, appID string, snap *depSnapshot) er
 
 // depsSweepReport snapshots every Expo app under root and POSTs each to its
 // fleet app's dependencies route, mapping checkout→app-id exactly like the
-// doctor sweep (EAS projectId → expo slug → repo dir name → git remote →
+// doctor sweep (Expo projectId → expo slug → repo dir name → git remote →
 // opt-in expo-config resolve). Backfills pf_app_dependency_snapshot fleet-wide.
 func depsSweepReport(client *http.Client, root string, resolveConfig bool, stdout, stderr io.Writer) int {
 	apiURL, token := preflightAPIConfig()
@@ -196,7 +196,7 @@ func depsSweepReport(client *http.Client, root string, resolveConfig bool, stdou
 	reported, skipped := 0, 0
 	var unmatched []string
 	fmt.Fprintf(stdout, "Reporting Expo dependency snapshots — %s\n\n", root)
-	for _, ad := range findEASAppDirs(root) {
+	for _, ad := range findExpoAppDirs(root) {
 		rel, relErr := filepath.Rel(root, ad)
 		if relErr != nil {
 			rel = ad
@@ -328,7 +328,7 @@ func runAppsDeps(args []string, stdout io.Writer, stderr io.Writer, client *http
 				return 2
 			}
 		}
-		appDirs = findEASAppDirs(root)
+		appDirs = findExpoAppDirs(root)
 	}
 
 	var snaps []*depSnapshot

@@ -4393,7 +4393,6 @@ func changedSourceBoundSetupFiles(appDir string, binding runnerJobSourceBinding,
 
 func sourceBoundSetupFiles(appDir string, binding runnerJobSourceBinding) []sourceBoundSetupFile {
 	names := []string{
-		"eas.json",
 		"app.config.ts",
 		"app.config.js",
 		"app.json",
@@ -5558,6 +5557,7 @@ func cleanupExpiredLocalPreflightArtifacts(workspaceRoot string, ttl time.Durati
 	for _, relativeRoot := range []string{
 		filepath.Join(".preflight", "android-open"),
 		filepath.Join(".preflight", "dev-sessions"),
+		// Run logs from the retired hosted-build lane; swept until they age out.
 		filepath.Join(".preflight", "eas"),
 		filepath.Join(".preflight", "maestro"),
 		filepath.Join(".preflight", "store-builds"),
@@ -5711,15 +5711,17 @@ type apiRunnerJob struct {
 }
 
 type runnerJobPayload struct {
-	Platform                 string                             `json:"platform"`
-	Lane                     string                             `json:"lane"`
-	TargetID                 string                             `json:"targetId"`
-	ProviderIdentity         string                             `json:"providerIdentity"`
-	TargetDisplayName        string                             `json:"targetDisplayName"`
-	FlowPath                 string                             `json:"flowPath"`
-	IncludeTags              []string                           `json:"includeTags"`
-	DeviceProvider           string                             `json:"deviceProvider"`
-	EASProfileName           string                             `json:"easProfileName"`
+	Platform          string   `json:"platform"`
+	Lane              string   `json:"lane"`
+	TargetID          string   `json:"targetId"`
+	ProviderIdentity  string   `json:"providerIdentity"`
+	TargetDisplayName string   `json:"targetDisplayName"`
+	FlowPath          string   `json:"flowPath"`
+	IncludeTags       []string `json:"includeTags"`
+	DeviceProvider    string   `json:"deviceProvider"`
+	// BuildProfileName is the local lane profile (see lane_profiles.go); the
+	// wire name predates PREFLT-66 and is kept for control-plane compatibility.
+	BuildProfileName         string                             `json:"easProfileName"`
 	TargetClass              string                             `json:"targetClass"`
 	SourceBinding            runnerJobSourceBinding             `json:"sourceBinding"`
 	DevSession               runnerJobDevSession                `json:"devSession"`
@@ -5741,9 +5743,8 @@ type runnerJobPayload struct {
 	Metadata        map[string]string        `json:"metadata"`
 	Locales         []string                 `json:"locales"`
 	Screenshots     []runnerJobScreenshotRef `json:"screenshots"`
-	// eas.submit (one-click distribute) fields:
+	// Store upload / submission fields:
 	SubmissionID string `json:"submissionId"`
-	EASBuildID   string `json:"easBuildId"`
 	ASCAppID     string `json:"ascAppId"`
 	Destination  string `json:"destination"`
 	Profile      string `json:"profile"`
@@ -5834,8 +5835,7 @@ type runnerJobSourceBinding struct {
 	ID                string    `json:"id"`
 	WorkspaceRoot     string    `json:"workspaceRoot"`
 	PackagePath       string    `json:"packagePath"`
-	EASProfileName    string    `json:"easProfileName"`
-	EASJSONDigest     string    `json:"easJsonDigest"`
+	BuildProfileName  string    `json:"easProfileName"`
 	ExpoConfigDigest  string    `json:"expoConfigDigest"`
 	AppScheme         string    `json:"appScheme"`
 	ExpoSlug          string    `json:"expoSlug"`
@@ -5987,7 +5987,7 @@ func installFleetSigningIdentity(client *http.Client, options runnerOnceOptions,
 
 // ensureFleetASCKey writes the distributed App Store Connect .p8 to the path the
 // runner's ASC env points at (PREFLIGHT_ASC_KEY_PATH), or a conventional default
-// when that isn't set, so device-lane provisioning + fastlane/EAS all find it.
+// when that isn't set, so device-lane provisioning, fastlane and store builds all find it.
 // Only writes when the file is absent, so it's cheap to call every cycle and
 // never clobbers a hand-placed key.
 func ensureFleetASCKey(cert fleetSigningCert, stdout io.Writer) {
@@ -7894,7 +7894,7 @@ func copyMapAny(input map[string]any) map[string]any {
 	return out
 }
 
-// handleOtaJob runs Preflight-native OTA jobs (not EAS Update):
+// handleOtaJob runs Preflight-native OTA jobs:
 //
 //	ota.export      — npx expo export
 //	ota.publish     — publish-local.mjs into PREFLIGHT_OTA_STORE
@@ -9867,15 +9867,9 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	}
 
 	if !isCiRoot && !strings.HasPrefix(job.Kind, "unity.") {
-		easProfileEnv := easProfileEnvForJob(appDir, job)
-		resolvedExpoConfig := resolveExpoConfig(appDir, easProfileEnv)
+		resolvedExpoConfig := resolveExpoConfig(appDir, laneProfileEnvForJob(job))
 		if expected := strings.TrimSpace(binding.ExpoConfigDigest); expected != "" {
 			if err := compareSourceBindingValue("expoConfigDigest", expected, resolvedExpoConfig.digest); err != nil {
-				return err
-			}
-		}
-		if expected := strings.TrimSpace(binding.EASJSONDigest); expected != "" {
-			if err := compareSourceBindingValue("easJsonDigest", expected, digestIfExists(filepath.Join(appDir, "eas.json"))); err != nil {
 				return err
 			}
 		}
@@ -9894,9 +9888,6 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 			return err
 		}
 		if err := compareSourceBindingValue("easProjectId", binding.EASProjectID, appIdentity.easProjectID); err != nil {
-			return err
-		}
-		if err := compareSourceBindingValue("easProfileName", binding.EASProfileName, actualEASProfileNameForJob(appDir, job)); err != nil {
 			return err
 		}
 	}
@@ -9958,49 +9949,11 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	return nil
 }
 
-func easProfileEnvForJob(appDir string, job apiRunnerJob) map[string]string {
-	profileName := strings.TrimSpace(job.Payload.SourceBinding.EASProfileName)
-	if profileName == "" {
-		profileName = strings.TrimSpace(job.Payload.EASProfileName)
-	}
-	if profileName == "" {
-		return nil
-	}
-	easConfig, err := loadEASJSON(appDir)
-	if err != nil {
-		return nil
-	}
-	profile, ok := easConfig.Build[profileName]
-	if !ok {
-		return nil
-	}
-	return easProfileEnv(profile, jobPlatform(job))
-}
-
-func actualEASProfileNameForJob(appDir string, job apiRunnerJob) string {
-	if profileName := strings.TrimSpace(job.Payload.EASProfileName); profileName != "" {
-		return profileName
-	}
-	profileName := strings.TrimSpace(job.Payload.SourceBinding.EASProfileName)
-	if profileName == "" {
-		return ""
-	}
-	easConfig, err := loadEASJSON(appDir)
-	if err != nil {
-		return ""
-	}
-	if _, ok := easConfig.Build[profileName]; !ok {
-		return ""
-	}
-	return profileName
-}
-
 func runnerJobSourceBindingEmpty(binding runnerJobSourceBinding) bool {
 	return strings.TrimSpace(binding.ID) == "" &&
 		strings.TrimSpace(binding.WorkspaceRoot) == "" &&
 		strings.TrimSpace(binding.PackagePath) == "" &&
-		strings.TrimSpace(binding.EASProfileName) == "" &&
-		strings.TrimSpace(binding.EASJSONDigest) == "" &&
+		strings.TrimSpace(binding.BuildProfileName) == "" &&
 		strings.TrimSpace(binding.ExpoConfigDigest) == "" &&
 		strings.TrimSpace(binding.AppScheme) == "" &&
 		strings.TrimSpace(binding.ExpoSlug) == "" &&
@@ -10908,7 +10861,7 @@ func buildSignInstallIOSDeviceApp(
 	}
 	// The ASC API key lets -allowProvisioningUpdates register the device + manage
 	// the profile without an interactive Xcode account login. Same env the
-	// fastlane/EAS paths read.
+	// fastlane and store-build paths read.
 	keyID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_ID"))
 	issuerID := strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_ISSUER_ID"))
 	keyPath := expandHomePath(strings.TrimSpace(os.Getenv("PREFLIGHT_ASC_KEY_PATH")))
@@ -11732,7 +11685,7 @@ func expoCommandEnv(job apiRunnerJob) []string {
 	if expoDevelopmentVariant(job) {
 		env = upsertEnv(env, "APP_VARIANT", "development")
 	}
-	for key, value := range easProfileEnvForJob(appDirectoryForJob(runnerOnceOptions{}, job), job) {
+	for key, value := range laneProfileEnvForJob(job) {
 		env = upsertEnv(env, key, value)
 	}
 	// @sentry/react-native's Xcode build phase runs `sentry-cli` to upload
@@ -11758,40 +11711,15 @@ func expoCommandEnv(job apiRunnerJob) []string {
 }
 
 func expoDevelopmentVariant(job apiRunnerJob) bool {
-	if variant := easProfileEnvForJob(appDirectoryForJob(runnerOnceOptions{}, job), job)["APP_VARIANT"]; variant != "" {
+	if variant := laneProfileEnvForJob(job)["APP_VARIANT"]; variant != "" {
 		return variant == "development"
 	}
-	lane := strings.TrimSpace(job.Payload.Lane)
-	if lane == "simulator" || lane == "development" {
-		return true
-	}
-	profile := strings.TrimSpace(job.Payload.EASProfileName)
-	if profile == "" {
-		profile = strings.TrimSpace(job.Payload.SourceBinding.EASProfileName)
-	}
+	profile := laneProfileNameForJob(job)
 	if profile == "development" || profile == "development-device" {
 		return true
 	}
 	return strings.Contains(job.Payload.SourceBinding.AndroidPackage, ".dev") ||
 		strings.Contains(job.Payload.SourceBinding.IOSBundleID, ".dev")
-}
-
-// Preview simulator profiles produce a packaged app with embedded JavaScript.
-// Physical development targets retain their existing dev-client path.
-func isPackagedIOSSimulatorProfile(profile easBuildProfile, platform string, lane string) bool {
-	return platform == "ios" && lane == "simulator" &&
-		profile.DevelopmentClient != nil && !*profile.DevelopmentClient &&
-		easProfileIsIOSSimulator(profile) && profile.Distribution == "internal" &&
-		easProfileEnv(profile, platform)["APP_VARIANT"] == "preview"
-}
-
-func isPackagedIOSSimulatorJob(job apiRunnerJob) bool {
-	config, err := loadEASJSON(appDirectoryForJob(runnerOnceOptions{}, job))
-	if err != nil {
-		return false
-	}
-	profile, ok := config.Build[easProfileNameForJob(job)]
-	return ok && isPackagedIOSSimulatorProfile(profile, jobPlatform(job), job.Payload.Lane)
 }
 
 func upsertEnv(env []string, key string, value string) []string {
@@ -13238,10 +13166,10 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 		fmt.Fprintln(stdout, "  --app-dir <path>        Expo app directory (default: .)")
 		fmt.Fprintln(stdout, "  --platform ios|android  Platform to prove (default: ios)")
 		fmt.Fprintln(stdout, "  --lane <lane>           simulator or development (default: simulator)")
-		fmt.Fprintln(stdout, "  --build-strategy <name> local or eas development build strategy")
-		fmt.Fprintln(stdout, "  --build-profile <name>  Select an EAS profile (preview simulator profiles build packaged apps locally)")
+		fmt.Fprintln(stdout, "  --build-strategy local  Development build strategy (builds run on the runner)")
+		fmt.Fprintln(stdout, "  --build-profile <name>  Lane profile: development (default) or preview* for a packaged simulator app")
 		fmt.Fprintln(stdout, "  --priority <n>          scheduling priority; higher is claimed first (default: 0)")
-		fmt.Fprintln(stdout, "  --local-readiness       Validate local Expo/EAS/Maestro readiness without API calls")
+		fmt.Fprintln(stdout, "  --local-readiness       Check app config, expo-dev-client and the Maestro smoke flow without API calls")
 		fmt.Fprintln(stdout, "  --secret-ref <id>       Attach a Preflight-owned secret reference to runner jobs")
 		fmt.Fprintln(stdout, "  --wait-for-runner       Create the workflow even when no runner is currently available")
 		return 0
@@ -13388,8 +13316,8 @@ func runProveApp(args []string, stdout io.Writer, stderr io.Writer, client *http
 				fmt.Fprintln(stderr, "--build-strategy requires a value")
 				return 2
 			}
-			if value != "local" && value != "eas" {
-				fmt.Fprintln(stderr, "--build-strategy must be local or eas")
+			if value != "local" {
+				fmt.Fprintln(stderr, "--build-strategy must be local; development builds run on the runner")
 				return 2
 			}
 			options.buildStrategy = value
@@ -13726,44 +13654,40 @@ func buildLocalReadinessReport(options proveAppOptions, binding sourceBinding) l
 		})
 	}
 
+	// Preflight conventions (PREFLT-66): an Expo app config that names the
+	// native app, expo-dev-client for development-client lanes, and the
+	// .maestro/01-app-launches.yaml smoke flow. Build settings for local lanes
+	// come from the profile name (lane_profiles.go), not from a config file.
+	profile, profileErr := resolveLaneProfile(binding.BuildProfileName, binding.Platform, binding.Lane)
+	if profileErr != nil {
+		addCheck("build_profile", false, profileErr.Error())
+	} else if profile.packagedPreview {
+		addCheck("build_profile", true, fmt.Sprintf("build profile %q builds a packaged preview app", profile.name))
+	} else {
+		addCheck("build_profile", true, fmt.Sprintf("build profile %q builds a development client", profile.name))
+	}
+	report.Metadata["buildProfile"] = profile.name
+	report.Metadata["packagedPreview"] = profile.packagedPreview
+
 	pkg, err := readPackageJSON(filepath.Join(appDir, "package.json"))
 	if err != nil {
 		addCheck("package_json", false, "package.json is not readable")
 	} else {
 		addCheck("expo_app", isExpoPackage(pkg), "package.json identifies an Expo app")
-		addCheck("expo_dev_client", hasDependency(pkg, "expo-dev-client"), "expo-dev-client dependency is installed")
-	}
-
-	addCheck("app_scheme", binding.AppScheme != "" || binding.ExpoSlug != "", "Expo scheme or slug is available for development-client links")
-	if binding.Platform == "android" {
-		addCheck("android_package", binding.AndroidPackage != "", "Android package is available from Expo config")
-	} else {
-		addCheck("ios_bundle_id", binding.IOSBundleID != "", "iOS bundle identifier is available from Expo config")
-	}
-	addCheck("eas_project", binding.EASProjectID != "", "EAS project ID is available from Expo config")
-
-	easConfig, err := loadEASJSON(appDir)
-	if err != nil {
-		addCheck("eas_json", false, "eas.json is not readable")
-	} else {
-		profile, ok := easConfig.Build[binding.EASProfileName]
-		addCheck("eas_profile", ok && binding.EASProfileName != "", fmt.Sprintf("selected EAS profile %q", binding.EASProfileName))
-		if ok {
-			packagedPreview := isPackagedSimulatorProfile(profile, binding.Platform, binding.Lane)
-			addCheck("eas_development_client", easProfileDevelopmentClient(profile) || packagedPreview, "EAS profile enables developmentClient or a packaged preview simulator build")
-			addCheck("eas_internal_distribution", profile.Distribution == "" || profile.Distribution == "internal", "EAS profile uses internal distribution")
-			if binding.Platform == "ios" {
-				simulator := profile.IOS.Simulator != nil && *profile.IOS.Simulator
-				if binding.Lane == "development" {
-					addCheck("eas_ios_device_profile", !simulator, "iOS development lane uses a physical-device profile")
-				} else {
-					addCheck("eas_ios_simulator_profile", simulator, "iOS simulator lane uses a simulator profile")
-				}
-			}
-			if binding.Platform == "android" {
-				addCheck("eas_android_apk", easProfileAndroidInstallable(profile), "Android development build is installable as an APK")
-			}
+		if !profile.packagedPreview {
+			addCheck("expo_dev_client", hasDependency(pkg, "expo-dev-client"), "expo-dev-client dependency is installed for the development client")
 		}
+	}
+
+	configPath := expoConfigPath(appDir)
+	addCheck("app_config", configPath != "", "app.config.ts, app.config.js or app.json is present")
+	if !profile.packagedPreview {
+		addCheck("app_scheme", binding.AppScheme != "" || binding.ExpoSlug != "", "Expo scheme or slug is available for development-client links")
+	}
+	if binding.Platform == "android" {
+		addCheck("android_package", binding.AndroidPackage != "", "android.package is set in the app config")
+	} else {
+		addCheck("ios_bundle_id", binding.IOSBundleID != "", "ios.bundleIdentifier is set in the app config")
 	}
 
 	flowPath := localReadinessMaestroFlowPath(options, appDir)
@@ -13928,10 +13852,6 @@ func readStandaloneDevelopmentReadiness(options proveAppOptions, binding sourceB
 	if err != nil {
 		return nil, fmt.Errorf("read package.json: %w", err)
 	}
-	easConfig, err := loadEASJSON(appDirectory)
-	if err != nil {
-		return nil, fmt.Errorf("read eas.json: %w", err)
-	}
 	flowPath := localReadinessMaestroFlowPath(options, appDirectory)
 	flowContent, err := os.ReadFile(flowPath)
 	if err != nil {
@@ -13940,7 +13860,6 @@ func readStandaloneDevelopmentReadiness(options proveAppOptions, binding sourceB
 	return map[string]any{
 		"sourceBinding": binding,
 		"packageJson":   packageConfig,
-		"easJson":       easConfig,
 		"maestroFlows": []map[string]string{
 			{"path": flowPath, "content": string(flowContent)},
 		},
@@ -14123,13 +14042,8 @@ func startStandaloneSimulatorMetro(plannedCommand simulatorProofPlanCommand, adv
 	}
 	_ = listener.Close()
 	command := standalonePlannedExecCommand(plannedCommand, stderr)
-	easConfig, err := loadEASJSON(plannedCommand.CWD)
-	if err != nil {
-		return standaloneMetroProcess{}, fmt.Errorf("read standalone Metro profile: %w", err)
-	}
-	profile := selectEASProfile(easConfig, platform, "simulator")
 	command.Env = upsertEnvValues(expoDevServerEnv(runnerOnceOptions{hostMode: "localhost"}, apiRunnerJob{Payload: runnerJobPayload{Lane: "simulator"}}), plannedCommand.Env)
-	command.Env = upsertEnvValues(command.Env, standaloneSimulatorRuntimeEnvironment(profile.env))
+	command.Env = upsertEnvValues(command.Env, standaloneSimulatorRuntimeEnvironment(nil))
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
 		return standaloneMetroProcess{}, err
@@ -14985,29 +14899,30 @@ func isTerminalWorkflowStatus(status string) bool {
 }
 
 type sourceBinding struct {
-	AppID               string   `json:"appId"`
-	PackageName         string   `json:"packageName"`
-	PackageManager      string   `json:"packageManager"`
-	WorkspaceRoot       string   `json:"workspaceRoot"`
-	PackagePath         string   `json:"packagePath"`
-	WorkflowIntent      string   `json:"workflowIntent"`
-	BuildStrategy       string   `json:"buildStrategy,omitempty"`
-	Platform            string   `json:"platform"`
-	Lane                string   `json:"lane"`
-	ExpoConfigDigest    string   `json:"expoConfigDigest"`
-	EASJSONDigest       string   `json:"easJsonDigest,omitempty"`
-	EASProfileName      string   `json:"easProfileName,omitempty"`
-	EASProfileEnvDigest string   `json:"easProfileEnvDigest,omitempty"`
-	AppScheme           string   `json:"appScheme,omitempty"`
-	ExpoSlug            string   `json:"expoSlug,omitempty"`
-	IOSBundleID         string   `json:"iosBundleId,omitempty"`
-	AndroidPackage      string   `json:"androidPackage,omitempty"`
-	EASProjectID        string   `json:"easProjectId,omitempty"`
-	GitRemoteURL        string   `json:"gitRemoteUrl,omitempty"`
-	GitBranch           string   `json:"gitBranch,omitempty"`
-	GitCommitSHA        string   `json:"gitCommitSha,omitempty"`
-	DirtyWorkspace      bool     `json:"dirtyWorkspace"`
-	ChangedSetupFiles   []string `json:"changedSetupFiles"`
+	AppID            string `json:"appId"`
+	PackageName      string `json:"packageName"`
+	PackageManager   string `json:"packageManager"`
+	WorkspaceRoot    string `json:"workspaceRoot"`
+	PackagePath      string `json:"packagePath"`
+	WorkflowIntent   string `json:"workflowIntent"`
+	BuildStrategy    string `json:"buildStrategy,omitempty"`
+	Platform         string `json:"platform"`
+	Lane             string `json:"lane"`
+	ExpoConfigDigest string `json:"expoConfigDigest"`
+	// Local lane profile (lane_profiles.go). The wire names predate PREFLT-66
+	// and are kept for control-plane compatibility.
+	BuildProfileName  string   `json:"easProfileName,omitempty"`
+	ProfileEnvDigest  string   `json:"easProfileEnvDigest,omitempty"`
+	AppScheme         string   `json:"appScheme,omitempty"`
+	ExpoSlug          string   `json:"expoSlug,omitempty"`
+	IOSBundleID       string   `json:"iosBundleId,omitempty"`
+	AndroidPackage    string   `json:"androidPackage,omitempty"`
+	EASProjectID      string   `json:"easProjectId,omitempty"`
+	GitRemoteURL      string   `json:"gitRemoteUrl,omitempty"`
+	GitBranch         string   `json:"gitBranch,omitempty"`
+	GitCommitSHA      string   `json:"gitCommitSha,omitempty"`
+	DirtyWorkspace    bool     `json:"dirtyWorkspace"`
+	ChangedSetupFiles []string `json:"changedSetupFiles"`
 }
 
 type packageJSON struct {
@@ -15016,35 +14931,6 @@ type packageJSON struct {
 	Main            string            `json:"main"`
 	Dependencies    map[string]string `json:"dependencies"`
 	DevDependencies map[string]string `json:"devDependencies"`
-}
-
-type easJSON struct {
-	Build map[string]easBuildProfile `json:"build"`
-}
-
-type easBuildProfile struct {
-	Extends           string                 `json:"extends"`
-	DevelopmentClient *bool                  `json:"developmentClient"`
-	Distribution      string                 `json:"distribution"`
-	Env               map[string]string      `json:"env"`
-	IOS               easBuildIOSProfile     `json:"ios"`
-	Android           easBuildAndroidProfile `json:"android"`
-}
-
-type easBuildIOSProfile struct {
-	Simulator *bool             `json:"simulator"`
-	Env       map[string]string `json:"env"`
-}
-
-type easBuildAndroidProfile struct {
-	BuildType string            `json:"buildType"`
-	Env       map[string]string `json:"env"`
-}
-
-type selectedEASProfile struct {
-	name      string
-	env       map[string]string
-	envDigest string
 }
 
 type expoAppIdentity struct {
@@ -15066,103 +14952,6 @@ func readPackageJSON(path string) (packageJSON, error) {
 		return packageJSON{}, err
 	}
 	return pkg, nil
-}
-
-func loadEASJSON(appDir string) (easJSON, error) {
-	content, err := os.ReadFile(filepath.Join(appDir, "eas.json"))
-	if err != nil {
-		return easJSON{}, err
-	}
-	var config easJSON
-	if err := json.Unmarshal(content, &config); err != nil {
-		return easJSON{}, err
-	}
-	if config.Build == nil {
-		config.Build = map[string]easBuildProfile{}
-	}
-	config.Build = resolveEASBuildProfiles(config.Build)
-	return config, nil
-}
-
-func resolveEASBuildProfiles(build map[string]easBuildProfile) map[string]easBuildProfile {
-	resolved := make(map[string]easBuildProfile, len(build))
-	for name := range build {
-		profile, ok := resolveEASBuildProfile(build, name, map[string]bool{}, 0)
-		if !ok {
-			profile = build[name]
-		}
-		profile.Extends = ""
-		resolved[name] = profile
-	}
-	return resolved
-}
-
-func resolveEASBuildProfile(build map[string]easBuildProfile, name string, visiting map[string]bool, depth int) (easBuildProfile, bool) {
-	profile, ok := build[name]
-	if !ok {
-		return easBuildProfile{}, false
-	}
-	parentName := strings.TrimSpace(profile.Extends)
-	if parentName == "" {
-		return profile, true
-	}
-	if depth >= 5 || visiting[name] {
-		return profile, false
-	}
-	visiting[name] = true
-	parent, ok := resolveEASBuildProfile(build, parentName, visiting, depth+1)
-	delete(visiting, name)
-	if !ok {
-		return profile, true
-	}
-	return mergeEASBuildProfiles(parent, profile), true
-}
-
-func mergeEASBuildProfiles(base easBuildProfile, override easBuildProfile) easBuildProfile {
-	merged := base
-	merged.Extends = ""
-	if override.DevelopmentClient != nil {
-		merged.DevelopmentClient = override.DevelopmentClient
-	}
-	if override.Distribution != "" {
-		merged.Distribution = override.Distribution
-	}
-	merged.Env = mergeStringMap(base.Env, override.Env)
-	merged.IOS = mergeEASBuildIOSProfiles(base.IOS, override.IOS)
-	merged.Android = mergeEASBuildAndroidProfiles(base.Android, override.Android)
-	return merged
-}
-
-func mergeEASBuildIOSProfiles(base easBuildIOSProfile, override easBuildIOSProfile) easBuildIOSProfile {
-	merged := base
-	if override.Simulator != nil {
-		merged.Simulator = override.Simulator
-	}
-	merged.Env = mergeStringMap(base.Env, override.Env)
-	return merged
-}
-
-func mergeEASBuildAndroidProfiles(base easBuildAndroidProfile, override easBuildAndroidProfile) easBuildAndroidProfile {
-	merged := base
-	if override.BuildType != "" {
-		merged.BuildType = override.BuildType
-	}
-	merged.Env = mergeStringMap(base.Env, override.Env)
-	return merged
-}
-
-func mergeStringMap(base map[string]string, override map[string]string) map[string]string {
-	if len(base) == 0 && len(override) == 0 {
-		return nil
-	}
-	merged := make(map[string]string, len(base)+len(override))
-	for key, value := range base {
-		merged[key] = value
-	}
-	for key, value := range override {
-		merged[key] = value
-	}
-	return merged
 }
 
 func readExpoAppIdentity(appDir string) expoAppIdentity {
@@ -15335,9 +15124,9 @@ func buildAllRequiredOAuthClientConfigurePayloads(options map[string]string, red
 		appID = "pfapp_" + sanitizeID(pkg.Name)
 	}
 
-	easConfig, _ := loadEASJSON(absoluteAppDir)
-	iosIdentity := resolveExpoConfig(absoluteAppDir, selectEASProfile(easConfig, "ios", "development").env).identity
-	androidIdentity := resolveExpoConfig(absoluteAppDir, selectEASProfile(easConfig, "android", "development").env).identity
+	developmentEnv := map[string]string{"APP_VARIANT": "development"}
+	iosIdentity := resolveExpoConfig(absoluteAppDir, developmentEnv).identity
+	androidIdentity := resolveExpoConfig(absoluteAppDir, developmentEnv).identity
 	appName := strings.TrimSpace(iosIdentity.name)
 	if appName == "" {
 		appName = androidIdentity.name
@@ -15427,12 +15216,7 @@ func applyOAuthClientConfigureAppDefaults(options map[string]string) error {
 		}
 	}
 
-	easConfig, _ := loadEASJSON(absoluteAppDir)
-	selectedProfile := selectedEASProfile{}
-	if platform != "" {
-		selectedProfile = selectEASProfile(easConfig, platform, "development")
-	}
-	appIdentity := resolveExpoConfig(absoluteAppDir, selectedProfile.env).identity
+	appIdentity := resolveExpoConfig(absoluteAppDir, map[string]string{"APP_VARIANT": "development"}).identity
 	applyOAuthClientIdentityDefaults(options, appIdentity)
 
 	if strings.TrimSpace(options["displayName"]) == "" && strings.TrimSpace(options["clientKind"]) != "" {
@@ -15584,25 +15368,14 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 	if err != nil || packagePath == "" {
 		packagePath = "."
 	}
-	easConfig, _ := loadEASJSON(absoluteAppDir)
-	selectedEASProfile := selectEASProfile(easConfig, options.platform, options.lane)
-	if requested := strings.TrimSpace(options.buildProfile); requested != "" && !(options.standalonePlan && options.lane == "development") {
-		profile, ok := easConfig.Build[requested]
-		if !ok {
-			return sourceBinding{}, fmt.Errorf("EAS build profile %q was not found", requested)
-		}
-		if isProductionBuildProfile(requested) {
-			return sourceBinding{}, fmt.Errorf("production profiles require the separate store build workflow")
-		}
-		if !easProfileDevelopmentClient(profile) && !isPackagedSimulatorProfile(profile, options.platform, options.lane) {
-			return sourceBinding{}, fmt.Errorf("EAS profile %q must enable developmentClient or target a packaged preview simulator", requested)
-		}
-		if isPackagedSimulatorProfile(profile, options.platform, options.lane) && (options.buildStrategy == "eas" || options.standalonePlan) {
-			return sourceBinding{}, fmt.Errorf("packaged preview simulator profiles require the local queued runner workflow")
-		}
-		selectedEASProfile = makeSelectedEASProfile(requested, profile, options.platform)
+	profile, err := resolveLaneProfile(options.buildProfile, options.platform, options.lane)
+	if err != nil {
+		return sourceBinding{}, err
 	}
-	configEnv := selectedEASProfile.env
+	if profile.packagedPreview && options.standalonePlan {
+		return sourceBinding{}, fmt.Errorf("packaged preview simulator profiles require the local queued runner workflow")
+	}
+	configEnv := profile.env
 	if options.standalonePlan && options.lane == "simulator" {
 		configEnv = standaloneSimulatorRuntimeEnvironment(configEnv)
 	}
@@ -15618,29 +15391,28 @@ func discoverSourceBinding(options proveAppOptions) (sourceBinding, error) {
 	gitRemoteURL, gitBranch, gitCommitSHA := repository.remote, repository.branch, repository.commit
 
 	return sourceBinding{
-		AppID:               "pfapp_" + sanitizeID(pkg.Name),
-		PackageName:         pkg.Name,
-		PackageManager:      detectPackageManager(workspaceRoot),
-		WorkspaceRoot:       workspaceRoot,
-		PackagePath:         packagePath,
-		WorkflowIntent:      "prove-app",
-		BuildStrategy:       options.buildStrategy,
-		Platform:            options.platform,
-		Lane:                options.lane,
-		ExpoConfigDigest:    resolvedExpoConfig.digest,
-		EASJSONDigest:       digestIfExists(filepath.Join(absoluteAppDir, "eas.json")),
-		EASProfileName:      selectedEASProfile.name,
-		EASProfileEnvDigest: selectedEASProfile.envDigest,
-		AppScheme:           appIdentity.scheme,
-		ExpoSlug:            appIdentity.slug,
-		IOSBundleID:         appIdentity.iosBundleID,
-		AndroidPackage:      appIdentity.androidPackage,
-		EASProjectID:        appIdentity.easProjectID,
-		GitRemoteURL:        gitRemoteURL,
-		GitBranch:           gitBranch,
-		GitCommitSHA:        gitCommitSHA,
-		DirtyWorkspace:      dirtyWorkspace,
-		ChangedSetupFiles:   changedSetupFiles,
+		AppID:             "pfapp_" + sanitizeID(pkg.Name),
+		PackageName:       pkg.Name,
+		PackageManager:    detectPackageManager(workspaceRoot),
+		WorkspaceRoot:     workspaceRoot,
+		PackagePath:       packagePath,
+		WorkflowIntent:    "prove-app",
+		BuildStrategy:     options.buildStrategy,
+		Platform:          options.platform,
+		Lane:              options.lane,
+		ExpoConfigDigest:  resolvedExpoConfig.digest,
+		BuildProfileName:  profile.name,
+		ProfileEnvDigest:  profile.envDigest,
+		AppScheme:         appIdentity.scheme,
+		ExpoSlug:          appIdentity.slug,
+		IOSBundleID:       appIdentity.iosBundleID,
+		AndroidPackage:    appIdentity.androidPackage,
+		EASProjectID:      appIdentity.easProjectID,
+		GitRemoteURL:      gitRemoteURL,
+		GitBranch:         gitBranch,
+		GitCommitSHA:      gitCommitSHA,
+		DirtyWorkspace:    dirtyWorkspace,
+		ChangedSetupFiles: changedSetupFiles,
 	}, nil
 }
 
@@ -15679,7 +15451,7 @@ func sourceBindingGitState(workspaceRoot string, appDir string) (bool, []string)
 // own artifact dir (.preflight/), and Expo caches (.expo/). These are not source
 // for reproducibility, and including them made every build dirty its own
 // workspace and dead-end at source-binding validation (dirtyWorkspace mismatch).
-// Genuine source changes (eas.json, app.config, src/) are still detected.
+// Genuine source changes (app.config, package.json, src/) are still detected.
 func filterRunnerManagedPaths(
 	workspaceRoot string,
 	appDir string,
@@ -15693,7 +15465,7 @@ func filterRunnerManagedPaths(
 	if packagePath == "." {
 		packagePath = ""
 	}
-	// EAS job logs and build metadata are written at the workspace root even
+	// Job logs and build metadata are written at the workspace root even
 	// when the Expo package lives below it (for example apps/mobile).
 	prefixes := []string{".preflight/"}
 	for _, dir := range []string{"ios", "android", ".preflight", ".expo"} {
@@ -15797,7 +15569,6 @@ func isPreflightSetupFile(appRelativePath string) bool {
 		"app.config.json",
 		"app.config.js",
 		"app.config.ts",
-		"eas.json",
 		"metro.config.js",
 		"babel.config.js",
 		"expo-env.d.ts":
@@ -15836,106 +15607,6 @@ func hasDependency(pkg packageJSON, name string) bool {
 	}
 	_, ok := pkg.DevDependencies[name]
 	return ok
-}
-
-func selectEASProfile(config easJSON, platform string, lane string) selectedEASProfile {
-	if len(config.Build) == 0 {
-		return selectedEASProfile{}
-	}
-
-	if lane == "development" && platform == "ios" {
-		for _, name := range []string{"development-device", "dev-device", "development"} {
-			if profile, ok := config.Build[name]; ok && !easProfileIsIOSSimulator(profile) {
-				return makeSelectedEASProfile(name, profile, platform)
-			}
-		}
-		for name, profile := range config.Build {
-			if easProfileDevelopmentClient(profile) && !easProfileIsIOSSimulator(profile) {
-				return makeSelectedEASProfile(name, profile, platform)
-			}
-		}
-	}
-
-	if lane == "development" && platform == "android" {
-		for _, name := range []string{"development-android", "dev-android", "android-development", "development"} {
-			if profile, ok := config.Build[name]; ok && easProfileDevelopmentClient(profile) && easProfileAndroidInstallable(profile) {
-				return makeSelectedEASProfile(name, profile, platform)
-			}
-		}
-		for name, profile := range config.Build {
-			if easProfileDevelopmentClient(profile) && easProfileAndroidInstallable(profile) {
-				return makeSelectedEASProfile(name, profile, platform)
-			}
-		}
-	}
-
-	// The simulator lane needs an iOS simulator build. Apps from the gmacko
-	// template keep a device-only "development" profile (ios.simulator=false)
-	// alongside a sibling "development-simulator" profile; without this branch
-	// the generic fallback below grabs "development" and the readiness check
-	// blocks on eas_ios_simulator_profile. Prefer a named simulator profile,
-	// then any simulator-capable profile (e.g. a "development" that itself sets
-	// ios.simulator=true, as some apps do).
-	if lane == "simulator" && platform == "ios" {
-		for _, name := range []string{"development-simulator", "dev-simulator", "simulator", "development"} {
-			if profile, ok := config.Build[name]; ok && easProfileIsIOSSimulator(profile) {
-				return makeSelectedEASProfile(name, profile, platform)
-			}
-		}
-		for name, profile := range config.Build {
-			if easProfileDevelopmentClient(profile) && easProfileIsIOSSimulator(profile) {
-				return makeSelectedEASProfile(name, profile, platform)
-			}
-		}
-	}
-
-	if profile, ok := config.Build["development"]; ok {
-		return makeSelectedEASProfile("development", profile, platform)
-	}
-	for name, profile := range config.Build {
-		if easProfileDevelopmentClient(profile) {
-			return makeSelectedEASProfile(name, profile, platform)
-		}
-	}
-	return selectedEASProfile{}
-}
-
-func makeSelectedEASProfile(name string, profile easBuildProfile, platform string) selectedEASProfile {
-	env := easProfileEnv(profile, platform)
-	return selectedEASProfile{
-		name:      name,
-		env:       env,
-		envDigest: digestJSON(env),
-	}
-}
-
-func easProfileEnv(profile easBuildProfile, platform string) map[string]string {
-	env := map[string]string{}
-	for key, value := range profile.Env {
-		env[key] = value
-	}
-	var platformEnv map[string]string
-	if platform == "android" {
-		platformEnv = profile.Android.Env
-	} else {
-		platformEnv = profile.IOS.Env
-	}
-	for key, value := range platformEnv {
-		env[key] = value
-	}
-	return env
-}
-
-func easProfileIsIOSSimulator(profile easBuildProfile) bool {
-	return profile.IOS.Simulator != nil && *profile.IOS.Simulator
-}
-
-func easProfileDevelopmentClient(profile easBuildProfile) bool {
-	return profile.DevelopmentClient != nil && *profile.DevelopmentClient
-}
-
-func easProfileAndroidInstallable(profile easBuildProfile) bool {
-	return profile.Android.BuildType == "" || profile.Android.BuildType == "apk"
 }
 
 func findWorkspaceRoot(appDir string) string {
@@ -15999,25 +15670,6 @@ func setupRequired(code string, message string, commands ...string) map[string]a
 		"message":  message,
 		"commands": commandValues,
 	}
-}
-
-func easProfileNameForJob(job apiRunnerJob) string {
-	if job.Payload.EASProfileName != "" {
-		return job.Payload.EASProfileName
-	}
-	if job.Payload.SourceBinding.EASProfileName != "" {
-		return job.Payload.SourceBinding.EASProfileName
-	}
-	return "development-device"
-}
-
-// isProductionBuildProfile reports whether an EAS profile name denotes a
-// production/store build (which is restricted to CI).
-func isProductionBuildProfile(profileName string) bool {
-	p := strings.ToLower(strings.TrimSpace(profileName))
-	return p == "production" ||
-		strings.HasPrefix(p, "production-") ||
-		strings.HasSuffix(p, "-production")
 }
 
 func jobPlatform(job apiRunnerJob) string {
@@ -16213,7 +15865,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps list [--platform ios|android] [--json]")
 	fmt.Fprintln(w, "  preflight apps status <app-id|slug|name> [--platform ...] [--json]")
 	fmt.Fprintln(w, "  preflight apps checklist set <app-id|slug> --key <key> --status <pending|done|blocked|not_applicable> [--note <text>] [--platform ...]")
-	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (lockfile/sentry/eas.json)")
+	fmt.Fprintln(w, "  preflight apps doctor [--path <app-dir>] [--json]   build-health checks (app config/lockfile/sdk)")
 	fmt.Fprintln(w, "  preflight apps deps --all [--root <dir>] [--target <sdk>] [--json]  fleet Expo SDK/plugin/dependency snapshot + drift")
 	fmt.Fprintln(w, "  preflight apps scan-bundle <bundle|.app|.ipa>       scan a built artifact for store poison (localhost/E2E)")
 	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")

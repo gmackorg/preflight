@@ -45,10 +45,11 @@ func TestStandaloneSimulatorPlanPostsCurrentReadinessContract(t *testing.T) {
 	t.Setenv("PREFLIGHT_TOKEN", "contract-test-token")
 	var body struct {
 		DevelopmentReadiness struct {
-			SourceBinding sourceBinding   `json:"sourceBinding"`
-			PackageJSON   packageJSON     `json:"packageJson"`
-			EASJSON       json.RawMessage `json:"easJson"`
-			MaestroFlows  []struct {
+			SourceBinding sourceBinding `json:"sourceBinding"`
+			PackageJSON   packageJSON   `json:"packageJson"`
+			// Retired: build settings no longer come from a checkout file.
+			LegacyBuildConfig json.RawMessage `json:"easJson"`
+			MaestroFlows      []struct {
 				Path    string `json:"path"`
 				Content string `json:"content"`
 			} `json:"maestroFlows"`
@@ -67,7 +68,7 @@ func TestStandaloneSimulatorPlanPostsCurrentReadinessContract(t *testing.T) {
 		t.Fatalf("plan exit %d: %s", code, stderr.String())
 	}
 	readiness := body.DevelopmentReadiness
-	if readiness.SourceBinding.AppScheme != "forgegraph" || readiness.PackageJSON.Dependencies["expo"] == "" || readiness.PackageJSON.Dependencies["expo-dev-client"] == "" || len(readiness.EASJSON) == 0 || len(readiness.MaestroFlows) != 1 {
+	if readiness.SourceBinding.AppScheme != "forgegraph" || readiness.PackageJSON.Dependencies["expo"] == "" || readiness.PackageJSON.Dependencies["expo-dev-client"] == "" || len(readiness.LegacyBuildConfig) != 0 || len(readiness.MaestroFlows) != 1 {
 		t.Fatalf("missing current readiness contract: %#v", readiness)
 	}
 	if readiness.MaestroFlows[0].Path != filepath.Join(appDir, ".maestro", "01-app-launches.yaml") || !strings.Contains(readiness.MaestroFlows[0].Content, "com.gmacko.forgegraph.dev") {
@@ -311,9 +312,12 @@ func currentSimulatorProofRunEnvelope(t *testing.T, appDir, workspaceID, workflo
 	return body
 }
 
-func TestStandaloneSimulatorProfileEnvironmentMatchesSourceAndMetro(t *testing.T) {
+func TestStandaloneSimulatorEnvironmentMatchesSourceAndMetro(t *testing.T) {
+	// The simulator lane always resolves the app config and starts Metro as
+	// the development variant; anything else comes from the operator's
+	// environment, identically on both sides.
 	for _, test := range []struct{ name, override, wantAPI string }{
-		{"profile-default", "", "https://profile.example.test"},
+		{"no-override", "", ""},
 		{"explicit-live-override", "https://live.example.test", "https://live.example.test"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -325,18 +329,15 @@ func TestStandaloneSimulatorProfileEnvironmentMatchesSourceAndMetro(t *testing.T
 			reportPath := filepath.Join(artifacts, "report.xml")
 			outputDir := filepath.Join(artifacts, "output")
 			debugDir := filepath.Join(artifacts, "debug")
-			eas := `{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development","PREFLIGHT_TEST_BUNDLE_SUFFIX":"profile","EXPO_PUBLIC_TEST_API":"https://profile.example.test"},"ios":{"simulator":true}}}}`
-			if err := os.WriteFile(filepath.Join(appDir, "eas.json"), []byte(eas), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			t.Setenv("PREFLIGHT_TEST_BUNDLE_SUFFIX", "profile")
 			if test.override != "" {
 				t.Setenv("EXPO_PUBLIC_TEST_API", test.override)
 			} else {
 				t.Setenv("EXPO_PUBLIC_TEST_API", "")
 				_ = os.Unsetenv("EXPO_PUBLIC_TEST_API")
 			}
-			t.Setenv("APP_VARIANT", "")
-			_ = os.Unsetenv("APP_VARIANT")
+			// A stray variant in the operator's shell must not leak into the lane.
+			t.Setenv("APP_VARIANT", "production")
 			for name, script := range map[string]string{
 				"npx": `#!/usr/bin/env sh
 if [ "$2" = "config" ]; then
@@ -388,7 +389,7 @@ printf '<testsuite tests="1"><testcase status="SUCCESS"/></testsuite>\n' > "$PRE
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.TrimSpace(string(environment)) != "development profile "+test.wantAPI {
+			if strings.TrimSpace(string(environment)) != strings.TrimSpace("development profile "+test.wantAPI) {
 				t.Fatalf("profile/runtime mismatch: %q", environment)
 			}
 		})

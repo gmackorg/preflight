@@ -37,7 +37,6 @@ func TestJJSourceBindingSnapshotsDirtyWorkspaceAndResolvesPublishedEmptyChild(t 
 	for path, content := range map[string]string{
 		"pnpm-workspace.yaml":      "packages:\n  - apps/*\n",
 		"apps/mobile/package.json": `{"name":"@fixture/mobile","main":"expo-router/entry","dependencies":{"expo":"55"}}`,
-		"apps/mobile/eas.json":     `{"build":{"development":{"developmentClient":true,"distribution":"internal","ios":{"simulator":true}}}}`,
 		"apps/mobile/app.json":     `{"expo":{"slug":"fixture","scheme":"fixture","ios":{"bundleIdentifier":"fixture.dev"}}}`,
 	} {
 		file := filepath.Join(checkout, path)
@@ -66,7 +65,7 @@ func TestJJSourceBindingSnapshotsDirtyWorkspaceAndResolvesPublishedEmptyChild(t 
 	if !sourceCommitIsOnRemote(workspace, remote, sha) {
 		t.Fatal("published jj revision must be available on selected remote")
 	}
-	if err := os.WriteFile(filepath.Join(app, "eas.json"), []byte(`{"build":{}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(app, "metro.config.js"), []byte(`module.exports = {}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(app, "new-source.ts"), []byte("export const changed = true"), 0o644); err != nil {
@@ -76,7 +75,7 @@ func TestJJSourceBindingSnapshotsDirtyWorkspaceAndResolvesPublishedEmptyChild(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !binding.DirtyWorkspace || !contains(binding.ChangedSetupFiles, "apps/mobile/eas.json") {
+	if !binding.DirtyWorkspace || !contains(binding.ChangedSetupFiles, "apps/mobile/metro.config.js") {
 		t.Fatalf("dirty jj files must be included: %+v", binding)
 	}
 	if binding.GitCommitSHA == sha || sourceCommitIsOnRemote(workspace, remote, binding.GitCommitSHA) {

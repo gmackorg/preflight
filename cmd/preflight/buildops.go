@@ -214,7 +214,7 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		fmt.Fprintf(stderr, "run this from the app package, or pass --app-dir <path-to-expo-app>\n")
 		return 2
 	}
-	if err := validateWorkOrderProfile(appDir, platform, lane, binding.EASProfileName); err != nil {
+	if err := validateWorkOrderProfile(platform, lane, binding.BuildProfileName); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}

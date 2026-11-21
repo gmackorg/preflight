@@ -25,10 +25,6 @@ func workOrderClientFixture(t *testing.T, handler http.HandlerFunc) *httptest.Se
 func writeWorkOrderApp(t *testing.T) string {
 	t.Helper()
 	app := writeExpoFixture(t)
-	profiles := `{"build":{"development":{"developmentClient":true,"distribution":"internal","ios":{"simulator":true}},"development-device":{"developmentClient":true,"distribution":"internal","ios":{"simulator":false}},"qa-device":{"extends":"development-device","env":{"APP_VARIANT":"qa"}},"qa-android":{"extends":"qa-device","android":{"buildType":"apk","env":{"APP_VARIANT":"android-qa"}}},"bad-android":{"extends":"qa-device","android":{"buildType":"app-bundle"}},"production":{"distribution":"store"}}}`
-	if err := os.WriteFile(filepath.Join(app, "eas.json"), []byte(profiles), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	runGit(t, app, "init")
 	runGit(t, app, "add", ".")
 	runGit(t, app, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "app fixture")
@@ -46,12 +42,12 @@ printf '{"slug":"fixture","scheme":"fixture-%s","ios":{"bundleIdentifier":"fixtu
 
 func TestBuildWorkOrderUsesDispatchLaneAndExactProfile(t *testing.T) {
 	for _, tc := range []struct{ kind, platform, flag, profile, lane, variant string }{
-		{"build", "ios", "", "development-device", "development", ""},
-		{"build", "ios", "--profile", "qa-device", "development", "qa"},
-		{"device_test", "ios", "--build-profile", "qa-device", "development", "qa"},
-		{"build_matrix", "android", "--profile", "qa-android", "development", "android-qa"},
-		{"simulator_test", "ios", "--profile", "development", "simulator", ""},
-		{"e2e_suite", "ios", "", "development", "simulator", ""},
+		{"build", "ios", "", "development", "development", "development"},
+		{"build", "ios", "--profile", "qa-device", "development", "development"},
+		{"device_test", "ios", "--build-profile", "qa-device", "development", "development"},
+		{"build_matrix", "android", "--profile", "qa-android", "development", "development"},
+		{"simulator_test", "ios", "--profile", "preview-simulator", "simulator", "preview"},
+		{"e2e_suite", "ios", "", "development", "simulator", "development"},
 	} {
 		t.Run(tc.kind+"/"+tc.platform+"/"+tc.profile, func(t *testing.T) {
 			app := writeWorkOrderApp(t)
@@ -85,10 +81,10 @@ func TestBuildWorkOrderUsesDispatchLaneAndExactProfile(t *testing.T) {
 				t.Fatalf("build returned %d: %s", code, &errOut)
 			}
 			binding := received.SourceBinding
-			if posts != 1 || binding.Lane != tc.lane || probeLane != tc.lane || binding.EASProfileName != tc.profile {
+			if posts != 1 || binding.Lane != tc.lane || probeLane != tc.lane || binding.BuildProfileName != tc.profile {
 				t.Fatalf("wrong dispatch/profile: posts=%d probe=%s binding=%+v", posts, probeLane, binding)
 			}
-			if binding.AppScheme != "fixture-"+tc.variant || binding.EASProfileEnvDigest == "" {
+			if binding.AppScheme != "fixture-"+tc.variant || binding.ProfileEnvDigest == "" {
 				t.Fatalf("profile environment did not bind app identity: %+v", binding)
 			}
 		})
@@ -97,10 +93,8 @@ func TestBuildWorkOrderUsesDispatchLaneAndExactProfile(t *testing.T) {
 
 func TestBuildWorkOrderRejectsInvalidProfileBeforeRequests(t *testing.T) {
 	for _, tc := range []struct{ platform, kind, profile, want string }{
-		{"ios", "build", "missing", "was not found"},
-		{"ios", "build", "development", "does not match"},
-		{"ios", "simulator_test", "qa-device", "does not match"},
-		{"android", "build", "bad-android", "installable APK"},
+		{"ios", "build", "preview", "packaged simulator app"},
+		{"android", "device_test", "preview-android", "packaged simulator app"},
 		{"ios", "release_candidate", "production", "separate store build workflow"},
 	} {
 		t.Run(tc.kind+"/"+tc.profile, func(t *testing.T) {

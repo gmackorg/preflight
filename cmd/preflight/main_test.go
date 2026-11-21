@@ -382,7 +382,7 @@ func TestProveAppDoesNotUseSavedWorkspaceForDifferentExplicitAPIURL(t *testing.T
 
 func TestCredentialsCreateReadsSecretFromEnvAndDoesNotPrintValue(t *testing.T) {
 	const secretValue = "expo_cli_secret_token_123"
-	t.Setenv("EXPO_TOKEN", secretValue)
+	t.Setenv("SENTRY_AUTH_TOKEN", secretValue)
 
 	var requestBody map[string]any
 	var server *httptest.Server
@@ -401,7 +401,7 @@ func TestCredentialsCreateReadsSecretFromEnvAndDoesNotPrintValue(t *testing.T) {
 			t.Fatalf("decode request body: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"secretReference":{"id":"pfsec_cli","workspaceId":"local","appId":"pfapp_mobile","provider":"expo","purpose":"api_token","key":"EXPO_TOKEN","laneScope":"development","status":"active"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_credential_create"}}`))
+		_, _ = w.Write([]byte(`{"data":{"secretReference":{"id":"pfsec_cli","workspaceId":"local","appId":"pfapp_mobile","provider":"sentry","purpose":"auth_token","key":"SENTRY_AUTH_TOKEN","laneScope":"development","status":"active"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_credential_create"}}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -418,15 +418,15 @@ func TestCredentialsCreateReadsSecretFromEnvAndDoesNotPrintValue(t *testing.T) {
 			"--app-id",
 			"pfapp_mobile",
 			"--provider",
-			"expo",
+			"sentry",
 			"--purpose",
-			"api_token",
+			"auth_token",
 			"--key",
-			"EXPO_TOKEN",
+			"SENTRY_AUTH_TOKEN",
 			"--lane",
 			"development",
 			"--value-env",
-			"EXPO_TOKEN",
+			"SENTRY_AUTH_TOKEN",
 		},
 		&stdout,
 		&stderr,
@@ -442,7 +442,7 @@ func TestCredentialsCreateReadsSecretFromEnvAndDoesNotPrintValue(t *testing.T) {
 	if strings.Contains(stdout.String(), secretValue) || strings.Contains(stderr.String(), secretValue) {
 		t.Fatalf("CLI output leaked secret\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "created credential pfsec_cli expo EXPO_TOKEN development") {
+	if !strings.Contains(stdout.String(), "created credential pfsec_cli sentry SENTRY_AUTH_TOKEN development") {
 		t.Fatalf("unexpected stdout %q", stdout.String())
 	}
 }
@@ -450,7 +450,7 @@ func TestCredentialsCreateReadsSecretFromEnvAndDoesNotPrintValue(t *testing.T) {
 func TestManagementCommandsUseSavedPreflightLoginConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "preflight", "config.json")
 	t.Setenv("PREFLIGHT_CONFIG_PATH", configPath)
-	t.Setenv("EXPO_TOKEN", "saved_config_expo_token")
+	t.Setenv("SENTRY_AUTH_TOKEN", "saved_config_expo_token")
 
 	var workspaces []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -472,10 +472,10 @@ func TestManagementCommandsUseSavedPreflightLoginConfig(t *testing.T) {
 				t.Fatalf("decode credential body: %v", err)
 			}
 			workspaces = append(workspaces, fmt.Sprint(body["workspaceId"]))
-			_, _ = w.Write([]byte(`{"data":{"secretReference":{"id":"pfsec_saved","workspaceId":"ws_management_saved","appId":"pfapp_mobile","provider":"expo","purpose":"api_token","key":"EXPO_TOKEN","laneScope":"development","status":"active"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_credential_create"}}`))
+			_, _ = w.Write([]byte(`{"data":{"secretReference":{"id":"pfsec_saved","workspaceId":"ws_management_saved","appId":"pfapp_mobile","provider":"sentry","purpose":"auth_token","key":"SENTRY_AUTH_TOKEN","laneScope":"development","status":"active"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_credential_create"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/preflight/v1/secret-refs":
 			workspaces = append(workspaces, r.URL.Query().Get("workspaceId"))
-			_, _ = w.Write([]byte(`{"data":{"secretReferences":[{"id":"pfsec_saved","workspaceId":"ws_management_saved","appId":"pfapp_mobile","provider":"expo","key":"EXPO_TOKEN","laneScope":"development","status":"active"}]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_credential_list"}}`))
+			_, _ = w.Write([]byte(`{"data":{"secretReferences":[{"id":"pfsec_saved","workspaceId":"ws_management_saved","appId":"pfapp_mobile","provider":"sentry","key":"SENTRY_AUTH_TOKEN","laneScope":"development","status":"active"}]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_credential_list"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/provider-accounts":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -513,7 +513,7 @@ func TestManagementCommandsUseSavedPreflightLoginConfig(t *testing.T) {
 	}
 
 	commands := [][]string{
-		{"credentials", "create", "--app-id", "pfapp_mobile", "--provider", "expo", "--purpose", "api_token", "--key", "EXPO_TOKEN", "--lane", "development", "--value-env", "EXPO_TOKEN"},
+		{"credentials", "create", "--app-id", "pfapp_mobile", "--provider", "sentry", "--purpose", "auth_token", "--key", "SENTRY_AUTH_TOKEN", "--lane", "development", "--value-env", "SENTRY_AUTH_TOKEN"},
 		{"credentials", "list", "--app-id", "pfapp_mobile", "--provider", "expo"},
 		{"providers", "upsert", "--app-id", "pfapp_mobile", "--provider", "expo", "--display-name", "Expo", "--status", "connected"},
 		{"providers", "list", "--app-id", "pfapp_mobile", "--provider", "expo"},
@@ -2178,7 +2178,7 @@ func TestProviderVerificationBlockedNextActionsStayOnPreflightSurface(t *testing
 				BlockerCode: provider + "_blocked",
 			},
 		})
-		if strings.HasPrefix(nextAction, "gcloud ") || strings.HasPrefix(nextAction, "eas ") || strings.HasPrefix(nextAction, "adb ") {
+		if strings.HasPrefix(nextAction, "gcloud ") || strings.HasPrefix(nextAction, "expo ") || strings.HasPrefix(nextAction, "adb ") {
 			t.Fatalf("%s nextAction exposed raw external command %q", provider, nextAction)
 		}
 		if provider == "google_cloud" && !strings.HasPrefix(nextAction, "preflight providers verify --provider google_cloud") {
@@ -2838,7 +2838,7 @@ func TestProviderReadinessPlanUsesAppScopedSetupPlanAPI(t *testing.T) {
 				r.URL.Query().Get("lane") != "development" {
 				t.Fatalf("unexpected setup plan query %s", r.URL.RawQuery)
 			}
-			_, _ = w.Write([]byte(`{"data":{"providerSetupPlan":{"workspaceId":"local","appId":"pfapp_mobile","platform":"ios","lane":"development","ready":false,"requirements":[{"provider":"expo","capability":"expo.api.auth","status":"ready","credentialReferenceIds":[],"source":"readiness"},{"provider":"eas","capability":"eas.project.config","status":"blocked","blockerCode":"eas_project_id_missing","nextAction":"preflight providers verify --provider eas --credential-ref <EXPO_TOKEN_SECRET_REF> --app-dir <APP_DIR>","credentialReferenceIds":[],"source":"readiness"},{"provider":"google_oauth","capability":"oauth.google.ios","status":"blocked","blockerCode":"provider_readiness_missing","nextAction":"preflight oauth-clients configure --app-dir <APP_DIR> --provider google_oauth --client-kind google_ios","requiredHumanRole":"Google Auth Platform administrator","credentialReferenceIds":[],"source":"synthesized"}],"nextActions":["preflight providers verify --provider eas --credential-ref <EXPO_TOKEN_SECRET_REF> --app-dir <APP_DIR>","preflight oauth-clients configure --app-dir <APP_DIR> --provider google_oauth --client-kind google_ios"]}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_provider_setup_plan"}}`))
+			_, _ = w.Write([]byte(`{"data":{"providerSetupPlan":{"workspaceId":"local","appId":"pfapp_mobile","platform":"ios","lane":"development","ready":false,"requirements":[{"provider":"expo","capability":"expo.api.auth","status":"ready","credentialReferenceIds":[],"source":"readiness"},{"provider":"google_play","capability":"google_play.api","status":"blocked","blockerCode":"google_play_service_account_missing","nextAction":"preflight providers verify --provider google_play --credential-ref <GOOGLE_PLAY_SERVICE_ACCOUNT_SECRET_REF>","credentialReferenceIds":[],"source":"readiness"},{"provider":"google_oauth","capability":"oauth.google.ios","status":"blocked","blockerCode":"provider_readiness_missing","nextAction":"preflight oauth-clients configure --app-dir <APP_DIR> --provider google_oauth --client-kind google_ios","requiredHumanRole":"Google Auth Platform administrator","credentialReferenceIds":[],"source":"synthesized"}],"nextActions":["preflight providers verify --provider google_play --credential-ref <GOOGLE_PLAY_SERVICE_ACCOUNT_SECRET_REF>","preflight oauth-clients configure --app-dir <APP_DIR> --provider google_oauth --client-kind google_ios"]}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_provider_setup_plan"}}`))
 		default:
 			t.Fatalf("unexpected route %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -2871,8 +2871,8 @@ func TestProviderReadinessPlanUsesAppScopedSetupPlanAPI(t *testing.T) {
 		t.Fatalf("plan exit = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "provider setup plan pfapp_mobile ios development blocked") ||
-		!strings.Contains(stdout.String(), "eas eas.project.config blocked eas_project_id_missing") ||
-		!strings.Contains(stdout.String(), "next_action=\"preflight providers verify --provider eas --credential-ref <EXPO_TOKEN_SECRET_REF> --app-dir <APP_DIR>\"") ||
+		!strings.Contains(stdout.String(), "google_play google_play.api blocked google_play_service_account_missing") ||
+		!strings.Contains(stdout.String(), "next_action=\"preflight providers verify --provider google_play --credential-ref <GOOGLE_PLAY_SERVICE_ACCOUNT_SECRET_REF>\"") ||
 		!strings.Contains(stdout.String(), "google_oauth oauth.google.ios blocked provider_readiness_missing") ||
 		!strings.Contains(stdout.String(), "required_human_role=\"Google Auth Platform administrator\"") {
 		t.Fatalf("unexpected setup plan output %q", stdout.String())
@@ -3308,13 +3308,13 @@ func TestSetupRecordsChangedSourceBoundFiles(t *testing.T) {
 		t.Fatalf("write package.json: %v", err)
 	}
 	writeExpoConfigIdentity(t, appDir)
-	if err := os.WriteFile(filepath.Join(appDir, "eas.json"), []byte(`{"build":{"development-device":{"developmentClient":true,"distribution":"internal"}}}`), 0o644); err != nil {
-		t.Fatalf("write eas.json: %v", err)
+	if err := os.WriteFile(filepath.Join(appDir, "app.json"), []byte(`{"expo":{"name":"ForgeGraph Mobile"}}`), 0o644); err != nil {
+		t.Fatalf("write app.json: %v", err)
 	}
 
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "expo"), []byte(`#!/usr/bin/env sh
-printf '{"build":{"development-device":{"developmentClient":true,"distribution":"internal","ios":{"simulator":false}}}}' > eas.json
+printf '{"expo":{"name":"ForgeGraph Mobile","plugins":["expo-dev-client"]}}' > app.json
 exit 0
 `), 0o755); err != nil {
 		t.Fatalf("write fake expo: %v", err)
@@ -3341,7 +3341,7 @@ exit 0
 				t.Fatalf("decode transcript body: %v", err)
 			}
 			changedFiles, _ = body["changedFiles"].([]any)
-			_, _ = w.Write([]byte(`{"data":{"setupTranscript":{"id":"pfsetup_changed","workflowId":"pfw_setup_changed","sourceBindingId":"pfsrc_initial","status":"completed","summary":"Setup command completed.","commands":["expo install expo-dev-client"],"changedFiles":["apps/mobile/eas.json"]}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_transcript"}}`))
+			_, _ = w.Write([]byte(`{"data":{"setupTranscript":{"id":"pfsetup_changed","workflowId":"pfw_setup_changed","sourceBindingId":"pfsrc_initial","status":"completed","summary":"Setup command completed.","commands":["expo install expo-dev-client"],"changedFiles":["apps/mobile/app.json"]}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_transcript"}}`))
 		case "/api/preflight/v1/workflows/pfw_setup_changed/resume-setup":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -3351,11 +3351,11 @@ exit 0
 			if !ok {
 				t.Fatalf("expected resume setup to include successor source binding, got %#v", body)
 			}
-			if sourceBinding["packagePath"] != "apps/mobile" || sourceBinding["easJsonDigest"] == "" {
+			if sourceBinding["packagePath"] != "apps/mobile" || sourceBinding["expoConfigDigest"] == "" {
 				t.Fatalf("unexpected successor source binding %#v", sourceBinding)
 			}
 			changedSetupFiles, _ := sourceBinding["changedSetupFiles"].([]any)
-			if len(changedSetupFiles) != 1 || changedSetupFiles[0] != "apps/mobile/eas.json" {
+			if len(changedSetupFiles) != 1 || changedSetupFiles[0] != "apps/mobile/app.json" {
 				t.Fatalf("expected successor binding changed setup files, got %#v", sourceBinding)
 			}
 			_, _ = w.Write([]byte(`{"data":{"workflow":{"id":"pfw_setup_changed","workspaceId":"ws_setup","appId":"pfapp_mobile","platform":"ios","lane":"development","status":"waiting"},"workflowProjection":{"workflowId":"pfw_setup_changed","status":"waiting","phase":"build_queued","blockerCode":"waiting_for_setup"},"runnerJobs":[],"events":[{"eventType":"setup.source_rebound"},{"eventType":"setup.resumed"}],"runtime-artifacts":[],"setupTranscripts":[]},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_resume"}}`))
@@ -3384,8 +3384,8 @@ exit 0
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
-	if len(changedFiles) != 1 || changedFiles[0] != "apps/mobile/eas.json" {
-		t.Fatalf("expected setup transcript to include changed eas.json, got %#v", changedFiles)
+	if len(changedFiles) != 1 || changedFiles[0] != "apps/mobile/app.json" {
+		t.Fatalf("expected setup transcript to include changed app.json, got %#v", changedFiles)
 	}
 	if !strings.Contains(stdout.String(), "resumed workflow pfw_setup_changed build_queued") {
 		t.Fatalf("expected setup to resume with successor source binding, got %q", stdout.String())
@@ -3401,7 +3401,7 @@ func TestSetupRecordsCreatedCredentialReferencesFromGuidedOutput(t *testing.T) {
 	writeExpoConfigIdentity(t, appDir)
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "preflight"), []byte(`#!/usr/bin/env sh
-printf 'created credential pfsec_expo_setup expo EXPO_TOKEN development\n'
+printf 'created credential pfsec_expo_setup sentry SENTRY_AUTH_TOKEN development\n'
 exit 0
 `), 0o755); err != nil {
 		t.Fatalf("write fake preflight: %v", err)
@@ -3857,7 +3857,9 @@ func TestProveAppCanExplicitlyWaitForRunnerCapacity(t *testing.T) {
 	}
 }
 
-func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
+func TestProveAppDevelopmentLaneBindsLocalDevelopmentProfile(t *testing.T) {
+	// The profile is still sent under its pre-PREFLT-66 wire name
+	// (easProfileName) for control-plane compatibility.
 	appDir := writeExpoFixture(t)
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3899,7 +3901,7 @@ func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
 			"--lane",
 			"development",
 			"--build-strategy",
-			"eas",
+			"local",
 			"--json",
 		},
 		&stdout,
@@ -3914,14 +3916,14 @@ func TestProveAppDevelopmentLaneSelectsDeviceEASProfile(t *testing.T) {
 		t.Fatalf("expected development workflow to request a physical device, got %#v", received)
 	}
 	sourceBinding := received["sourceBinding"].(map[string]any)
-	if sourceBinding["buildStrategy"] != "eas" {
-		t.Fatalf("expected EAS build strategy in source binding, got %#v", sourceBinding)
+	if sourceBinding["buildStrategy"] != "local" {
+		t.Fatalf("expected local build strategy in source binding, got %#v", sourceBinding)
 	}
 	if sourceBinding["platform"] != "ios" || sourceBinding["lane"] != "development" {
 		t.Fatalf("unexpected source binding lane %#v", sourceBinding)
 	}
-	if sourceBinding["easProfileName"] != "development-device" {
-		t.Fatalf("expected iOS device profile, got %#v", sourceBinding)
+	if sourceBinding["easProfileName"] != "development" {
+		t.Fatalf("expected the development lane profile, got %#v", sourceBinding)
 	}
 	if sourceBinding["easProfileEnvDigest"] == "" {
 		t.Fatalf("expected profile env digest, got %#v", sourceBinding)
@@ -4048,7 +4050,7 @@ func TestProveAppLocalReadinessPrintsSourceBindingWithoutAPI(t *testing.T) {
 	}
 	sourceBinding := report["sourceBinding"].(map[string]any)
 	if sourceBinding["appId"] != "pfapp_forgegraph_mobile" ||
-		sourceBinding["easProfileName"] != "development-device" ||
+		sourceBinding["easProfileName"] != "development" ||
 		sourceBinding["iosBundleId"] != "com.gmacko.forgegraph.dev" {
 		t.Fatalf("unexpected source binding %#v", sourceBinding)
 	}
@@ -4068,8 +4070,8 @@ func TestProveAppLocalReadinessInfersDevelopmentLaneForPhysicalTarget(t *testing
 		targetKind      string
 		expectedProfile string
 	}{
-		{name: "iphone", platform: "ios", targetKind: "iphone", expectedProfile: "development-device"},
-		{name: "android phone", platform: "android", targetKind: "android-phone", expectedProfile: "development-android"},
+		{name: "iphone", platform: "ios", targetKind: "iphone", expectedProfile: "development"},
+		{name: "android phone", platform: "android", targetKind: "android-phone", expectedProfile: "development"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			appDir := writeExpoFixture(t)
@@ -4079,13 +4081,6 @@ func TestProveAppLocalReadinessInfersDevelopmentLaneForPhysicalTarget(t *testing
 				0o644,
 			); err != nil {
 				t.Fatalf("write app config identity: %v", err)
-			}
-			if err := os.WriteFile(
-				filepath.Join(appDir, "eas.json"),
-				[]byte(`{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":true}},"development-device":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":false}},"development-android":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"android":{"buildType":"apk"}}}}`),
-				0o644,
-			); err != nil {
-				t.Fatalf("write eas json: %v", err)
 			}
 			maestroDir := filepath.Join(appDir, ".maestro")
 			if err := os.MkdirAll(maestroDir, 0o755); err != nil {
@@ -4133,66 +4128,6 @@ func TestProveAppLocalReadinessInfersDevelopmentLaneForPhysicalTarget(t *testing
 	}
 }
 
-func TestProveAppLocalReadinessPrefersAndroidDevelopmentProfile(t *testing.T) {
-	appDir := writeExpoFixture(t)
-	if err := os.WriteFile(
-		filepath.Join(appDir, "app.config.ts"),
-		[]byte(`export default { name: "ForgeGraph Mobile", slug: "forgegraf", scheme: "forgegraph", ios: { bundleIdentifier: "com.gmacko.forgegraph.dev" }, android: { package: "com.gmacko.forgegraph.dev" }, extra: { eas: { projectId: "05e5245e-6da8-4f7a-a557-324d36b02979" } } }`),
-		0o644,
-	); err != nil {
-		t.Fatalf("write app config identity: %v", err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(appDir, "eas.json"),
-		[]byte(`{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":true}},"development-android":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"android":{"buildType":"apk"}}}}`),
-		0o644,
-	); err != nil {
-		t.Fatalf("write eas json: %v", err)
-	}
-	maestroDir := filepath.Join(appDir, ".maestro")
-	if err := os.MkdirAll(maestroDir, 0o755); err != nil {
-		t.Fatalf("create maestro dir: %v", err)
-	}
-	if err := os.WriteFile(
-		filepath.Join(maestroDir, "01-app-launches.yaml"),
-		[]byte("appId: com.gmacko.forgegraph.dev\n---\n- launchApp\n"),
-		0o644,
-	); err != nil {
-		t.Fatalf("write maestro flow: %v", err)
-	}
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := run(
-		[]string{
-			"prove-app",
-			"--local-readiness",
-			"--app-dir",
-			appDir,
-			"--platform",
-			"android",
-			"--lane",
-			"development",
-			"--json",
-		},
-		&stdout,
-		&stderr,
-		http.DefaultClient,
-	)
-
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
-	}
-	var report map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-		t.Fatalf("decode local readiness JSON: %v\nstdout: %s", err, stdout.String())
-	}
-	sourceBinding := report["sourceBinding"].(map[string]any)
-	if sourceBinding["easProfileName"] != "development-android" {
-		t.Fatalf("expected Android development profile, got %#v", sourceBinding)
-	}
-}
-
 func TestProveAppSourceBindingRecordsDirtyWorkspaceAndChangedSetupFiles(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	appDir := filepath.Join(workspaceRoot, "apps", "mobile")
@@ -4201,7 +4136,7 @@ func TestProveAppSourceBindingRecordsDirtyWorkspaceAndChangedSetupFiles(t *testi
 		"package.json":                    `{"name":"forgegraph-root","private":true,"workspaces":["apps/*"]}`,
 		"apps/mobile/package.json":        `{"name":"@forgegraph/mobile","private":true,"main":"expo-router/entry","dependencies":{"expo":"~55.0.15"}}`,
 		"apps/mobile/app.config.ts":       `export default { slug: "forgegraf", scheme: "forgegraph" }`,
-		"apps/mobile/eas.json":            `{"build":{"development":{"developmentClient":true,"distribution":"internal","ios":{"simulator":true}}}}`,
+		"apps/mobile/metro.config.js":     `module.exports = {}`,
 		"apps/mobile/src/unrelated.ts":    `export const unrelated = true;`,
 		"apps/mobile/.maestro/smoke.yaml": "appId: forgegraph\n---\n",
 	} {
@@ -4223,7 +4158,7 @@ func TestProveAppSourceBindingRecordsDirtyWorkspaceAndChangedSetupFiles(t *testi
 	if err := os.WriteFile(filepath.Join(appDir, "app.config.ts"), []byte(`export default { slug: "forgegraf-dev", scheme: "forgegraph" }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(appDir, "eas.json"), []byte(`{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":true}}}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(appDir, "metro.config.js"), []byte(`module.exports = { resetCache: true }`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(appDir, "src", "unrelated.ts"), []byte(`export const unrelated = "changed";`), 0o644); err != nil {
@@ -4296,7 +4231,7 @@ func TestProveAppSourceBindingRecordsDirtyWorkspaceAndChangedSetupFiles(t *testi
 	if !ok {
 		t.Fatalf("expected changed setup files array, got %#v", sourceBinding["changedSetupFiles"])
 	}
-	if fmt.Sprint(changedSetupFiles) != "[apps/mobile/app.config.ts apps/mobile/eas.json]" {
+	if fmt.Sprint(changedSetupFiles) != "[apps/mobile/app.config.ts apps/mobile/metro.config.js]" {
 		t.Fatalf("unexpected changed setup files %#v", changedSetupFiles)
 	}
 }
@@ -4314,7 +4249,6 @@ func TestProveAppSourceBindingSerializesEmptyChangedSetupFilesWhenDirtyOutsideSe
 			ios: { bundleIdentifier: "com.gmacko.forgegraph" },
 			android: { package: "com.gmacko.forgegraph" }
 		}`,
-		"apps/mobile/eas.json":         `{"build":{"development":{"developmentClient":true,"distribution":"internal","ios":{"simulator":true}}}}`,
 		"apps/mobile/src/unrelated.ts": `export const unrelated = true;`,
 	} {
 		path := filepath.Join(workspaceRoot, name)
@@ -4393,7 +4327,9 @@ func TestProveAppSourceBindingSerializesEmptyChangedSetupFilesWhenDirtyOutsideSe
 	}
 }
 
-func TestProveAppResolvesExpoConfigWithSelectedEASProfileEnv(t *testing.T) {
+func TestProveAppResolvesExpoConfigWithLaneVariant(t *testing.T) {
+	// The development lane resolves the app config as APP_VARIANT=development;
+	// other variables come from the operator's environment, not a checkout file.
 	appDir := t.TempDir()
 	for name, content := range map[string]string{
 		"package.json": `{"name":"@forgegraph/mobile","private":true,"main":"expo-router/entry","dependencies":{"expo":"~55.0.15","expo-dev-client":"~55.0.27"}}`,
@@ -4402,26 +4338,7 @@ func TestProveAppResolvesExpoConfigWithSelectedEASProfileEnv(t *testing.T) {
 			scheme: "forgegraph-" + process.env.APP_VARIANT,
 			ios: { bundleIdentifier: "com.gmacko.forgegraph." + process.env.BUNDLE_SUFFIX },
 			android: { package: "com.gmacko.forgegraph." + process.env.BUNDLE_SUFFIX },
-			extra: { eas: { projectId: process.env.EAS_PROJECT_ID } }
 		})`,
-		"eas.json": `{
-			"build": {
-				"development-device": {
-					"developmentClient": true,
-					"distribution": "internal",
-					"env": {
-						"APP_VARIANT": "development",
-						"EAS_PROJECT_ID": "05e5245e-6da8-4f7a-a557-324d36b02979"
-					},
-					"ios": {
-						"simulator": false,
-						"env": {
-							"BUNDLE_SUFFIX": "dev"
-						}
-					}
-				}
-			}
-		}`,
 	} {
 		if err := os.WriteFile(filepath.Join(appDir, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -4433,7 +4350,7 @@ func TestProveAppResolvesExpoConfigWithSelectedEASProfileEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
 printf 'APP_VARIANT=%s BUNDLE_SUFFIX=%s :: %s\n' "$APP_VARIANT" "$BUNDLE_SUFFIX" "$*" >> "$NPX_LOG"
 if [ "$1" = "expo" ] && [ "$2" = "config" ]; then
-  printf '{"slug":"forgegraf-%s","scheme":"forgegraph-%s","ios":{"bundleIdentifier":"com.gmacko.forgegraph.%s"},"android":{"package":"com.gmacko.forgegraph.%s"},"extra":{"eas":{"projectId":"%s"}}}\n' "$APP_VARIANT" "$APP_VARIANT" "$BUNDLE_SUFFIX" "$BUNDLE_SUFFIX" "$EAS_PROJECT_ID"
+  printf '{"slug":"forgegraf-%s","scheme":"forgegraph-%s","ios":{"bundleIdentifier":"com.gmacko.forgegraph.%s"},"android":{"package":"com.gmacko.forgegraph.%s"}}\n' "$APP_VARIANT" "$APP_VARIANT" "$BUNDLE_SUFFIX" "$BUNDLE_SUFFIX"
   exit 0
 fi
 exit 42
@@ -4441,6 +4358,8 @@ exit 42
 		t.Fatalf("write fake npx: %v", err)
 	}
 	t.Setenv("NPX_LOG", npxLog)
+	t.Setenv("BUNDLE_SUFFIX", "dev")
+	t.Setenv("APP_VARIANT", "production")
 	t.Setenv("PREFLIGHT_FORCE_EXPO_CONFIG_CLI", "1")
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -4503,9 +4422,6 @@ exit 42
 	if sourceBinding["androidPackage"] != "com.gmacko.forgegraph.dev" {
 		t.Fatalf("expected profile-resolved Android package, got %#v", sourceBinding)
 	}
-	if sourceBinding["easProjectId"] != "05e5245e-6da8-4f7a-a557-324d36b02979" {
-		t.Fatalf("expected resolved EAS project ID, got %#v", sourceBinding)
-	}
 	// resolveExpoConfig always digests the raw expo config file, even when the
 	// Expo CLI resolution succeeds (see 1e5a641: digesting the evaluated JSON
 	// let prove-app and runner-side validation compute different digests for
@@ -4515,140 +4431,9 @@ exit 42
 	if sourceBinding["expoConfigDigest"] != digestIfExists(filepath.Join(appDir, "app.config.js")) {
 		t.Fatalf("expected digest of raw app.config.js file, got %#v", sourceBinding["expoConfigDigest"])
 	}
-	expectedEnvDigest := digestJSON(map[string]string{
-		"APP_VARIANT":    "development",
-		"BUNDLE_SUFFIX":  "dev",
-		"EAS_PROJECT_ID": "05e5245e-6da8-4f7a-a557-324d36b02979",
-	})
+	expectedEnvDigest := digestJSON(map[string]string{"APP_VARIANT": "development"})
 	if sourceBinding["easProfileEnvDigest"] != expectedEnvDigest {
 		t.Fatalf("expected merged profile env digest %s, got %#v", expectedEnvDigest, sourceBinding)
-	}
-	waitForFileContains(t, npxLog, "APP_VARIANT=development BUNDLE_SUFFIX=dev :: expo config --json --type public")
-}
-
-func TestProveAppResolvesExtendedEASProfileBeforeExpoConfig(t *testing.T) {
-	appDir := t.TempDir()
-	for name, content := range map[string]string{
-		"package.json": `{"name":"@forgegraph/mobile","private":true,"main":"expo-router/entry","dependencies":{"expo":"~55.0.15","expo-dev-client":"~55.0.27"}}`,
-		"app.config.js": `module.exports = () => ({
-			slug: "forgegraf-" + process.env.APP_VARIANT,
-			scheme: "forgegraph-" + process.env.APP_VARIANT,
-			ios: { bundleIdentifier: "com.gmacko.forgegraph." + process.env.BUNDLE_SUFFIX },
-			android: { package: "com.gmacko.forgegraph." + process.env.BUNDLE_SUFFIX },
-			extra: { eas: { projectId: process.env.EAS_PROJECT_ID } }
-		})`,
-		"eas.json": `{
-			"build": {
-				"base-development": {
-					"developmentClient": true,
-					"distribution": "internal",
-					"env": {
-						"APP_VARIANT": "development",
-						"EAS_PROJECT_ID": "05e5245e-6da8-4f7a-a557-324d36b02979"
-					}
-				},
-				"development-device": {
-					"extends": "base-development",
-					"ios": {
-						"simulator": false,
-						"env": {
-							"BUNDLE_SUFFIX": "dev"
-						}
-					}
-				}
-			}
-		}`,
-	} {
-		if err := os.WriteFile(filepath.Join(appDir, name), []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	fakeBin := t.TempDir()
-	npxLog := filepath.Join(t.TempDir(), "npx.log")
-	if err := os.WriteFile(filepath.Join(fakeBin, "npx"), []byte(`#!/usr/bin/env sh
-printf 'APP_VARIANT=%s BUNDLE_SUFFIX=%s :: %s\n' "$APP_VARIANT" "$BUNDLE_SUFFIX" "$*" >> "$NPX_LOG"
-if [ "$1" = "expo" ] && [ "$2" = "config" ]; then
-  printf '{"slug":"forgegraf-%s","scheme":"forgegraph-%s","ios":{"bundleIdentifier":"com.gmacko.forgegraph.%s"},"android":{"package":"com.gmacko.forgegraph.%s"},"extra":{"eas":{"projectId":"%s"}}}\n' "$APP_VARIANT" "$APP_VARIANT" "$BUNDLE_SUFFIX" "$BUNDLE_SUFFIX" "$EAS_PROJECT_ID"
-  exit 0
-fi
-exit 42
-`), 0o755); err != nil {
-		t.Fatalf("write fake npx: %v", err)
-	}
-	t.Setenv("NPX_LOG", npxLog)
-	t.Setenv("PREFLIGHT_FORCE_EXPO_CONFIG_CLI", "1")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	var received map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The runner streams command output to /logs for whatever job is in
-		// flight. Not what these tests assert, but it must not read as an
-		// unexpected route either.
-		if strings.HasSuffix(r.URL.Path, "/logs") {
-			_, _ = w.Write([]byte(`{"data":{},"meta":{"apiVersion":"v1"}}`))
-			return
-		}
-		if serveCapabilitiesFixture(t, w, r) {
-			return
-		}
-		if serveReadyRunnerCapacityFixture(t, w, r) {
-			return
-		}
-		if r.URL.Path != "/api/preflight/v1/workflows/prove-app" {
-			t.Fatalf("unexpected path %s", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"workflow":{"id":"pfw_test","status":"queued"}},"meta":{"apiVersion":"v1","contractVersion":"2026-05-20","requestId":"req_test"}}`))
-	}))
-	t.Cleanup(server.Close)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := run(
-		[]string{
-			"prove-app",
-			"--api-url",
-			server.URL,
-			"--app-dir",
-			appDir,
-			"--platform",
-			"ios",
-			"--lane",
-			"development",
-			"--json",
-		},
-		&stdout,
-		&stderr,
-		server.Client(),
-	)
-
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
-	}
-	sourceBinding := received["sourceBinding"].(map[string]any)
-	if sourceBinding["easProfileName"] != "development-device" {
-		t.Fatalf("expected extended device profile, got %#v", sourceBinding)
-	}
-	if sourceBinding["appScheme"] != "forgegraph-development" || sourceBinding["expoSlug"] != "forgegraf-development" {
-		t.Fatalf("expected resolved app scheme and slug from inherited profile env, got %#v", sourceBinding)
-	}
-	if sourceBinding["iosBundleId"] != "com.gmacko.forgegraph.dev" {
-		t.Fatalf("expected inherited profile env to resolve iOS bundle ID, got %#v", sourceBinding)
-	}
-	if sourceBinding["easProjectId"] != "05e5245e-6da8-4f7a-a557-324d36b02979" {
-		t.Fatalf("expected inherited EAS project ID, got %#v", sourceBinding)
-	}
-	expectedEnvDigest := digestJSON(map[string]string{
-		"APP_VARIANT":    "development",
-		"BUNDLE_SUFFIX":  "dev",
-		"EAS_PROJECT_ID": "05e5245e-6da8-4f7a-a557-324d36b02979",
-	})
-	if sourceBinding["easProfileEnvDigest"] != expectedEnvDigest {
-		t.Fatalf("expected inherited profile env digest %s, got %#v", expectedEnvDigest, sourceBinding)
 	}
 	waitForFileContains(t, npxLog, "APP_VARIANT=development BUNDLE_SUFFIX=dev :: expo config --json --type public")
 }
@@ -5137,7 +4922,6 @@ func TestProveAppIOSSimulatorProofLoopCoordinatesRunnerAndArtifacts(t *testing.T
 			android: { package: "com.gmacko.forgegraph.dev" },
 			extra: { eas: { projectId: "05e5245e-6da8-4f7a-a557-324d36b02979" } }
 		}`,
-		"apps/mobile/eas.json":                        `{"build":{"development":{"developmentClient":true,"distribution":"internal","ios":{"simulator":true}}}}`,
 		"apps/mobile/.maestro/01-app-launches.yaml":   "appId: com.gmacko.forgegraph.dev\n---\n- launchApp\n",
 		"apps/mobile/.preflight/expo-dev-session.pid": fmt.Sprint(os.Getpid()),
 	} {
@@ -5940,7 +5724,6 @@ func TestSourceBindingValidationAllowsDiscoveryJobToUseBindingEASProfile(t *test
 			ios: { bundleIdentifier: "com.gmacko.forgegraph" },
 			android: { package: "com.gmacko.forgegraph" }
 		}`,
-		"apps/mobile/eas.json": `{"build":{"development":{"developmentClient":true,"distribution":"internal","ios":{"simulator":true}}}}`,
 	} {
 		path := filepath.Join(workspaceRoot, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -5961,9 +5744,8 @@ func TestSourceBindingValidationAllowsDiscoveryJobToUseBindingEASProfile(t *test
 			SourceBinding: runnerJobSourceBinding{
 				WorkspaceRoot:    workspaceRoot,
 				PackagePath:      "apps/mobile",
-				EASProfileName:   "development",
+				BuildProfileName: "development",
 				ExpoConfigDigest: digestIfExists(filepath.Join(appDir, "app.config.ts")),
-				EASJSONDigest:    digestIfExists(filepath.Join(appDir, "eas.json")),
 				AppScheme:        "forgegraph",
 				ExpoSlug:         "forgegraf",
 				IOSBundleID:      "com.gmacko.forgegraph",
@@ -6275,9 +6057,9 @@ func TestRunnerClaimDecodesRequiredSecretReferencesWithoutValues(t *testing.T) {
 			"payload": {
 				"requiredSecretReferences": [
 					{
-						"provider": "expo",
-						"purpose": "api_token",
-						"key": "EXPO_TOKEN",
+						"provider": "sentry",
+						"purpose": "auth_token",
+						"key": "SENTRY_AUTH_TOKEN",
 						"laneScope": "development",
 						"required": true
 					}
@@ -6292,7 +6074,7 @@ func TestRunnerClaimDecodesRequiredSecretReferencesWithoutValues(t *testing.T) {
 		t.Fatalf("expected one required secret reference, got %#v", claim.Job.Payload.RequiredSecretReferences)
 	}
 	required := claim.Job.Payload.RequiredSecretReferences[0]
-	if required.Provider != "expo" || required.Purpose != "api_token" || required.Key != "EXPO_TOKEN" || !required.Required {
+	if required.Provider != "sentry" || required.Purpose != "auth_token" || required.Key != "SENTRY_AUTH_TOKEN" || !required.Required {
 		t.Fatalf("unexpected required secret reference %#v", required)
 	}
 	if required.ID != "" {
@@ -9205,7 +8987,7 @@ func TestRunMaestroSmokeRedactsSensitiveOutputBeforeWritingLocalLog(t *testing.T
 	}
 	fakeBin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(fakeBin, "maestro"), []byte(`#!/usr/bin/env sh
-printf 'EXPO_TOKEN=expo_secret_123\n'
+printf 'SENTRY_AUTH_TOKEN=expo_secret_123\n'
 printf 'Authorization: Bearer eas_secret_456\n' >&2
 printf 'https://example.test/callback?token=maestro_secret_789&safe=1\n'
 exit 0
@@ -9248,7 +9030,7 @@ exit 0
 		}
 	}
 	for _, redacted := range []string{
-		"EXPO_TOKEN=[REDACTED]",
+		"SENTRY_AUTH_TOKEN=[REDACTED]",
 		"Authorization: Bearer [REDACTED]",
 		"token=[REDACTED]",
 	} {
@@ -9390,7 +9172,6 @@ func writeExpoFixture(t *testing.T) string {
 	files := map[string]string{
 		"package.json":  `{"name":"@forgegraph/mobile","private":true,"main":"expo-router/entry","dependencies":{"expo":"~55.0.15","expo-dev-client":"~55.0.27"}}`,
 		"app.config.ts": `export default { slug: "forgegraf", scheme: "forgegraph" }`,
-		"eas.json":      `{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":true}},"development-device":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":false}}}}`,
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(appDir, name), []byte(content), 0o644); err != nil {

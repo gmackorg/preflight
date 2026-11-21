@@ -9,26 +9,11 @@ import (
 	"strings"
 )
 
-func validateWorkOrderProfile(appDir, platform, lane, name string) error {
-	config, err := loadEASJSON(appDir)
-	if err != nil {
-		return fmt.Errorf("read build profiles: %w", err)
-	}
-	profile, ok := config.Build[name]
-	if !ok {
-		return fmt.Errorf("no compatible EAS profile found; select one with --profile")
-	}
-	if isProductionBuildProfile(name) || profile.Distribution == "store" {
-		return fmt.Errorf("production profiles require the separate store build workflow")
-	}
-	if lane == "development" && (!easProfileDevelopmentClient(profile) || (profile.Distribution != "" && profile.Distribution != "internal")) {
-		return fmt.Errorf("EAS profile %q must be an internal development-client build for device work orders", name)
-	}
-	if platform == "ios" && easProfileIsIOSSimulator(profile) != (lane == "simulator") {
-		return fmt.Errorf("EAS profile %q does not match the %s lane; select a compatible --profile", name, lane)
-	}
-	if platform == "android" && !easProfileAndroidInstallable(profile) {
-		return fmt.Errorf("EAS profile %q must produce an installable APK", name)
+// validateWorkOrderProfile checks a work order's build profile against the
+// lane conventions in lane_profiles.go.
+func validateWorkOrderProfile(platform, lane, name string) error {
+	if _, err := resolveLaneProfile(name, platform, lane); err != nil {
+		return err
 	}
 	return nil
 }
