@@ -21,9 +21,21 @@ type pbxNativeTarget struct {
 	ProductType string
 	// Build configuration ids by configuration name.
 	Configurations map[string]string
-	// Release values.
+	// The configuration list's defaultConfigurationName.
+	DefaultConfiguration string
+	// Values of the archived configuration (see configurationID).
 	BundleID  string
 	InfoPlist string
+}
+
+// configurationID returns the id of the build configuration Xcode uses for
+// this target when the archive builds the named configuration: the target's
+// own configuration with that name, or else its defaultConfigurationName.
+func (target pbxNativeTarget) configurationID(name string) string {
+	if id := target.Configurations[name]; id != "" {
+		return id
+	}
+	return target.Configurations[target.DefaultConfiguration]
 }
 
 // signableProductType: applications and app extensions each need their own
@@ -157,8 +169,9 @@ func pbxQuote(value string) string {
 }
 
 // parsePBXNativeTargets lists the project's native targets with their
-// configuration ids and Release bundle id / Info.plist.
-func parsePBXNativeTargets(content string) ([]pbxNativeTarget, error) {
+// configuration ids and the bundle id / Info.plist of the configuration the
+// archive builds (Release unless the build profile names another one).
+func parsePBXNativeTargets(content string, configuration string) ([]pbxNativeTarget, error) {
 	isa := regexp.MustCompile(`(?m)^[ \t]*([0-9A-Fa-f]{24})(?:[ \t]*/\*[^*]*\*/)?[ \t]*=[ \t]*\{[ \t]*\n?[ \t]*isa = PBXNativeTarget;`)
 	targets := []pbxNativeTarget{}
 	for _, match := range isa.FindAllStringSubmatch(content, -1) {
@@ -178,6 +191,7 @@ func parsePBXNativeTargets(content string) ([]pbxNativeTarget, error) {
 		if len(listID) > 0 {
 			if listOpen, listEnd, ok := pbxObjectRange(content, listID[0]); ok {
 				listBody := content[listOpen+1 : listEnd-1]
+				target.DefaultConfiguration = pbxTopLevelValue(listBody, "defaultConfigurationName")
 				configs := regexp.MustCompile(`buildConfigurations = \(([^)]*)\)`).FindStringSubmatch(listBody)
 				if configs != nil {
 					for _, configID := range regexp.MustCompile(`([0-9A-Fa-f]{24})`).FindAllString(configs[1], -1) {
@@ -189,9 +203,9 @@ func parsePBXNativeTargets(content string) ([]pbxNativeTarget, error) {
 				}
 			}
 		}
-		if releaseID := target.Configurations["Release"]; releaseID != "" {
-			target.BundleID = pbxBuildSetting(content, releaseID, "PRODUCT_BUNDLE_IDENTIFIER")
-			target.InfoPlist = pbxBuildSetting(content, releaseID, "INFOPLIST_FILE")
+		if configID := target.configurationID(configuration); configID != "" {
+			target.BundleID = pbxBuildSetting(content, configID, "PRODUCT_BUNDLE_IDENTIFIER")
+			target.InfoPlist = pbxBuildSetting(content, configID, "INFOPLIST_FILE")
 		}
 		targets = append(targets, target)
 	}
@@ -335,10 +349,10 @@ func matchIOSSigningTargets(targets []pbxNativeTarget, plan []storeBuildIOSTarge
 	return matched, missing
 }
 
-// patchIOSProjectForStoreSigning applies manual signing to each matched
-// target's Release configuration and the marketing version / build number to
-// every configuration of every signable target.
-func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, matched map[string]storeBuildIOSTarget, teamID string, version string, buildNumber string) (string, error) {
+// patchIOSProjectForStoreSigning applies manual signing to the configuration
+// each matched target builds when archiving `configuration`, and the marketing
+// version / build number to every configuration of every signable target.
+func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, matched map[string]storeBuildIOSTarget, configuration string, teamID string, version string, buildNumber string) (string, error) {
 	var err error
 	for _, target := range targets {
 		if !signableProductType(target.ProductType) {
@@ -362,11 +376,11 @@ func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, m
 		if !ok {
 			continue
 		}
-		releaseID := target.Configurations["Release"]
-		if releaseID == "" {
-			return content, fmt.Errorf("target %s has no Release configuration", target.Name)
+		configID := target.configurationID(configuration)
+		if configID == "" {
+			return content, fmt.Errorf("target %s has no %s configuration", target.Name, configuration)
 		}
-		content, err = pbxSetBuildSettings(content, releaseID, map[string]string{
+		content, err = pbxSetBuildSettings(content, configID, map[string]string{
 			"CODE_SIGN_STYLE":                   "Manual",
 			"DEVELOPMENT_TEAM":                  teamID,
 			"CODE_SIGN_IDENTITY":                "Apple Distribution",
@@ -374,7 +388,7 @@ func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, m
 			"PROVISIONING_PROFILE_SPECIFIER":    planTarget.ProfileName,
 		}, []string{"PROVISIONING_PROFILE", "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]"})
 		if err != nil {
-			return content, fmt.Errorf("target %s Release: %w", target.Name, err)
+			return content, fmt.Errorf("target %s %s: %w", target.Name, configuration, err)
 		}
 		content, err = pbxSetTargetAttributes(content, target.ID, map[string]string{
 			"ProvisioningStyle": "Manual",
