@@ -211,3 +211,20 @@ func TestRunAndroidStoreBuildCleansUpAfterGradleFailure(t *testing.T) {
 		t.Fatal("keystore left on disk after gradle failed")
 	}
 }
+
+func TestRunAndroidStoreBuildUsesCommittedAndroidProject(t *testing.T) {
+	fixture := newAndroidBuildFixture(t)
+	androidDir := filepath.Join(fixture.runtime.appDir, "android")
+	mustWrite(t, filepath.Join(androidDir, "app", "build.gradle"), expoAppBuildGradle)
+	mustWrite(t, filepath.Join(androidDir, "gradlew"), "#!/bin/sh\n")
+	if _, err := runAndroidStoreBuild(fixture.runtime, fixture.plan, nil); err != nil {
+		t.Fatalf("runAndroidStoreBuild: %v", err)
+	}
+	if calls := fixture.runner.find("npx"); len(calls) != 0 {
+		t.Fatalf("expo prebuild ran over the committed android/: %v", calls)
+	}
+	if !fixture.keystoreSeen {
+		t.Fatal("gradle did not build the committed project")
+	}
+	fixture.runtime.cleanup.Run()
+}

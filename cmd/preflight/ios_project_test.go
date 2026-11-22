@@ -26,7 +26,7 @@ func fixturePlanTargets() []storeBuildIOSTarget {
 }
 
 func TestParsePBXNativeTargetsReadsReleaseSettings(t *testing.T) {
-	targets, err := parsePBXNativeTargets(readStoreFixture(t))
+	targets, err := parsePBXNativeTargets(readStoreFixture(t), "Release")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestParsePBXNativeTargetsReadsReleaseSettings(t *testing.T) {
 }
 
 func TestMatchIOSSigningTargetsReportsExtensionWithoutProfile(t *testing.T) {
-	targets, err := parsePBXNativeTargets(readStoreFixture(t))
+	targets, err := parsePBXNativeTargets(readStoreFixture(t), "Release")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,16 +70,16 @@ func TestMatchIOSSigningTargetsReportsExtensionWithoutProfile(t *testing.T) {
 
 func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) {
 	content := readStoreFixture(t)
-	targets, err := parsePBXNativeTargets(content)
+	targets, err := parsePBXNativeTargets(content, "Release")
 	if err != nil {
 		t.Fatal(err)
 	}
 	matched, _ := matchIOSSigningTargets(targets, fixturePlanTargets())
-	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "TEAM123456", "1.4.0", "42")
+	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "Release", "TEAM123456", "1.4.0", "42")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reparsed, err := parsePBXNativeTargets(patched)
+	reparsed, err := parsePBXNativeTargets(patched, "Release")
 	if err != nil {
 		t.Fatalf("patched project no longer parses: %v", err)
 	}
@@ -138,9 +138,70 @@ func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) 
 		t.Error("TargetAttributes DevelopmentTeam not updated")
 	}
 	// Idempotent: patching twice is a no-op.
-	again, err := patchIOSProjectForStoreSigning(patched, reparsed, matched, "TEAM123456", "1.4.0", "42")
+	again, err := patchIOSProjectForStoreSigning(patched, reparsed, matched, "Release", "TEAM123456", "1.4.0", "42")
 	if err != nil || again != patched {
 		t.Fatalf("second patch changed the project (err %v)", err)
+	}
+}
+
+// releaseProductionFixture is the store fixture as a bare-workflow app with
+// custom configurations has it: the app target archives "Release-production"
+// (com.example.storeapp) while Debug builds com.example.storeapp.dev; the
+// extension only has Debug/Release, so Xcode builds its default (Release).
+func releaseProductionFixture(t *testing.T) string {
+	t.Helper()
+	content := readStoreFixture(t)
+	setConfigName := func(configID string, from string, to string) {
+		open, end, ok := pbxObjectRange(content, configID)
+		if !ok || !strings.Contains(content[open:end], from) {
+			t.Fatalf("fixture configuration %s lacks %q", configID, from)
+		}
+		content = content[:open] + strings.Replace(content[open:end], from, to, 1) + content[end:]
+	}
+	setConfigName("13B07F951A680F5B00A75B9A", "name = Release;", "name = Release-production;")
+	setConfigName("13B07F941A680F5B00A75B9A", "PRODUCT_BUNDLE_IDENTIFIER = com.example.storeapp;", "PRODUCT_BUNDLE_IDENTIFIER = com.example.storeapp.dev;")
+	return content
+}
+
+func TestStoreSigningFollowsTheArchivedConfiguration(t *testing.T) {
+	content := releaseProductionFixture(t)
+	targets, err := parsePBXNativeTargets(content, "Release-production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]pbxNativeTarget{}
+	for _, target := range targets {
+		byName[target.Name] = target
+	}
+	if app := byName["StoreApp"]; app.BundleID != "com.example.storeapp" || app.InfoPlist != "StoreApp/Info.plist" {
+		t.Fatalf("app target read the wrong configuration: %+v", app)
+	}
+	if nse := byName["NotificationService"]; nse.BundleID != "com.example.storeapp.NotificationService" {
+		t.Fatalf("extension must fall back to its default configuration: %+v", nse)
+	}
+	matched, missing := matchIOSSigningTargets(targets, fixturePlanTargets())
+	if len(missing) != 0 || len(matched) != 2 {
+		t.Fatalf("matched %v, missing %v", matched, missing)
+	}
+	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "Release-production", "TEAM123456", "1.4.0", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	production := pbxBuildSettingsBody(t, patched, "13B07F951A680F5B00A75B9A")
+	if pbxTopLevelValue(production, "CODE_SIGN_STYLE") != "Manual" || pbxTopLevelValue(production, "PROVISIONING_PROFILE_SPECIFIER") != "StoreApp AppStore" {
+		t.Fatalf("Release-production not signed:\n%s", production)
+	}
+	if debug := pbxBuildSettingsBody(t, patched, "13B07F941A680F5B00A75B9A"); pbxTopLevelValue(debug, "CODE_SIGN_STYLE") != "" {
+		t.Fatalf("Debug must keep its signing:\n%s", debug)
+	}
+	if nse := pbxBuildSettingsBody(t, patched, "BB0000000000000000000004"); pbxTopLevelValue(nse, "PROVISIONING_PROFILE_SPECIFIER") != "StoreApp NSE AppStore" {
+		t.Fatalf("extension default configuration not signed:\n%s", nse)
+	}
+
+	// The dev bundle id is what a Debug archive would have to sign.
+	debugTargets, _ := parsePBXNativeTargets(content, "Debug")
+	if _, missing := matchIOSSigningTargets(debugTargets, fixturePlanTargets()); strings.Join(missing, ",") != "com.example.storeapp.dev" {
+		t.Fatalf("Debug archive missing = %v", missing)
 	}
 }
 

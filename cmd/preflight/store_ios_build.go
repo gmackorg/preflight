@@ -1,13 +1,15 @@
 package main
 
-// store.build for iOS (PREFLT-66): expo prebuild, CocoaPods, manual signing
-// with leased credentials, xcodebuild archive + -exportArchive, signature
-// verification. The artifact upload happens in runStoreBuild.
+// store.build for iOS (PREFLT-66): expo prebuild (skipped when ios/ is
+// committed, PREFLT-71), CocoaPods, manual signing with leased credentials,
+// xcodebuild archive + -exportArchive, signature verification. The artifact upload happens in runStoreBuild.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -138,7 +140,33 @@ func storeOutputTail(output string) string {
 	return "\n" + redactSetupTranscriptText(text)
 }
 
+// committedNativeProject reports whether the app's ios/ or android/
+// directory is part of the source (a bare-workflow app) rather than absent or
+// left behind by an earlier prebuild in a reused workspace. In a git checkout
+// the directory must contain tracked files; outside git, existing is enough.
+func committedNativeProject(appDir string, platform string) bool {
+	info, err := os.Stat(filepath.Join(appDir, platform))
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "git", "-C", appDir, "ls-files", "--", platform).Output()
+	if err != nil {
+		return true
+	}
+	return strings.TrimSpace(string(output)) != ""
+}
+
+// runExpoStorePrebuild generates the native project for platform, unless the
+// checkout commits one (a bare-workflow app): like EAS, the committed ios/ or
+// android/ directory is then built as-is, keeping hand-made targets and build
+// configurations that prebuild --clean would delete.
 func runExpoStorePrebuild(rt *storeJobRuntime, platform string, env []string) error {
+	if committedNativeProject(rt.appDir, platform) {
+		_, _ = fmt.Fprintf(rt.log, "%s/ is committed in the checkout: using the committed native project, skipping expo prebuild\n", platform)
+		return nil
+	}
 	output, err := rt.run.Run(storeCommand{
 		Name:    "npx",
 		Args:    []string{"expo", "prebuild", "--platform", platform, "--clean", "--no-install"},
@@ -179,6 +207,11 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 		return storeBuildOutcome{}, err
 	}
 
+	configuration := strings.TrimSpace(ios.Configuration)
+	if configuration == "" {
+		configuration = "Release"
+	}
+
 	if err := runExpoStorePrebuild(rt, "ios", env); err != nil {
 		return storeBuildOutcome{}, err
 	}
@@ -200,7 +233,7 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 	if err != nil {
 		return storeBuildOutcome{}, storeFailuref("ios_project_missing", "read %s: %v", pbxprojPath, err)
 	}
-	targets, err := parsePBXNativeTargets(string(raw))
+	targets, err := parsePBXNativeTargets(string(raw), configuration)
 	if err != nil {
 		return storeBuildOutcome{}, storeFailuref("ios_project_unreadable", "%s: %v", pbxprojPath, err)
 	}
@@ -209,7 +242,7 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 		return storeBuildOutcome{}, storeFailuref("signing_target_missing_profile",
 			"no provisioning profile in the store plan for signable target(s): %s", strings.Join(missing, ", "))
 	}
-	patched, err := patchIOSProjectForStoreSigning(string(raw), targets, matched, teamID, plan.Version, plan.BuildNumber)
+	patched, err := patchIOSProjectForStoreSigning(string(raw), targets, matched, configuration, teamID, plan.Version, plan.BuildNumber)
 	if err != nil {
 		return storeBuildOutcome{}, storeFailuref("ios_project_patch_failed", "%v", err)
 	}
@@ -246,10 +279,6 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 	scheme := strings.TrimSpace(ios.Scheme)
 	if scheme == "" {
 		scheme = strings.TrimSuffix(filepath.Base(workspace), ".xcworkspace")
-	}
-	configuration := strings.TrimSpace(ios.Configuration)
-	if configuration == "" {
-		configuration = "Release"
 	}
 	archivePath := filepath.Join(rt.workDir, scheme+".xcarchive")
 	_ = os.RemoveAll(archivePath)

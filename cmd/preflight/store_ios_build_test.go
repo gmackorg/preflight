@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,11 +22,12 @@ type iosBuildFixture struct {
 	plan     storeBuildPlan
 	secrets  map[string]string
 	// Observations made while xcodebuild archive "ran".
-	archiveSawProfiles bool
-	archiveSawKeychain bool
-	archiveErr         error
-	exportErr          error
-	codesignTeam       string
+	archiveSawProfiles   bool
+	archiveSawKeychain   bool
+	archiveConfiguration string
+	archiveErr           error
+	exportErr            error
+	codesignTeam         string
 }
 
 func profilePayload(uuid, name, bundleID string) string {
@@ -93,16 +96,13 @@ func (fixture *iosBuildFixture) handle(command storeCommand) ([]byte, error) {
 		if !strings.Contains(env, "APP_VARIANT=production") || !strings.Contains(env, "SENTRY_AUTH_TOKEN=sentry-auth-token-value") {
 			t.Errorf("prebuild env lacks plan or secret environment")
 		}
-		mustWrite(t, filepath.Join(iosDir, "StoreApp.xcodeproj", "project.pbxproj"), readStoreFixture(t))
-		mustMkdir(t, filepath.Join(iosDir, "StoreApp.xcworkspace"))
-		plist := "<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>1.0.0</string>\n\t<key>CFBundleVersion</key>\n\t<string>1</string>\n</dict>\n</plist>\n"
-		mustWrite(t, filepath.Join(iosDir, "StoreApp", "Info.plist"), plist)
-		mustWrite(t, filepath.Join(iosDir, "NotificationService", "Info.plist"), plist)
+		fixture.writeIOSProject(readStoreFixture(t))
 	case command.Name == "pod":
 		if command.Dir != iosDir {
 			t.Errorf("pod install ran in %s", command.Dir)
 		}
 	case command.Name == "xcodebuild" && command.Args[0] == "archive":
+		fixture.archiveConfiguration = argAfter(command.Args, "-configuration")
 		fixture.archiveSawProfiles = true
 		for _, uuid := range []string{"AAAA-1111", "BBBB-2222"} {
 			for _, path := range fixture.profilePaths(uuid) {
@@ -139,6 +139,19 @@ func (fixture *iosBuildFixture) handle(command storeCommand) ([]byte, error) {
 		t.Errorf("unexpected command %s", command.String())
 	}
 	return nil, nil
+}
+
+// writeIOSProject lays out ios/ as expo prebuild would (or as a bare-workflow
+// app commits it), with the given project.pbxproj.
+func (fixture *iosBuildFixture) writeIOSProject(pbxproj string) {
+	t := fixture.t
+	t.Helper()
+	iosDir := filepath.Join(fixture.runtime.appDir, "ios")
+	mustWrite(t, filepath.Join(iosDir, "StoreApp.xcodeproj", "project.pbxproj"), pbxproj)
+	mustMkdir(t, filepath.Join(iosDir, "StoreApp.xcworkspace"))
+	plist := "<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>1.0.0</string>\n\t<key>CFBundleVersion</key>\n\t<string>1</string>\n</dict>\n</plist>\n"
+	mustWrite(t, filepath.Join(iosDir, "StoreApp", "Info.plist"), plist)
+	mustWrite(t, filepath.Join(iosDir, "NotificationService", "Info.plist"), plist)
 }
 
 func mustWrite(t *testing.T, path string, content string) {
@@ -201,6 +214,9 @@ func TestRunIOSStoreBuildSignsArchivesExportsAndCleansUp(t *testing.T) {
 	}
 	if !fixture.archiveSawProfiles || !fixture.archiveSawKeychain {
 		t.Fatalf("archive ran without profiles (%v) or job keychain first in search list (%v)", fixture.archiveSawProfiles, fixture.archiveSawKeychain)
+	}
+	if fixture.archiveConfiguration != "Release" {
+		t.Fatalf("archive configuration = %q, want Release", fixture.archiveConfiguration)
 	}
 
 	// Ordering: prebuild, pods, keychain, archive, export, verification.
@@ -381,3 +397,68 @@ func TestRevealIOSSigningMaterialValidatesPayloads(t *testing.T) {
 }
 
 var testIOSSecretEnv = map[string]string{"SENTRY_AUTH_TOKEN": "sentry-auth-token-value"}
+
+// A bare-workflow app commits ios/ with its own targets and configurations:
+// the build uses it as-is (no prebuild --clean) and signs the configuration
+// the profile archives.
+func TestRunIOSStoreBuildUsesCommittedIOSProjectAndProfileConfiguration(t *testing.T) {
+	fixture := newIOSBuildFixture(t)
+	fixture.writeIOSProject(releaseProductionFixture(t))
+	fixture.plan.IOS.Configuration = "Release-production"
+	_, err := runIOSStoreBuild(fixture.runtime, fixture.plan, testIOSSecretEnv)
+	if err != nil {
+		t.Fatalf("runIOSStoreBuild: %v\n%s", err, strings.Join(fixture.runner.lines(), "\n"))
+	}
+	if calls := fixture.runner.find("npx"); len(calls) != 0 {
+		t.Fatalf("expo prebuild ran over the committed ios/: %v", calls)
+	}
+	if log := fixture.runtime.log.(*bytes.Buffer).String(); !strings.Contains(log, "ios/ is committed in the checkout: using the committed native project, skipping expo prebuild") {
+		t.Fatalf("log does not say the committed project is used:\n%s", log)
+	}
+	if len(fixture.runner.find("pod install")) != 1 {
+		t.Fatal("pod install must still run for a committed project")
+	}
+	if fixture.archiveConfiguration != "Release-production" {
+		t.Fatalf("archive configuration = %q, want Release-production", fixture.archiveConfiguration)
+	}
+	pbxproj, _ := os.ReadFile(filepath.Join(fixture.runtime.appDir, "ios", "StoreApp.xcodeproj", "project.pbxproj"))
+	production := pbxBuildSettingsBody(t, string(pbxproj), "13B07F951A680F5B00A75B9A")
+	if pbxTopLevelValue(production, "PROVISIONING_PROFILE_SPECIFIER") != "StoreApp AppStore" || pbxTopLevelValue(production, "CODE_SIGN_STYLE") != "Manual" {
+		t.Fatalf("Release-production not signed:\n%s", production)
+	}
+	fixture.assertCleanedUp()
+}
+
+// An ios/ directory a previous prebuild left in a reused git workspace is not
+// committed: prebuild still regenerates it.
+func TestRunIOSStoreBuildPrebuildsOverUntrackedIOSDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	fixture := newIOSBuildFixture(t)
+	appDir := fixture.runtime.appDir
+	mustWrite(t, filepath.Join(appDir, "package.json"), "{}\n")
+	for _, args := range [][]string{{"init", "-q"}, {"add", "package.json"}} {
+		if output, err := exec.Command("git", append([]string{"-C", appDir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	fixture.writeIOSProject("stale project from an earlier prebuild")
+	if committedNativeProject(appDir, "ios") {
+		t.Fatal("untracked ios/ reported as committed")
+	}
+	if _, err := runIOSStoreBuild(fixture.runtime, fixture.plan, testIOSSecretEnv); err != nil {
+		t.Fatalf("runIOSStoreBuild: %v\n%s", err, strings.Join(fixture.runner.lines(), "\n"))
+	}
+	if len(fixture.runner.find("npx expo prebuild")) != 1 {
+		t.Fatalf("prebuild did not run:\n%s", strings.Join(fixture.runner.lines(), "\n"))
+	}
+
+	if output, err := exec.Command("git", "-C", appDir, "add", "ios").CombinedOutput(); err != nil {
+		t.Fatalf("git add ios: %v\n%s", err, output)
+	}
+	if !committedNativeProject(appDir, "ios") {
+		t.Fatal("tracked ios/ not reported as committed")
+	}
+	fixture.assertCleanedUp()
+}
