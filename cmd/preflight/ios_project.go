@@ -352,8 +352,15 @@ func matchIOSSigningTargets(targets []pbxNativeTarget, plan []storeBuildIOSTarge
 // patchIOSProjectForStoreSigning applies manual signing to the configuration
 // each matched target builds when archiving `configuration`, and the marketing
 // version / build number to every configuration of every signable target.
-func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, matched map[string]storeBuildIOSTarget, configuration string, teamID string, version string, buildNumber string) (string, error) {
+// signingIdentity is the SHA-1 of the distribution certificate imported into
+// the job keychain. A name ("Apple Distribution") is ambiguous on hosts that
+// hold several distribution certificates for the same team: xcodebuild picks
+// whichever it finds first and fails when the profile embeds another one.
+func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, matched map[string]storeBuildIOSTarget, configuration string, teamID string, signingIdentity string, version string, buildNumber string) (string, error) {
 	var err error
+	if signingIdentity == "" {
+		signingIdentity = "Apple Distribution"
+	}
 	for _, target := range targets {
 		if !signableProductType(target.ProductType) {
 			continue
@@ -383,8 +390,8 @@ func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, m
 		content, err = pbxSetBuildSettings(content, configID, map[string]string{
 			"CODE_SIGN_STYLE":                   "Manual",
 			"DEVELOPMENT_TEAM":                  teamID,
-			"CODE_SIGN_IDENTITY":                "Apple Distribution",
-			"CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Distribution",
+			"CODE_SIGN_IDENTITY":                signingIdentity,
+			"CODE_SIGN_IDENTITY[sdk=iphoneos*]": signingIdentity,
 			"PROVISIONING_PROFILE_SPECIFIER":    planTarget.ProfileName,
 		}, []string{"PROVISIONING_PROFILE", "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]"})
 		if err != nil {

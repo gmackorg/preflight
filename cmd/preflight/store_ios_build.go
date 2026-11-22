@@ -242,7 +242,7 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 		return storeBuildOutcome{}, storeFailuref("signing_target_missing_profile",
 			"no provisioning profile in the store plan for signable target(s): %s", strings.Join(missing, ", "))
 	}
-	patched, err := patchIOSProjectForStoreSigning(string(raw), targets, matched, configuration, teamID, plan.Version, plan.BuildNumber)
+	patched, err := patchIOSProjectForStoreSigning(string(raw), targets, matched, configuration, teamID, normalizeFingerprint(cert.SHA1Fingerprint), plan.Version, plan.BuildNumber)
 	if err != nil {
 		return storeBuildOutcome{}, storeFailuref("ios_project_patch_failed", "%v", err)
 	}
