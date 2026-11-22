@@ -15,28 +15,6 @@ import (
 	"strings"
 )
 
-// Require an explicit APK profile. Physical devices retain their existing
-// development workflow; an iOS-only preview profile does not opt Android in.
-func isPackagedAndroidSimulatorProfile(profile easBuildProfile, platform, lane string) bool {
-	return platform == "android" && lane == "simulator" &&
-		profile.DevelopmentClient != nil && !*profile.DevelopmentClient &&
-		profile.Distribution == "internal" && profile.Android.BuildType == "apk" &&
-		easProfileEnv(profile, platform)["APP_VARIANT"] == "preview"
-}
-
-func isPackagedSimulatorProfile(profile easBuildProfile, platform, lane string) bool {
-	return isPackagedIOSSimulatorProfile(profile, platform, lane) || isPackagedAndroidSimulatorProfile(profile, platform, lane)
-}
-
-func isPackagedAndroidSimulatorJob(job apiRunnerJob) bool {
-	config, err := loadEASJSON(appDirectoryForJob(runnerOnceOptions{}, job))
-	if err != nil {
-		return false
-	}
-	profile, ok := config.Build[easProfileNameForJob(job)]
-	return ok && isPackagedAndroidSimulatorProfile(profile, jobPlatform(job), job.Payload.Lane)
-}
-
 type androidPreviewOutput struct {
 	ApplicationID string `json:"applicationId"`
 	VariantName   string `json:"variantName"`

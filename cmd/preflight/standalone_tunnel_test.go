@@ -20,7 +20,7 @@ func TestStandaloneTunnelWaitsForDelayedURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if standaloneDevelopmentSessionReplacements(output)["EXPO_TUNNEL_URL"] != "https://preflight-tunnel.ngrok-free.app" {
+	if tunnelURL, _ := expoTunnelDevServerURLFromLogContent(output); tunnelURL != "https://preflight-tunnel.ngrok-free.app" {
 		t.Fatalf("tunnel accepted startup output before URL: %q", output)
 	}
 }

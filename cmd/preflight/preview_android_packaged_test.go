@@ -16,10 +16,6 @@ import (
 func writeAndroidPreviewFixture(t *testing.T) (string, string) {
 	t.Helper()
 	appDir, bin := writePreviewSimulatorFixture(t)
-	profiles := `{"build":{"preview":{"developmentClient":false,"distribution":"internal","env":{"APP_VARIANT":"preview","API_URL":"https://example.test/$apiSuffix"},"android":{"buildType":"apk"}},"preview-android":{"extends":"preview"}}}`
-	if err := os.WriteFile(filepath.Join(appDir, "eas.json"), []byte(profiles), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	script := `#!/bin/sh
 if [ "$2" = config ]; then
  echo '{"slug":"sortie","scheme":"sortey-dev","android":{"package":"com.gmacko.sortey.dev"},"extra":{"eas":{"projectId":"preview-project"}}}'
@@ -46,7 +42,7 @@ func TestAndroidPackagedPreviewReadiness(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if !report.Ready || report.SourceBinding.AndroidPackage != "com.gmacko.sortey.dev" || report.SourceBinding.EASProfileName != "preview-android" {
+	if !report.Ready || report.SourceBinding.AndroidPackage != "com.gmacko.sortey.dev" || report.SourceBinding.BuildProfileName != "preview-android" {
 		t.Fatalf("incorrect binding: %#v", report)
 	}
 }
@@ -56,7 +52,7 @@ func TestAndroidPackagedPreviewRejectsUnsupportedModes(t *testing.T) {
 		name, lane, strategy string
 		standalone           bool
 	}{
-		{"physical", "development", "", false}, {"eas", "simulator", "eas", false}, {"standalone", "simulator", "", true},
+		{"physical", "development", "", false}, {"standalone", "simulator", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			appDir, _ := writeAndroidPreviewFixture(t)
@@ -139,7 +135,7 @@ case "$*" in *"emu avd name"*) printf 'Dedicated_AVD\nOK\n';; *) printf 'Success
 			job.Payload.Platform = "android"
 			job.Payload.Lane = "simulator"
 			job.Payload.ProviderIdentity = "emulator-5590"
-			job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", EASProfileName: "preview-android", AndroidPackage: "com.gmacko.sortey.dev"}
+			job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", BuildProfileName: "preview-android", AndroidPackage: "com.gmacko.sortey.dev"}
 			var completion struct {
 				Result struct {
 					Status  string `json:"status"`
@@ -193,7 +189,7 @@ case "$*" in *"emu avd name"*) printf 'Dedicated_AVD\nOK\n';; *) printf 'Success
 				}
 				return
 			}
-			for _, want := range []string{":app:assembleRelease", "variant=preview", "api=https://example.test/$apiSuffix", "adb -s emulator-5590 install -r", "adb -s emulator-5590 shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.gmacko.sortey.dev"} {
+			for _, want := range []string{":app:assembleRelease", "variant=preview", "adb -s emulator-5590 install -r", "adb -s emulator-5590 shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.gmacko.sortey.dev"} {
 				if !strings.Contains(commands, want) {
 					t.Fatalf("missing %q:\n%s", want, commands)
 				}

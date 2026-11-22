@@ -18,52 +18,37 @@ func writeDoctorFile(t *testing.T, dir, name, content string) {
 	}
 }
 
-func TestCheckSentryUpload_FlagsUncoveredProfileFollowingExtends(t *testing.T) {
-	dir := t.TempDir()
-	writeDoctorFile(t, dir, "package.json", `{"dependencies":{"@sentry/react-native":"5.0.0"}}`)
-	// production inherits the disable via extends->base; preview does not; base
-	// is the conventional shared profile and must not be flagged.
-	writeDoctorFile(t, dir, "eas.json", `{
-	  "build": {
-	    "base": { "env": { "SENTRY_DISABLE_AUTO_UPLOAD": "true" } },
-	    "production": { "extends": "base", "env": {} },
-	    "preview": { "env": {} }
-	  }
-	}`)
-	findings := checkSentryUpload(dir)
-	if len(findings) != 1 || findings[0].Severity != doctorWarn || !findings[0].Fixable {
-		t.Fatalf("expected 1 fixable warn, got %+v", findings)
-	}
-	msg := findings[0].Message
-	if !strings.Contains(msg, "preview") || strings.Contains(msg, "production") || strings.Contains(msg, "base") {
-		t.Fatalf("expected only preview flagged, got %q", msg)
-	}
-}
-
-func TestCheckSentryUpload_OkWhenNoSentryDep(t *testing.T) {
-	dir := t.TempDir()
-	writeDoctorFile(t, dir, "package.json", `{"dependencies":{}}`)
-	writeDoctorFile(t, dir, "eas.json", `{"build":{"production":{"env":{}}}}`)
-	findings := checkSentryUpload(dir)
-	if len(findings) != 1 || findings[0].Severity != doctorOK {
-		t.Fatalf("expected ok when no @sentry/react-native, got %+v", findings)
-	}
-}
-
-func TestCheckEASJson_RequiresProductionProfile(t *testing.T) {
+func TestCheckAppConfig_RequiresNativeIdentity(t *testing.T) {
 	ok := t.TempDir()
-	writeDoctorFile(t, ok, "eas.json", `{"build":{"production":{}}}`)
-	if f := checkEASJson(ok); f[0].Severity != doctorOK {
+	writeDoctorFile(t, ok, "app.json", `{"expo":{"ios":{"bundleIdentifier":"com.example.app"}}}`)
+	if f := checkAppConfig(ok); f[0].Severity != doctorOK {
 		t.Fatalf("expected ok, got %+v", f)
 	}
-	missing := t.TempDir()
-	writeDoctorFile(t, missing, "eas.json", `{"build":{"preview":{}}}`)
-	if f := checkEASJson(missing); f[0].Severity != doctorBroken {
-		t.Fatalf("expected broken (no production profile), got %+v", f)
+	android := t.TempDir()
+	writeDoctorFile(t, android, "app.config.ts", `export default { android: { package: "com.example.app" } }`)
+	if f := checkAppConfig(android); f[0].Severity != doctorOK {
+		t.Fatalf("expected ok for android-only config, got %+v", f)
 	}
-	none := t.TempDir()
-	if f := checkEASJson(none); f[0].Severity != doctorBroken {
-		t.Fatalf("expected broken (no eas.json), got %+v", f)
+	unnamed := t.TempDir()
+	writeDoctorFile(t, unnamed, "app.json", `{"expo":{"name":"App"}}`)
+	if f := checkAppConfig(unnamed); f[0].Severity != doctorBroken {
+		t.Fatalf("expected broken (no native identity), got %+v", f)
+	}
+	if f := checkAppConfig(t.TempDir()); f[0].Severity != doctorBroken {
+		t.Fatalf("expected broken (no app config), got %+v", f)
+	}
+}
+
+func TestFindExpoAppDirs_FindsAppsWithoutEASConfig(t *testing.T) {
+	root := t.TempDir()
+	app := filepath.Join(root, "repo", "apps", "mobile")
+	writeDoctorFile(t, app, "package.json", `{"name":"mobile","dependencies":{"expo":"~55.0.0"}}`)
+	writeDoctorFile(t, app, "app.json", `{"expo":{"ios":{"bundleIdentifier":"com.example.app"}}}`)
+	web := filepath.Join(root, "repo", "apps", "web")
+	writeDoctorFile(t, web, "package.json", `{"name":"web","dependencies":{"next":"16.0.0"}}`)
+	got := findExpoAppDirs(root)
+	if len(got) != 1 || got[0] != app {
+		t.Fatalf("expected only %s, got %v", app, got)
 	}
 }
 
@@ -111,27 +96,6 @@ func TestCheckReactPin_OkWhenConsistentIgnoringRange(t *testing.T) {
 	f := checkReactPin(root)
 	if len(f) != 1 || f[0].Severity != doctorOK {
 		t.Fatalf("expected ok (^19.2.3 == 19.2.3), got %+v", f)
-	}
-}
-
-func TestFixSentryUpload_AddsFlagFollowingExtends(t *testing.T) {
-	dir := t.TempDir()
-	writeDoctorFile(t, dir, "eas.json", `{"build":{"base":{"env":{"SENTRY_DISABLE_AUTO_UPLOAD":"true"}},"production":{"extends":"base"},"preview":{"env":{"APP_VARIANT":"preview"}}}}`)
-	msg, err := fixSentryUpload(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(msg, "1 ") {
-		t.Fatalf("expected 1 profile fixed, got %q", msg)
-	}
-	doc, _ := readJSONMap(filepath.Join(dir, "eas.json"))
-	build := doc["build"].(map[string]any)
-	prev := build["preview"].(map[string]any)["env"].(map[string]any)
-	if prev["SENTRY_DISABLE_AUTO_UPLOAD"] != "true" || prev["APP_VARIANT"] != "preview" {
-		t.Fatalf("preview env wrong after fix: %+v", prev)
-	}
-	if _, hasEnv := build["production"].(map[string]any)["env"]; hasEnv {
-		t.Fatalf("production should stay untouched (inherits via extends)")
 	}
 }
 

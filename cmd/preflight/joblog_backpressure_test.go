@@ -137,7 +137,7 @@ func TestCommandLogsRemainBoundToTheirJobAndShipRedactedTail(t *testing.T) {
 	// Stopping an older job cannot detach the current one, and a stopped
 	// writer cannot ship lingering output into the new job's upload stream.
 	_, _ = io.WriteString(firstCommand.Stdout, "lingering old output\n")
-	_, _ = io.WriteString(secondCommand.Stderr, "EXPO_TOKEN=example-secret-no-newline")
+	_, _ = io.WriteString(secondCommand.Stderr, "SENTRY_AUTH_TOKEN=example-secret-no-newline")
 	secondFlush()
 	secondStop()
 	mu.Lock()

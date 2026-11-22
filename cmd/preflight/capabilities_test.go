@@ -65,7 +65,7 @@ func TestSimctlTracksXcrunNotItsOwnBinary(t *testing.T) {
 
 func TestFilterAdaptersDropsUnbackedPlatforms(t *testing.T) {
 	adapters := []string{
-		"ios.simulator", "android.emulator", "eas.cli",
+		"ios.simulator", "android.emulator", "google_play.api",
 		"fastlane.cli", "sentry.api",
 	}
 	got := filterAdaptersForPlatforms(adapters, []string{"android"})
@@ -82,7 +82,7 @@ func TestFilterAdaptersDropsUnbackedPlatforms(t *testing.T) {
 	for _, a := range got {
 		seen[a] = true
 	}
-	if !seen["eas.cli"] || !seen["sentry.api"] || !seen["android.emulator"] {
+	if !seen["google_play.api"] || !seen["sentry.api"] || !seen["android.emulator"] {
 		t.Fatalf("dropped adapters that should remain: %v", got)
 	}
 }

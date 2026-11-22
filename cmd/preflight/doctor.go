@@ -24,7 +24,7 @@ import (
 // the rest of the config is dynamic — enough to map a checkout to a fleet app.
 var expoSlugRe = regexp.MustCompile(`["']?slug["']?\s*:\s*["']([a-zA-Z0-9._-]+)["']`)
 
-// The EAS project id is a static UUID literal — the canonical app identity,
+// The Expo project id (extra.eas.projectId) is a static UUID literal — the canonical app identity,
 // more reliable than slug for mapping a checkout to a fleet app.
 var expoProjectIDRe = regexp.MustCompile(
 	`["']?projectId["']?\s*:\s*["']([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})["']`,
@@ -57,8 +57,7 @@ type doctorCheck struct {
 
 func doctorChecks() []doctorCheck {
 	return []doctorCheck{
-		{id: "eas-json", run: checkEASJson},
-		{id: "sentry-upload", run: checkSentryUpload, fix: fixSentryUpload},
+		{id: "app-config", run: checkAppConfig},
 		{id: "react-pin", run: checkReactPin},
 		{id: "dirty-tree", run: checkDirtyTree},
 		{id: "lockfile-drift", run: checkLockfileDrift, fix: fixLockfileDrift},
@@ -100,76 +99,6 @@ func readJSONMap(path string) (map[string]any, error) {
 	return doc, nil
 }
 
-// checkEASJson: eas.json must exist and declare a production build profile.
-func checkEASJson(appDir string) []doctorFinding {
-	doc, err := readJSONMap(filepath.Join(appDir, "eas.json"))
-	if err != nil {
-		return []doctorFinding{{
-			Check: "eas-json", Severity: doctorBroken,
-			Message: "eas.json missing or unparseable", Detail: err.Error(),
-		}}
-	}
-	build, _ := doc["build"].(map[string]any)
-	if _, ok := build["production"]; !ok {
-		return []doctorFinding{{
-			Check: "eas-json", Severity: doctorBroken,
-			Message: "no `production` build profile in eas.json",
-		}}
-	}
-	return []doctorFinding{{
-		Check: "eas-json", Severity: doctorOK,
-		Message: "eas.json declares a production build profile",
-	}}
-}
-
-// checkSentryUpload: if @sentry/react-native is a dep, every build profile must
-// disable the sourcemap auto-upload (or carry a token) or the native build
-// fails with no SENTRY_AUTH_TOKEN. This is the exact crucible XCODE_BUILD_ERROR.
-func checkSentryUpload(appDir string) []doctorFinding {
-	doc, err := readJSONMap(filepath.Join(appDir, "eas.json"))
-	if err != nil {
-		return nil // eas-json reports the missing/broken file
-	}
-	sentry := false
-	if pkg, e := readJSONMap(filepath.Join(appDir, "package.json")); e == nil {
-		for _, section := range []string{"dependencies", "devDependencies"} {
-			if deps, ok := pkg[section].(map[string]any); ok {
-				if _, ok := deps["@sentry/react-native"]; ok {
-					sentry = true
-				}
-			}
-		}
-	}
-	if !sentry {
-		return []doctorFinding{{
-			Check: "sentry-upload", Severity: doctorOK,
-			Message: "no @sentry/react-native — sourcemap upload N/A",
-		}}
-	}
-	build, _ := doc["build"].(map[string]any)
-	var offenders []string
-	for name := range build {
-		if name == "base" {
-			continue // conventional shared base — not built directly
-		}
-		if !sentryUploadDisabled(build, name) {
-			offenders = append(offenders, name)
-		}
-	}
-	sort.Strings(offenders)
-	if len(offenders) == 0 {
-		return []doctorFinding{{
-			Check: "sentry-upload", Severity: doctorOK,
-			Message: "all build profiles disable Sentry auto-upload or supply a token",
-		}}
-	}
-	return []doctorFinding{{
-		Check: "sentry-upload", Severity: doctorWarn, Fixable: true,
-		Message: fmt.Sprintf("build profile(s) may fail Sentry sourcemap upload: %s", strings.Join(offenders, ", ")),
-		Detail:  `add "SENTRY_DISABLE_AUTO_UPLOAD": "true" to each profile's env (or provide SENTRY_AUTH_TOKEN)`,
-	}}
-}
-
 // checkLockfileDrift: reproduces ERR_PNPM_OUTDATED_LOCKFILE without a full
 // install. Regenerates the lockfile-only and sees if it changes vs the
 // committed one; restores it afterward. Skips when the lockfile is already
@@ -185,7 +114,7 @@ func checkLockfileDrift(appDir string) []doctorFinding {
 	if out, _ := gitOutput(root, "status", "--porcelain", "pnpm-lock.yaml"); strings.TrimSpace(out) != "" {
 		return []doctorFinding{{
 			Check: "lockfile-drift", Severity: doctorWarn,
-			Message: "pnpm-lock.yaml has uncommitted changes — commit it; CI/EAS builds the committed state",
+			Message: "pnpm-lock.yaml has uncommitted changes — commit it; CI and store builds use the committed state",
 		}}
 	}
 	if _, err := runCmd(root, "pnpm", "install", "--lockfile-only", "--ignore-scripts"); err != nil {
@@ -202,7 +131,7 @@ func checkLockfileDrift(appDir string) []doctorFinding {
 	if changed {
 		return []doctorFinding{{
 			Check: "lockfile-drift", Severity: doctorBroken, Fixable: true,
-			Message: "pnpm-lock.yaml is out of date with package.json — a frozen install (EAS/CI) will fail",
+			Message: "pnpm-lock.yaml is out of date with package.json — a frozen install (CI/store build) will fail",
 			Detail:  "fix: pnpm install --lockfile-only, then commit pnpm-lock.yaml",
 		}}
 	}
@@ -225,20 +154,37 @@ func doctorWorstSeverity(findings []doctorFinding) doctorSeverity {
 	return worst
 }
 
-func runDoctorChecks(appDir string) []doctorFinding {
-	var findings []doctorFinding
-	for _, c := range doctorChecks() {
-		findings = append(findings, c.run(appDir)...)
+// checkAppConfig: the Expo app config (app.config.ts/js or app.json) must
+// exist and name the native app: ios.bundleIdentifier and/or android.package.
+// Store builds read both from here; build settings live in Preflight build
+// profiles (`preflight build-profiles`), not in the checkout.
+func checkAppConfig(appDir string) []doctorFinding {
+	configPath := expoConfigPath(appDir)
+	if configPath == "" {
+		return []doctorFinding{{
+			Check: "app-config", Severity: doctorBroken,
+			Message: "no app.config.ts, app.config.js or app.json",
+		}}
 	}
-	return findings
+	identity := readExpoAppIdentity(appDir)
+	if identity.iosBundleID == "" && identity.androidPackage == "" {
+		return []doctorFinding{{
+			Check: "app-config", Severity: doctorBroken,
+			Message: fmt.Sprintf("%s sets neither ios.bundleIdentifier nor android.package", filepath.Base(configPath)),
+		}}
+	}
+	return []doctorFinding{{
+		Check: "app-config", Severity: doctorOK,
+		Message: fmt.Sprintf("%s names the native app", filepath.Base(configPath)),
+	}}
 }
 
-// findEASAppDirs walks root and returns each dir holding an eas.json (an
-// EAS-buildable app), pruning heavy/irrelevant dirs and not descending into a
-// found app.
-func findEASAppDirs(root string) []string {
-	// Apps live shallow: <root>/<repo>/eas.json or <root>/<repo>/apps/<app>/
-	// eas.json. Bound the walk so it never descends into deep source trees.
+// findExpoAppDirs walks root and returns each Expo app directory (a
+// package.json depending on expo next to an app config), pruning
+// heavy/irrelevant dirs and not descending into a found app.
+func findExpoAppDirs(root string) []string {
+	// Apps live shallow: <root>/<repo> or <root>/<repo>/apps/<app>. Bound the
+	// walk so it never descends into deep source trees.
 	const maxDepth = 5
 	rootClean := filepath.Clean(root)
 	rootDepth := strings.Count(rootClean, string(os.PathSeparator))
@@ -258,7 +204,7 @@ func findEASAppDirs(root string) []string {
 		if strings.Count(filepath.Clean(path), string(os.PathSeparator))-rootDepth > maxDepth {
 			return filepath.SkipDir
 		}
-		if fileExists(filepath.Join(path, "eas.json")) {
+		if isExpoAppDir(path) {
 			apps = append(apps, path)
 			return filepath.SkipDir // an app won't contain another app
 		}
@@ -268,20 +214,35 @@ func findEASAppDirs(root string) []string {
 	return apps
 }
 
+func isExpoAppDir(dir string) bool {
+	if expoConfigPath(dir) == "" {
+		return false
+	}
+	pkg, err := readPackageJSON(filepath.Join(dir, "package.json"))
+	return err == nil && isExpoPackage(pkg)
+}
+
+func runDoctorChecks(appDir string) []doctorFinding {
+	var findings []doctorFinding
+	for _, c := range doctorChecks() {
+		findings = append(findings, c.run(appDir)...)
+	}
+	return findings
+}
+
 // doctorFastChecks runs only the cheap, side-effect-free checks — used by the
 // fleet sweep so it stays fast and never shells out to pnpm across every app.
 // The full lockfile probe (which regenerates the lockfile) is deep-mode only,
 // reachable per app via `apps doctor --path`.
 func doctorFastChecks(appDir string) []doctorFinding {
-	f := checkEASJson(appDir)
-	f = append(f, checkSentryUpload(appDir)...)
+	f := checkAppConfig(appDir)
 	f = append(f, checkConfigPoison(appDir)...)
 	f = append(f, checkExpoSDKAlign(appDir)...)
 	if root := findUp(appDir, "pnpm-lock.yaml"); root != "" {
 		if out, _ := gitOutput(root, "status", "--porcelain", "pnpm-lock.yaml"); strings.TrimSpace(out) != "" {
 			f = append(f, doctorFinding{
 				Check: "lockfile-dirty", Severity: doctorWarn,
-				Message: "pnpm-lock.yaml has uncommitted changes — commit it; CI/EAS builds the committed state",
+				Message: "pnpm-lock.yaml has uncommitted changes — commit it; CI and store builds use the committed state",
 			})
 		}
 	}
@@ -299,10 +260,10 @@ func doctorLabel(s doctorSeverity) string {
 	}
 }
 
-// doctorSweep runs the checks over every eas.json app under root and prints a
+// doctorSweep runs the checks over every Expo app under root and prints a
 // fleet drift matrix.
 func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
-	appDirs := findEASAppDirs(root)
+	appDirs := findExpoAppDirs(root)
 	type appReport struct {
 		Path     string          `json:"path"`
 		Health   doctorSeverity  `json:"health"`
@@ -336,7 +297,7 @@ func doctorSweep(root string, asJSON bool, stdout io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Fleet build health — %s\n\n", root)
 	if len(reports) == 0 {
-		fmt.Fprintln(stdout, "  no eas.json apps found under root")
+		fmt.Fprintln(stdout, "  no Expo apps found under root")
 		return 0
 	}
 	for _, r := range reports {
@@ -421,7 +382,7 @@ func applyDoctorFixesAt(abs string, commit, push bool, stdout, stderr io.Writer)
 func doctorSweepFix(root string, commit, push bool, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Applying safe fixes across the fleet — %s\n\n", root)
 	fixedApps, scanned := 0, 0
-	for _, ad := range findEASAppDirs(root) {
+	for _, ad := range findExpoAppDirs(root) {
 		scanned++
 		rel, err := filepath.Rel(root, ad)
 		if err != nil {
@@ -694,14 +655,14 @@ func doctorSweepReport(client *http.Client, root string, resolveConfig bool, std
 	reported := 0
 	var unmatched []string
 	fmt.Fprintf(stdout, "Reporting build health — %s\n\n", root)
-	for _, ad := range findEASAppDirs(root) {
+	for _, ad := range findExpoAppDirs(root) {
 		rel, relErr := filepath.Rel(root, ad)
 		if relErr != nil {
 			rel = ad
 		}
 		appID := ""
 		if pid := extractEASProjectID(ad); pid != "" {
-			appID = byProject[pid] // canonical EAS identity — most reliable
+			appID = byProject[pid] // canonical Expo project identity — most reliable
 		}
 		if appID == "" {
 			if slug := extractExpoSlug(ad); slug != "" {

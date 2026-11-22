@@ -13,10 +13,6 @@ import (
 func writePreviewSimulatorFixture(t *testing.T) (string, string) {
 	t.Helper()
 	appDir := writeExpoFixture(t)
-	profiles := `{"build":{"development":{"developmentClient":true,"distribution":"internal","env":{"APP_VARIANT":"development"},"ios":{"simulator":true}},"preview":{"developmentClient":false,"distribution":"internal","env":{"APP_VARIANT":"preview","API_URL":"https://example.test/$apiSuffix"}},"preview-simulator":{"extends":"preview","ios":{"simulator":true}}}}`
-	if err := os.WriteFile(filepath.Join(appDir, "eas.json"), []byte(profiles), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	fakeBin := t.TempDir()
 	script := `#!/bin/sh
 if [ "$2" = "config" ]; then
@@ -50,25 +46,23 @@ func TestPreviewSimulatorExplicitProfileReadiness(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if !report.Ready || report.SourceBinding.EASProfileName != "preview-simulator" || report.SourceBinding.IOSBundleID != "com.gmacko.sortey.dev" || report.SourceBinding.AppScheme != "sortey-dev" {
+	if !report.Ready || report.SourceBinding.BuildProfileName != "preview-simulator" || report.SourceBinding.IOSBundleID != "com.gmacko.sortey.dev" || report.SourceBinding.AppScheme != "sortey-dev" {
 		t.Fatalf("explicit preview profile was replaced: %#v", report)
 	}
 }
 
-func TestPreviewSimulatorMissingExplicitProfileFails(t *testing.T) {
+func TestPreviewSimulatorRejectsProductionProfile(t *testing.T) {
 	appDir, _ := writePreviewSimulatorFixture(t)
-	_, err := discoverSourceBinding(proveAppOptions{appDir: appDir, platform: "ios", lane: "simulator", buildProfile: "missing-preview"})
-	if err == nil {
-		t.Fatal("missing explicit profile must fail instead of falling back to development")
+	_, err := discoverSourceBinding(proveAppOptions{appDir: appDir, platform: "ios", lane: "simulator", buildProfile: "production"})
+	if err == nil || !strings.Contains(err.Error(), "store build") {
+		t.Fatalf("production profile must point at the store build workflow, got %v", err)
 	}
 }
 
 func TestPreviewSimulatorRejectsUnsupportedProfileLanes(t *testing.T) {
 	appDir, _ := writePreviewSimulatorFixture(t)
 	for _, options := range []proveAppOptions{
-		{appDir: appDir, platform: "android", lane: "simulator", buildProfile: "preview-simulator"},
 		{appDir: appDir, platform: "ios", lane: "development", buildProfile: "preview-simulator"},
-		{appDir: appDir, platform: "ios", lane: "simulator", buildProfile: "preview-simulator", buildStrategy: "eas"},
 		{appDir: appDir, platform: "ios", lane: "simulator", buildProfile: "preview-simulator", standalonePlan: true},
 	} {
 		if _, err := discoverSourceBinding(options); err == nil {
@@ -115,7 +109,7 @@ printf 'xcrun %s\n' "$*" >> "$NATIVE_LOG"
 	job := apiRunnerJob{}
 	job.Payload.Platform = "ios"
 	job.Payload.Lane = "simulator"
-	job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", EASProfileName: "preview-simulator", IOSBundleID: "com.gmacko.sortey.dev", AppScheme: "sortey-dev"}
+	job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", BuildProfileName: "preview-simulator", IOSBundleID: "com.gmacko.sortey.dev", AppScheme: "sortey-dev"}
 	_, err := runExpoAppOpen(nil, runnerRegistrationData{}, runnerOnceOptions{xcrunPath: filepath.Join(fakeBin, "xcrun")}, "ios", appDir, "preview-device", 8609, job)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +119,7 @@ printf 'xcrun %s\n' "$*" >> "$NATIVE_LOG"
 		t.Fatal(err)
 	}
 	log := string(raw)
-	for _, expected := range []string{"variant=preview", "api=https://example.test/$apiSuffix", "-configuration Release", "Release-iphonesimulator/SorteyDev.app", "simctl launch preview-device com.gmacko.sortey.dev"} {
+	for _, expected := range []string{"variant=preview", "-configuration Release", "Release-iphonesimulator/SorteyDev.app", "simctl launch preview-device com.gmacko.sortey.dev"} {
 		if !strings.Contains(log, expected) {
 			t.Fatalf("missing %q in native boundary log:\n%s", expected, log)
 		}
@@ -161,7 +155,7 @@ exit 1
 	job := apiRunnerJob{}
 	job.Payload.Platform = "ios"
 	job.Payload.Lane = "simulator"
-	job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", EASProfileName: "preview-simulator"}
+	job.Payload.SourceBinding = runnerJobSourceBinding{WorkspaceRoot: appDir, PackagePath: ".", BuildProfileName: "preview-simulator"}
 	// An invalid xcrun path makes any attempted installation fail distinctly.
 	err = buildAndInstallIOSSimulatorApp(logFile, runnerOnceOptions{xcrunPath: "/missing-install-command"}, appDir, "preview-device", job, nil)
 	if err == nil || !strings.Contains(err.Error(), "missing main.jsbundle") {

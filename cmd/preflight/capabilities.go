@@ -31,7 +31,6 @@ import (
 var candidateLocalTools = []string{
 	"adb",
 	"avdmanager",
-	"eas",
 	"emulator",
 	"expo",
 	"fastlane",
@@ -152,6 +151,10 @@ var adapterRequirements = map[string]string{
 	"app_store_connect.api":      "ios",
 	"apple_oauth.management":     "ios",
 	"expo.local_build":           "ios",
+	"xcodebuild":                 "ios",
+	"xcode.archive":              "ios",
+	"xcrun.altool":               "ios",
+	"android.sdk":                "android",
 }
 
 // filterAdaptersForPlatforms drops adapters whose backing platform is absent.
