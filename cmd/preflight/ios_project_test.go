@@ -75,7 +75,7 @@ func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) 
 		t.Fatal(err)
 	}
 	matched, _ := matchIOSSigningTargets(targets, fixturePlanTargets())
-	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "Release", "TEAM123456", "1.4.0", "42")
+	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "Release", "TEAM123456", "0123456789ABCDEF0123456789ABCDEF01234567", "1.4.0", "42")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,10 +89,11 @@ func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) 
 
 	appRelease := pbxBuildSettingsBody(t, patched, "13B07F951A680F5B00A75B9A")
 	for key, want := range map[string]string{
-		"CODE_SIGN_STYLE":                   "Manual",
-		"DEVELOPMENT_TEAM":                  "TEAM123456",
-		"CODE_SIGN_IDENTITY":                "Apple Distribution",
-		"CODE_SIGN_IDENTITY[sdk=iphoneos*]": "Apple Distribution",
+		"CODE_SIGN_STYLE":  "Manual",
+		"DEVELOPMENT_TEAM": "TEAM123456",
+		// Pinned to the imported certificate, not the ambiguous name.
+		"CODE_SIGN_IDENTITY":                "0123456789ABCDEF0123456789ABCDEF01234567",
+		"CODE_SIGN_IDENTITY[sdk=iphoneos*]": "0123456789ABCDEF0123456789ABCDEF01234567",
 		"PROVISIONING_PROFILE_SPECIFIER":    "StoreApp AppStore",
 		"MARKETING_VERSION":                 "1.4.0",
 		"CURRENT_PROJECT_VERSION":           "42",
@@ -138,7 +139,7 @@ func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) 
 		t.Error("TargetAttributes DevelopmentTeam not updated")
 	}
 	// Idempotent: patching twice is a no-op.
-	again, err := patchIOSProjectForStoreSigning(patched, reparsed, matched, "Release", "TEAM123456", "1.4.0", "42")
+	again, err := patchIOSProjectForStoreSigning(patched, reparsed, matched, "Release", "TEAM123456", "0123456789ABCDEF0123456789ABCDEF01234567", "1.4.0", "42")
 	if err != nil || again != patched {
 		t.Fatalf("second patch changed the project (err %v)", err)
 	}
@@ -183,7 +184,7 @@ func TestStoreSigningFollowsTheArchivedConfiguration(t *testing.T) {
 	if len(missing) != 0 || len(matched) != 2 {
 		t.Fatalf("matched %v, missing %v", matched, missing)
 	}
-	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "Release-production", "TEAM123456", "1.4.0", "42")
+	patched, err := patchIOSProjectForStoreSigning(content, targets, matched, "Release-production", "TEAM123456", "", "1.4.0", "42")
 	if err != nil {
 		t.Fatal(err)
 	}
