@@ -313,3 +313,29 @@ func assertWellFormedXML(t *testing.T, raw []byte) {
 		}
 	}
 }
+
+func TestStoreDeploymentTargetUsesSignedTargetsArchiveConfiguration(t *testing.T) {
+	content := readStoreFixture(t)
+	targets, err := parsePBXNativeTargets(content, "Release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, _ := matchIOSSigningTargets(targets, fixturePlanTargets())
+	if got := storeDeploymentTarget(content, targets, matched, "Release"); got != "15.1" {
+		t.Fatalf("deployment target = %q, want 15.1", got)
+	}
+	if got := storeDeploymentTarget(content, targets, map[string]storeBuildIOSTarget{}, "Release"); got != "" {
+		t.Fatalf("no signed targets should give no override, got %q", got)
+	}
+}
+
+func TestCompareVersionStrings(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want int
+	}{{"15.1", "15.10", -1}, {"16.0", "15.4", 1}, {"15.1", "15.1.0", 0}} {
+		if got := compareVersionStrings(tc.a, tc.b); got != tc.want {
+			t.Errorf("compare(%s, %s) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

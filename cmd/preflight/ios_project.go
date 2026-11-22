@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -512,4 +513,60 @@ func iosExportMethod(plan storeBuildPlan) string {
 		return "release-testing"
 	}
 	return "app-store-connect"
+}
+
+// storeDeploymentTarget is the highest IPHONEOS_DEPLOYMENT_TARGET among the
+// signed targets' archive configuration, or "" when none sets one. Store
+// archives pass it to xcodebuild so it also applies to the Pods project:
+// CocoaPods keeps each pod's own (often 9.0 or 12.x) target, and Xcode 27
+// rejects anything below iOS 15 as an error, failing the archive even though
+// the app itself targets 15.1.
+func storeDeploymentTarget(content string, targets []pbxNativeTarget, matched map[string]storeBuildIOSTarget, configuration string) string {
+	if len(matched) == 0 {
+		return ""
+	}
+	best := ""
+	for _, target := range targets {
+		if _, ok := matched[target.ID]; !ok {
+			continue
+		}
+		value := strings.Trim(pbxBuildSetting(content, target.Configurations[configuration], "IPHONEOS_DEPLOYMENT_TARGET"), "\"")
+		if value != "" && (best == "" || compareVersionStrings(value, best) > 0) {
+			best = value
+		}
+	}
+	if best != "" {
+		return best
+	}
+	// Expo projects usually set it at the project level, which every target
+	// inherits; this file holds only the app's own project, not Pods.
+	for _, match := range pbxDeploymentTargetPattern.FindAllStringSubmatch(content, -1) {
+		if best == "" || compareVersionStrings(match[1], best) > 0 {
+			best = match[1]
+		}
+	}
+	return best
+}
+
+var pbxDeploymentTargetPattern = regexp.MustCompile(`IPHONEOS_DEPLOYMENT_TARGET = "?([0-9][0-9.]*)"?;`)
+
+// compareVersionStrings compares dotted numeric versions ("15.1" < "15.10").
+func compareVersionStrings(a, b string) int {
+	left, right := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(left) || i < len(right); i++ {
+		var x, y int
+		if i < len(left) {
+			x, _ = strconv.Atoi(left[i])
+		}
+		if i < len(right) {
+			y, _ = strconv.Atoi(right[i])
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }

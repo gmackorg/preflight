@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -113,8 +114,11 @@ func (fixture *iosBuildFixture) handle(command storeCommand) ([]byte, error) {
 		}
 		keychain := fixture.security.list()[0]
 		fixture.archiveSawKeychain = strings.HasSuffix(keychain, ".keychain-db") && strings.Contains(keychain, fixture.runtime.workDir)
-		if command.Args[len(command.Args)-1] != "OTHER_CODE_SIGN_FLAGS=--keychain "+keychain {
+		if !slices.Contains(command.Args, "OTHER_CODE_SIGN_FLAGS=--keychain "+keychain) {
 			t.Errorf("archive does not pin the job keychain: %v", command.Args)
+		}
+		if !slices.Contains(command.Args, "IPHONEOS_DEPLOYMENT_TARGET=15.1") {
+			t.Errorf("archive does not pass the app deployment target: %v", command.Args)
 		}
 		if fixture.archiveErr != nil {
 			return []byte("error: something broke\n** ARCHIVE FAILED **\n"), fixture.archiveErr

@@ -282,17 +282,21 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 	}
 	archivePath := filepath.Join(rt.workDir, scheme+".xcarchive")
 	_ = os.RemoveAll(archivePath)
+	archiveArgs := []string{
+		"archive",
+		"-workspace", workspace,
+		"-scheme", scheme,
+		"-configuration", configuration,
+		"-destination", "generic/platform=iOS",
+		"-archivePath", archivePath,
+		"OTHER_CODE_SIGN_FLAGS=--keychain " + session.keychainPath,
+	}
+	if target := storeDeploymentTarget(patched, targets, matched, configuration); target != "" {
+		archiveArgs = append(archiveArgs, "IPHONEOS_DEPLOYMENT_TARGET="+target)
+	}
 	output, err := rt.run.Run(storeCommand{
-		Name: "xcodebuild",
-		Args: []string{
-			"archive",
-			"-workspace", workspace,
-			"-scheme", scheme,
-			"-configuration", configuration,
-			"-destination", "generic/platform=iOS",
-			"-archivePath", archivePath,
-			"OTHER_CODE_SIGN_FLAGS=--keychain " + session.keychainPath,
-		},
+		Name:    "xcodebuild",
+		Args:    archiveArgs,
 		Dir:     iosDir,
 		Env:     env,
 		Timeout: storeCommandTimeout("PREFLIGHT_STORE_ARCHIVE_TIMEOUT", 60*time.Minute),
