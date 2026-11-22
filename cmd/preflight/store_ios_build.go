@@ -308,12 +308,12 @@ func runIOSStoreBuild(rt *storeJobRuntime, plan storeBuildPlan, secretEnv map[st
 	profileNames := map[string]string{}
 	signingProfiles := []map[string]any{}
 	for _, target := range ios.Targets {
-		profileNames[target.BundleID] = target.ProfileName
+		profileNames[target.BundleID] = storeProfileSpecifier(target.ProfileUUID, target.ProfileName)
 	}
 	for _, profile := range profiles {
 		signingProfiles = append(signingProfiles, map[string]any{"bundleId": profile.BundleID, "uuid": profile.UUID})
 		if profileNames[profile.BundleID] == "" {
-			profileNames[profile.BundleID] = profile.Name
+			profileNames[profile.BundleID] = storeProfileSpecifier(profile.UUID, profile.Name)
 		}
 	}
 	sort.Slice(signingProfiles, func(i, j int) bool {

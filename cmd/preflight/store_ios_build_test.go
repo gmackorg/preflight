@@ -241,7 +241,7 @@ func TestRunIOSStoreBuildSignsArchivesExportsAndCleansUp(t *testing.T) {
 	}
 
 	pbxproj, _ := os.ReadFile(filepath.Join(fixture.runtime.appDir, "ios", "StoreApp.xcodeproj", "project.pbxproj"))
-	if !strings.Contains(string(pbxproj), `PROVISIONING_PROFILE_SPECIFIER = "StoreApp NSE AppStore";`) {
+	if !strings.Contains(string(pbxproj), "BBBB-2222") {
 		t.Fatal("pbxproj not patched for the extension")
 	}
 	plist, _ := os.ReadFile(filepath.Join(fixture.runtime.appDir, "ios", "NotificationService", "Info.plist"))
@@ -249,7 +249,7 @@ func TestRunIOSStoreBuildSignsArchivesExportsAndCleansUp(t *testing.T) {
 		t.Fatalf("extension Info.plist version not set:\n%s", plist)
 	}
 	exportOptions, _ := os.ReadFile(filepath.Join(fixture.runtime.workDir, "ExportOptions.plist"))
-	if !strings.Contains(string(exportOptions), "<string>StoreApp NSE AppStore</string>") || !strings.Contains(string(exportOptions), fixture.certSHA1) {
+	if !strings.Contains(string(exportOptions), "<string>BBBB-2222</string>") || !strings.Contains(string(exportOptions), fixture.certSHA1) {
 		t.Fatalf("ExportOptions.plist wrong:\n%s", exportOptions)
 	}
 	fixture.assertCleanedUp()
@@ -427,7 +427,7 @@ func TestRunIOSStoreBuildUsesCommittedIOSProjectAndProfileConfiguration(t *testi
 	}
 	pbxproj, _ := os.ReadFile(filepath.Join(fixture.runtime.appDir, "ios", "StoreApp.xcodeproj", "project.pbxproj"))
 	production := pbxBuildSettingsBody(t, string(pbxproj), "13B07F951A680F5B00A75B9A")
-	if pbxTopLevelValue(production, "PROVISIONING_PROFILE_SPECIFIER") != "StoreApp AppStore" || pbxTopLevelValue(production, "CODE_SIGN_STYLE") != "Manual" {
+	if pbxTopLevelValue(production, "PROVISIONING_PROFILE_SPECIFIER") != "AAAA-1111" || pbxTopLevelValue(production, "CODE_SIGN_STYLE") != "Manual" {
 		t.Fatalf("Release-production not signed:\n%s", production)
 	}
 	fixture.assertCleanedUp()

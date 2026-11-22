@@ -393,7 +393,7 @@ func patchIOSProjectForStoreSigning(content string, targets []pbxNativeTarget, m
 			"DEVELOPMENT_TEAM":                  teamID,
 			"CODE_SIGN_IDENTITY":                signingIdentity,
 			"CODE_SIGN_IDENTITY[sdk=iphoneos*]": signingIdentity,
-			"PROVISIONING_PROFILE_SPECIFIER":    planTarget.ProfileName,
+			"PROVISIONING_PROFILE_SPECIFIER":    storeProfileSpecifier(planTarget.ProfileUUID, planTarget.ProfileName),
 		}, []string{"PROVISIONING_PROFILE", "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]"})
 		if err != nil {
 			return content, fmt.Errorf("target %s %s: %w", target.Name, configuration, err)
@@ -569,4 +569,16 @@ func compareVersionStrings(a, b string) int {
 		}
 	}
 	return 0
+}
+
+// storeProfileSpecifier names a provisioning profile for Xcode by UUID when
+// the plan has one. Xcode 27 no longer resolves the human-readable name
+// ("<bundle> AppStore <date>") of a freshly installed profile — the archive
+// failed with "No profile for team ... matching" while the profile sat in
+// both profile directories — and a UUID cannot be ambiguous anyway.
+func storeProfileSpecifier(uuid string, name string) string {
+	if strings.TrimSpace(uuid) != "" {
+		return strings.TrimSpace(uuid)
+	}
+	return name
 }

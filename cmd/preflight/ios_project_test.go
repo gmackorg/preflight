@@ -94,7 +94,7 @@ func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) 
 		// Pinned to the imported certificate, not the ambiguous name.
 		"CODE_SIGN_IDENTITY":                "0123456789ABCDEF0123456789ABCDEF01234567",
 		"CODE_SIGN_IDENTITY[sdk=iphoneos*]": "0123456789ABCDEF0123456789ABCDEF01234567",
-		"PROVISIONING_PROFILE_SPECIFIER":    "StoreApp AppStore",
+		"PROVISIONING_PROFILE_SPECIFIER":    "AAAA-1111",
 		"MARKETING_VERSION":                 "1.4.0",
 		"CURRENT_PROJECT_VERSION":           "42",
 		"PRODUCT_BUNDLE_IDENTIFIER":         "com.example.storeapp",
@@ -115,7 +115,7 @@ func TestPatchIOSProjectForStoreSigningSetsManualSigningPerTarget(t *testing.T) 
 	}
 
 	nseRelease := pbxBuildSettingsBody(t, patched, "BB0000000000000000000004")
-	if got := pbxTopLevelValue(nseRelease, "PROVISIONING_PROFILE_SPECIFIER"); got != "StoreApp NSE AppStore" {
+	if got := pbxTopLevelValue(nseRelease, "PROVISIONING_PROFILE_SPECIFIER"); got != "BBBB-2222" {
 		t.Errorf("extension profile = %q", got)
 	}
 	if got := pbxTopLevelValue(nseRelease, "MARKETING_VERSION"); got != "1.4.0" {
@@ -189,13 +189,13 @@ func TestStoreSigningFollowsTheArchivedConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	production := pbxBuildSettingsBody(t, patched, "13B07F951A680F5B00A75B9A")
-	if pbxTopLevelValue(production, "CODE_SIGN_STYLE") != "Manual" || pbxTopLevelValue(production, "PROVISIONING_PROFILE_SPECIFIER") != "StoreApp AppStore" {
+	if pbxTopLevelValue(production, "CODE_SIGN_STYLE") != "Manual" || pbxTopLevelValue(production, "PROVISIONING_PROFILE_SPECIFIER") != "AAAA-1111" {
 		t.Fatalf("Release-production not signed:\n%s", production)
 	}
 	if debug := pbxBuildSettingsBody(t, patched, "13B07F941A680F5B00A75B9A"); pbxTopLevelValue(debug, "CODE_SIGN_STYLE") != "" {
 		t.Fatalf("Debug must keep its signing:\n%s", debug)
 	}
-	if nse := pbxBuildSettingsBody(t, patched, "BB0000000000000000000004"); pbxTopLevelValue(nse, "PROVISIONING_PROFILE_SPECIFIER") != "StoreApp NSE AppStore" {
+	if nse := pbxBuildSettingsBody(t, patched, "BB0000000000000000000004"); pbxTopLevelValue(nse, "PROVISIONING_PROFILE_SPECIFIER") != "BBBB-2222" {
 		t.Fatalf("extension default configuration not signed:\n%s", nse)
 	}
 
