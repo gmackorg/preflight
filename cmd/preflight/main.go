@@ -5393,7 +5393,14 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	// quieter one; see runner_load.go.
 	gate := newRunnerClaimGate(options)
 	var claim *runnerClaimData
-	if admitRunnerClaim(options, gate, stdout) {
+	if !admitRunnerClaim(options, gate, stdout) {
+		// Below the disk floor or deferring for load: a workflow whose
+		// simulator this host holds still gets its next step.
+		var heldErr error
+		if claim, heldErr = claimHeldSimlockWorkflowJob(client, options, registration, stdout); heldErr != nil {
+			return heldErr
+		}
+	} else {
 		claim, err = claimRunnerJob(client, options, registration)
 		if err != nil {
 			return err
@@ -5425,8 +5432,14 @@ func claimAndHandleNextRunnerJob(
 ) error {
 	// A long-running runner can cross the floor after completing its first
 	// job. Apply the same admission guard before every subsequent claim.
+	// A workflow already holding this host's simulator continues past
+	// admission: its claim is workflow-scoped, so no new work is admitted.
+	continuingHeldWorkflow := options.simlockLease != nil && options.workflowID == options.simlockLease.workflowID
 	if !admitRunnerClaim(options, nil, stdout) {
-		return nil
+		if !continuingHeldWorkflow {
+			return nil
+		}
+		fmt.Fprintf(stdout, "continuing held SimLock workflow %s past claim admission\n", options.workflowID)
 	}
 	claim, err := claimRunnerJob(client, options, registration)
 	if err != nil {

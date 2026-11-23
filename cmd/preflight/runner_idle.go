@@ -149,6 +149,10 @@ func waitForIdleRunnerJob(
 		}
 		runnerIdleSleep(delay)
 		if !admitRunnerClaim(options, gate, stdout) {
+			claim, err := claimHeldSimlockWorkflowJob(client, options, registration, stdout)
+			if err != nil || claim != nil {
+				return claim, err
+			}
 			continue
 		}
 		claim, err := claimRunnerJob(client, options, registration)
