@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,9 @@ func TestMain(m *testing.M) {
 	// Tests run on loaded build hosts; real host pressure must not make the
 	// claim gate defer. runner_load_test.go drives the gate explicitly.
 	sampleHostPressure = func() hostPressure { return hostPressure{load1: 0, cores: 1, xcodebuilds: 0} }
+	// Never prune the real pnpm store from a test.
+	autoPruneStampPath = func() string { return "" }
+	autoPruneRun = func(io.Writer) bool { return false }
 	os.Exit(m.Run())
 }
 

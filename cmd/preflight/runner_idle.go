@@ -148,11 +148,7 @@ func waitForIdleRunnerJob(
 			return nil, nil
 		}
 		runnerIdleSleep(delay)
-		if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
-			fmt.Fprintf(stdout, "declining claims: %v\n", err)
-			continue
-		}
-		if !gate.admit(stdout) {
+		if !admitRunnerClaim(options, gate, stdout) {
 			continue
 		}
 		claim, err := claimRunnerJob(client, options, registration)

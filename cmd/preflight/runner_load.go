@@ -110,6 +110,7 @@ type runnerClaimGate struct {
 	sample        func() hostPressure
 	now           func() time.Time
 	deferredSince time.Time
+	lastReason    string
 }
 
 // sampleHostPressure is replaced by tests.
@@ -135,6 +136,7 @@ func (gate *runnerClaimGate) admit(stdout io.Writer) bool {
 		return true
 	}
 	reason := gate.policy.busyReason(gate.sample())
+	gate.lastReason = reason
 	if reason == "" {
 		gate.deferredSince = time.Time{}
 		return true

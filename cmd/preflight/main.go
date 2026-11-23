@@ -5393,9 +5393,7 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	// quieter one; see runner_load.go.
 	gate := newRunnerClaimGate(options)
 	var claim *runnerClaimData
-	if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
-		fmt.Fprintf(stdout, "declining claims: %v\n", err)
-	} else if gate.admit(stdout) {
+	if admitRunnerClaim(options, gate, stdout) {
 		claim, err = claimRunnerJob(client, options, registration)
 		if err != nil {
 			return err
@@ -5427,8 +5425,7 @@ func claimAndHandleNextRunnerJob(
 ) error {
 	// A long-running runner can cross the floor after completing its first
 	// job. Apply the same admission guard before every subsequent claim.
-	if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
-		fmt.Fprintf(stdout, "declining claims: %v\n", err)
+	if !admitRunnerClaim(options, nil, stdout) {
 		return nil
 	}
 	claim, err := claimRunnerJob(client, options, registration)
@@ -6187,8 +6184,10 @@ func currentUserKeychains() []string {
 
 func heartbeatRunner(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, capabilities map[string]any) error {
 	payload := map[string]any{
-		"status":       "online",
-		"capabilities": capabilities,
+		"status": "online",
+		// Admission state and disk floor ride with the capabilities so the
+		// control plane can say why a node is not taking work.
+		"capabilities": heartbeatCapabilities(capabilities),
 	}
 	// The tightest of the volumes a build touches, not just the workspace's —
 	// see buildVolumePaths for why reporting one volume let a full host look

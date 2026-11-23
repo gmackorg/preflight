@@ -264,10 +264,13 @@ func runDisk(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 	return exit
 }
 
-// Below this many GB free, `--reclaim` also prunes the pnpm store. Kept under
-// the runner's 15GB claim floor so a host prunes before it starts declining
-// work, not after.
+// Below this many GB free, `--reclaim` also prunes the pnpm store. It must sit
+// above the runner's claim floor (PREFLIGHT_MIN_FREE_DISK_GB) so a host prunes
+// before it starts declining work, not after. A fixed 25 equalled
+// gmacko-mini's 25GB floor, so on 2026-11-23 the node had already dropped out
+// of the farm by the time a reclaim would have pruned.
 const defaultPnpmStorePruneFloorGb = 25
+const pnpmStorePruneFloorMarginGb = 10
 
 // Overridable so a host with different headroom can tune it, and so the path is
 // exercisable without having to fill a disk to test it.
@@ -277,7 +280,13 @@ func pnpmStorePruneFloorGb() uint64 {
 			return parsed
 		}
 	}
-	return defaultPnpmStorePruneFloorGb
+	floor := uint64(defaultPnpmStorePruneFloorGb)
+	if claimFloor, err := buildDiskHeadroomFloor(os.Getenv("PREFLIGHT_MIN_FREE_DISK_GB")); err == nil && claimFloor > 0 {
+		if aboveClaim := claimFloor/bytesPerGiB + pnpmStorePruneFloorMarginGb; aboveClaim > floor {
+			floor = aboveClaim
+		}
+	}
+	return floor
 }
 
 // prunePnpmStore drops unreferenced packages from the shared pnpm store.
