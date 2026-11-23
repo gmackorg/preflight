@@ -605,3 +605,74 @@ func TestSimlockLeaseEndsOnFailedOrFinalJobOnly(t *testing.T) {
 		}
 	}
 }
+
+// A host below its disk floor must still finish a workflow whose simulator it
+// holds; otherwise the lease expires under a half-run workflow (seen on
+// gmacko-mini, pfw_58f4439b: dev session started, simulator.open never claimed).
+func TestSimlockHeldWorkflowContinuesBelowDiskFloor(t *testing.T) {
+	t.Setenv("PREFLIGHT_MIN_FREE_DISK_GB", "1000000")
+	// Below the floor admission would otherwise prune this machine's pnpm store.
+	t.Setenv("PREFLIGHT_AUTO_PRUNE_PNPM_STORE", "0")
+	claims := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/claim") {
+			t.Errorf("unexpected request %s", r.URL.Path)
+			return
+		}
+		var body struct {
+			WorkflowID string `json:"workflowId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		claims = append(claims, body.WorkflowID)
+		_, _ = w.Write([]byte(`{"data":null}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	options := runnerOnceOptions{simlock: true, apiURL: server.URL, workspaceRoot: dir, workflowID: "held"}
+
+	// Within a held chain: the next step is still claimed, scoped to the workflow.
+	options.simlockLease = &simlockRunnerLease{workflowID: "held", done: make(chan struct{}), stopRenew: make(chan struct{})}
+	if err := claimAndHandleNextRunnerJob(server.Client(), options, scopedRegistration(t), io.Discard, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0] != "held" {
+		t.Fatalf("held workflow did not continue below the floor: %v", claims)
+	}
+
+	// Without a held workflow, the floor still refuses every claim.
+	options.simlockLease = nil
+	options.workflowID = ""
+	if err := claimAndHandleNextRunnerJob(server.Client(), options, scopedRegistration(t), io.Discard, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("floor admitted unscoped work: %v", claims)
+	}
+
+	// A fresh process finds held workflows from their adoption state and
+	// claims only within them.
+	state := filepath.Join(dir, "state")
+	t.Setenv("PREFLIGHT_SIMLOCK_STATE_DIR", state)
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lease := &simlockRunnerLease{workflowID: "resumed", statePath: filepath.Join(state, simlockWorkflowKey("resumed", "ios")+".json")}
+	lease.grant = simlockTestGrant(t, "ios")
+	if err := lease.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	if got := heldSimlockWorkflows(); len(got) != 1 || got[0] != "resumed" {
+		t.Fatalf("held workflows not found from state: %v", got)
+	}
+	if _, err := claimHeldSimlockWorkflowJob(server.Client(), options, scopedRegistration(t), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if claims[len(claims)-1] != "resumed" {
+		t.Fatalf("held workflow claim was not scoped: %v", claims)
+	}
+	options.simlock = false
+	before := len(claims)
+	if _, err := claimHeldSimlockWorkflowJob(server.Client(), options, scopedRegistration(t), io.Discard); err != nil || len(claims) != before {
+		t.Fatal("claimed held workflows without SimLock enabled")
+	}
+}

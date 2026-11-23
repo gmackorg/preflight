@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -210,7 +211,17 @@ func (lease *simlockRunnerLease) saveState() error {
 	if err := os.MkdirAll(filepath.Dir(lease.statePath), 0700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(lease.grant)
+	grant, err := json.Marshal(lease.grant)
+	if err != nil {
+		return err
+	}
+	var state map[string]any
+	if err := json.Unmarshal(grant, &state); err != nil {
+		return err
+	}
+	// The workflow lets a host under the disk floor find and finish it.
+	state["preflightWorkflowId"] = lease.workflowID
+	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
@@ -718,4 +729,59 @@ func simlockMaestroEnv(base []string, lease *simlockRunnerLease) []string {
 		return env
 	}
 	return upsertEnvValues(env, map[string]string{"ANDROID_USER_HOME": filepath.Join(lease.shimDir, "android"), "ANDROID_AVD_HOME": filepath.Join(lease.shimDir, "android", "avd")})
+}
+
+// heldSimlockWorkflows lists the workflows this host holds a SimLock
+// simulator for, from the adoption state their leases left behind.
+func heldSimlockWorkflows() []string {
+	entries, err := os.ReadDir(simlockLeaseStateDir())
+	if err != nil {
+		return nil
+	}
+	var workflows []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(simlockLeaseStateDir(), entry.Name()))
+		if err != nil {
+			continue
+		}
+		var state struct {
+			WorkflowID string `json:"preflightWorkflowId"`
+		}
+		if json.Unmarshal(data, &state) == nil && state.WorkflowID != "" {
+			workflows = append(workflows, state.WorkflowID)
+		}
+	}
+	sort.Strings(workflows)
+	return workflows
+}
+
+// claimHeldSimlockWorkflowJob claims the next job of a workflow whose
+// simulator this host already holds, for a host below its disk floor. The
+// floor keeps new work off a full disk; refusing a started workflow's next
+// step only strands its simulator until the lease expires and the workflow
+// hangs. Only workflow-scoped claims are made, so no new work is admitted.
+func claimHeldSimlockWorkflowJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, stdout io.Writer) (*runnerClaimData, error) {
+	if !options.simlock {
+		return nil, nil
+	}
+	for _, workflowID := range heldSimlockWorkflows() {
+		scoped := options
+		scoped.workflowID = workflowID
+		if err := requireRunnerWorkflowClaimScope(scoped, registration); err != nil {
+			return nil, nil
+		}
+		claim, err := claimRunnerJob(client, scoped, registration)
+		if err != nil {
+			fmt.Fprintf(stdout, "warning: claim for held SimLock workflow %s: %v\n", workflowID, err)
+			continue
+		}
+		if claim != nil {
+			fmt.Fprintf(stdout, "continuing held SimLock workflow %s below the disk floor\n", workflowID)
+			return claim, nil
+		}
+	}
+	return nil, nil
 }
