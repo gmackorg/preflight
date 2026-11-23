@@ -113,25 +113,44 @@ func writeJSON(stdout io.Writer, payload any) int {
 // preflight build
 // ---------------------------------------------------------------------------
 
+// workOrderKinds are the kinds the build farm can dispatch. The control plane
+// also knows submission_verify, submit, release_candidate and
+// post_release_monitor, but nothing ever ran them as work orders: they were
+// saved queued with no workflow and reaped a day later. The control plane now
+// rejects them; this rejects them before the request, with the command to use.
 var workOrderKinds = []string{
-	"build", "simulator_test", "device_test", "e2e_suite",
-	"submission_verify", "submit", "release_candidate",
-	"build_matrix", "post_release_monitor",
+	"build", "build_matrix", "simulator_test", "e2e_suite", "device_test",
+}
+
+// undispatchableKindAdvice maps the kinds removed above to what does that job.
+var undispatchableKindAdvice = map[string]string{
+	"release_candidate":    "open a release candidate in the web app, or build a store binary with `preflight build store`",
+	"submit":               "use `preflight build store --lane store --wait`, then `preflight apps submit-for-review <app>`",
+	"submission_verify":    "use `preflight apps status <app>` to check submission readiness",
+	"post_release_monitor": "use `preflight crashes` and `preflight uptime check` for post-release monitoring",
 }
 
 type workOrder struct {
-	ID               string `json:"id"`
-	WorkspaceID      string `json:"workspaceId"`
-	ActiveWorkflowID string `json:"activeWorkflowId"`
-	AppID            string `json:"appId"`
-	Kind             string `json:"kind"`
-	Platform         string `json:"platform"`
-	Status           string `json:"status"`
-	PriorityClass    string `json:"priorityClass"`
-	BuildProvider    string `json:"buildProvider"`
-	BlockedReason    string `json:"blockedReason"`
-	RequestedBy      string `json:"requestedBy"`
-	CreatedAt        string `json:"createdAt"`
+	ID               string            `json:"id"`
+	WorkspaceID      string            `json:"workspaceId"`
+	ActiveWorkflowID string            `json:"activeWorkflowId"`
+	AppID            string            `json:"appId"`
+	Kind             string            `json:"kind"`
+	Platform         string            `json:"platform"`
+	Status           string            `json:"status"`
+	PriorityClass    string            `json:"priorityClass"`
+	BuildProvider    string            `json:"buildProvider"`
+	BlockedReason    string            `json:"blockedReason"`
+	Failure          *workOrderFailure `json:"failure"`
+	RequestedBy      string            `json:"requestedBy"`
+	CreatedAt        string            `json:"createdAt"`
+}
+
+// workOrderFailure is what the control plane rolls up from a failed workflow.
+type workOrderFailure struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	WorkflowID string `json:"workflowId"`
 }
 
 func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -201,6 +220,10 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	if strings.TrimSpace(appID) == "" {
 		fmt.Fprintln(stderr, "--app is required")
 		printBuildHelp(stderr)
+		return 2
+	}
+	if advice, ok := undispatchableKindAdvice[kind]; ok {
+		fmt.Fprintf(stderr, "--kind %s cannot run on the build farm; %s\n", kind, advice)
 		return 2
 	}
 	if !contains(workOrderKinds, kind) {
@@ -409,7 +432,18 @@ func waitForWorkOrder(ctx buildOpsContext, client *http.Client, id string, stdou
 		switch status {
 		case "succeeded":
 			return 0
-		case "failed", "cancelled":
+		case "failed":
+			if failure := response.WorkOrder.Failure; failure != nil {
+				fmt.Fprintf(stdout, "  FAILED: %s: %s\n", firstNonEmpty(failure.Code, "workflow_failed"), firstNonEmpty(failure.Message, "no message reported"))
+				if failure.WorkflowID != "" {
+					fmt.Fprintf(stdout, "  workflow: %s\n", failure.WorkflowID)
+				}
+			}
+			return 1
+		case "cancelled":
+			if reason := response.WorkOrder.BlockedReason; reason != "" {
+				fmt.Fprintf(stdout, "  CANCELLED: %s\n", reason)
+			}
 			return 1
 		case "blocked":
 			fmt.Fprintf(stdout, "  BLOCKED: %s\n", firstNonEmpty(response.WorkOrder.BlockedReason, "no reason reported"))
@@ -722,8 +756,17 @@ type nodeSummary struct {
 }
 
 func fetchNodes(ctx buildOpsContext, client *http.Client) ([]farmNode, nodeSummary, error) {
+	return fetchNodesFiltered(ctx, client, false)
+}
+
+// fetchNodesFiltered lists nodes; includeRetired also returns decommissioned
+// machines, which the control plane omits by default.
+func fetchNodesFiltered(ctx buildOpsContext, client *http.Client, includeRetired bool) ([]farmNode, nodeSummary, error) {
 	query := url.Values{}
 	query.Set("workspaceId", ctx.workspaceID)
+	if includeRetired {
+		query.Set("includeRetired", "1")
+	}
 	raw, err := getPreflightJSON(client, ctx.endpoint("/nodes", query), ctx.token)
 	if err != nil {
 		return nil, nodeSummary{}, err
@@ -746,9 +789,10 @@ func fetchNodes(ctx buildOpsContext, client *http.Client) ([]farmNode, nodeSumma
 
 func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: preflight nodes [--watch] [--json] [--retire <node>]")
+		fmt.Fprintln(stdout, "Usage: preflight nodes [--all] [--watch] [--json] [--retire <node>]")
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "Show build-farm nodes: engines, free disk, agents, and live job counts.")
+		fmt.Fprintln(stdout, "  --all            include retired nodes (hidden by default)")
 		fmt.Fprintln(stdout, "  --watch          refresh every 5s until interrupted")
 		fmt.Fprintln(stdout, "  --json           machine-readable output")
 		fmt.Fprintln(stdout, "  --retire <node>  revoke a node's agents and take it out of the fleet")
@@ -759,10 +803,12 @@ func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		return 0
 	}
 	ctx := newBuildOpsContext()
-	watch, jsonOut := false, false
+	watch, jsonOut, includeRetired := false, false, false
 	retire := ""
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--all":
+			includeRetired = true
 		case "--watch":
 			watch = true
 		case "--json":
@@ -780,7 +826,7 @@ func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		return retireNode(ctx, client, retire, stdout, stderr)
 	}
 	for {
-		code := printNodesOnce(ctx, client, jsonOut, stdout, stderr)
+		code := printNodesOnce(ctx, client, jsonOut, includeRetired, stdout, stderr)
 		if !watch || jsonOut || code != 0 {
 			return code
 		}
@@ -789,8 +835,8 @@ func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	}
 }
 
-func printNodesOnce(ctx buildOpsContext, client *http.Client, jsonOut bool, stdout, stderr io.Writer) int {
-	nodes, summary, err := fetchNodes(ctx, client)
+func printNodesOnce(ctx buildOpsContext, client *http.Client, jsonOut, includeRetired bool, stdout, stderr io.Writer) int {
+	nodes, summary, err := fetchNodesFiltered(ctx, client, includeRetired)
 	if err != nil {
 		fmt.Fprintf(stderr, "list nodes failed: %v\n", err)
 		return 1
