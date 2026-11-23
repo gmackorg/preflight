@@ -38,6 +38,7 @@ type buildOpsContext struct {
 	apiURL      string
 	token       string
 	workspaceID string
+	ciRoot      string
 }
 
 func newBuildOpsContext() buildOpsContext {
@@ -46,7 +47,23 @@ func newBuildOpsContext() buildOpsContext {
 		apiURL:      firstNonEmpty(os.Getenv("PREFLIGHT_API_URL"), config.APIURL, defaultPreflightAPIURL),
 		token:       firstNonEmpty(os.Getenv("PREFLIGHT_TOKEN"), config.Token),
 		workspaceID: firstNonEmpty(os.Getenv("PREFLIGHT_WORKSPACE_ID"), config.WorkspaceID),
+		ciRoot:      config.CIRoot,
 	}
+}
+
+// ciCheckoutRoot is where a --ci build's Preflight-owned checkout lives:
+// <ciRoot>/.preflight-ci/<repo>. Runners only claim jobs under their
+// --workspace-root, so ciRoot should be that root (/Volumes/dev on the fleet);
+// the runner clones the remote there and resets it to the pushed commit
+// itself, so the caller's checkout can live anywhere and nothing is written
+// in it (FORGE-468). With no ciRoot the checkout sits next to the caller's
+// tree, which only a runner serving that tree can reach.
+func ciCheckoutRoot(workspaceRoot, ciRoot, repo string) string {
+	parent := filepath.Dir(workspaceRoot)
+	if strings.TrimSpace(ciRoot) != "" {
+		parent = ciRoot
+	}
+	return filepath.Join(parent, ciCheckoutRootSegment, repo)
 }
 
 func (c buildOpsContext) endpoint(path string, query url.Values) string {
@@ -133,10 +150,11 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	appDir := "."
 	profile := ""
 	ciBuild := false
+	ciRoot := ""
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--app", "--platform", "--runtime", "--kind", "--priority-class", "--provider", "--idempotency-key", "--app-dir", "--profile", "--build-profile":
+		case "--app", "--platform", "--runtime", "--kind", "--priority-class", "--provider", "--idempotency-key", "--app-dir", "--profile", "--build-profile", "--ci-root":
 			flag := args[i]
 			value, ok := nextFlagValue(args, &i)
 			if !ok || strings.TrimSpace(value) == "" || strings.HasPrefix(value, "--") {
@@ -162,6 +180,8 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 				appDir = value
 			case "--profile", "--build-profile":
 				profile = value
+			case "--ci-root":
+				ciRoot = value
 			}
 		case "--ci":
 			ciBuild = true
@@ -266,8 +286,8 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 			fmt.Fprintln(stderr, nameErr)
 			return 2
 		}
-		binding.WorkspaceRoot = filepath.Join(
-			filepath.Dir(binding.WorkspaceRoot), ciCheckoutRootSegment, repo)
+		binding.WorkspaceRoot = ciCheckoutRoot(binding.WorkspaceRoot,
+			firstNonEmpty(ciRoot, os.Getenv("PREFLIGHT_CI_ROOT"), ctx.ciRoot), repo)
 		binding.WorkspaceRoot, bindingErr = resolvedPathForBindingCheck(binding.WorkspaceRoot)
 		if bindingErr != nil {
 			fmt.Fprintln(stderr, "cannot resolve CI checkout root")
@@ -302,6 +322,9 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		lane:        lane,
 	}, binding); err != nil {
 		fmt.Fprintln(stderr, err.Error())
+		if ciBuild && firstNonEmpty(ciRoot, os.Getenv("PREFLIGHT_CI_ROOT"), ctx.ciRoot) == "" {
+			fmt.Fprintln(stderr, "hint: --ci put the checkout next to this one; pass --ci-root <a root the runners serve, e.g. /Volumes/dev>")
+		}
 		return 2
 	}
 
@@ -415,6 +438,8 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --app-dir <dir>        the Expo app package (default \".\"); its workspace")
 	fmt.Fprintln(w, "                         root is what the runner matches jobs against")
 	fmt.Fprintln(w, "  --ci                   build a Preflight-owned checkout of the pushed commit")
+	fmt.Fprintln(w, "  --ci-root <dir>        put that checkout in <dir>/.preflight-ci/<repo>; use a root the runners serve")
+	fmt.Fprintln(w, "                         (e.g. /Volumes/dev). Also PREFLIGHT_CI_ROOT or \"ciRoot\" in the CLI config.")
 	fmt.Fprintln(w, "                         instead of your working tree (required for farm builds)")
 	fmt.Fprintln(w, "  --wait                 poll until the order reaches a terminal state")
 	fmt.Fprintln(w, "  --json                 machine-readable output")

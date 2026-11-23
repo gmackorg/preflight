@@ -199,3 +199,45 @@ func TestColdCICheckoutResolvesSymlinkAfterClone(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestJJFetchURLDropsDistinctPushURL(t *testing.T) {
+	cases := map[string]string{
+		"git@git.forgegraf.com:gmackie/daily-dose.git (push: https://gitgw.forgegraf.com/gmackie/daily-dose.git)": "git@git.forgegraf.com:gmackie/daily-dose.git",
+		"https://example.invalid/team/app.git":    "https://example.invalid/team/app.git",
+		"  https://example.invalid/team/app.git ": "https://example.invalid/team/app.git",
+	}
+	for entry, want := range cases {
+		if got := jjFetchURL(entry); got != want {
+			t.Fatalf("jjFetchURL(%q) = %q, want %q", entry, got, want)
+		}
+		if name, err := ciRepositoryName("/work/x", jjFetchURL(entry)); err != nil || name == "" {
+			t.Fatalf("basename of %q: %q, %v", entry, name, err)
+		}
+	}
+}
+
+func TestJJSourceRemotesReadsFetchURLWhenPushURLDiffers(t *testing.T) {
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj is required for the real workspace integration test")
+	}
+	root := t.TempDir()
+	config := filepath.Join(root, "fixture.toml")
+	if err := os.WriteFile(config, []byte("[user]\nname = 'Fixture'\nemail = 'fixture@example.invalid'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JJ_CONFIG", config)
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jjFixtureCommand(t, repo, "git", "init", ".")
+	jjFixtureCommand(t, repo, "git", "remote", "add", "origin", "https://example.invalid/team/app.git")
+	jjFixtureCommand(t, repo, "git", "remote", "set-url", "origin", "--push", "https://push.example.invalid/team/app.git")
+	remotes, _, err := jjSourceRemotes(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := remotes["origin"]; got != "https://example.invalid/team/app.git" {
+		t.Fatalf("origin = %q", got)
+	}
+}

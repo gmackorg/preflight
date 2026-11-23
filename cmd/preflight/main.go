@@ -13121,6 +13121,8 @@ type preflightCLIConfig struct {
 	Token             string            `json:"token,omitempty"`
 	WorkspaceID       string            `json:"workspaceId,omitempty"`
 	WorkspaceBindings map[string]string `json:"workspaceBindings,omitempty"`
+	// CIRoot is the default --ci-root for `preflight build --ci` (FORGE-468).
+	CIRoot string `json:"ciRoot,omitempty"`
 }
 
 func loadPreflightCLIConfig() (preflightCLIConfig, error) {

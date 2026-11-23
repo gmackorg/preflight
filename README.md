@@ -108,6 +108,27 @@ floor. The idle window stays bounded (10 minutes by default); a zero idle wait
 keeps the single-attempt behavior. No cache deletion or floor change happens
 automatically.
 
+### Building a pushed commit (`--ci`)
+
+A runner only claims work orders whose `sourceBinding.workspaceRoot` is under
+its `--workspace-root` (`/Volumes/dev` on the fleet), and it never writes in a
+developer checkout there. To build a pushed or merged commit from anywhere
+(a clean clone in `~/work`, or a jj workspace), check that commit out and run:
+
+```sh
+preflight build --app <id> --platform ios --ci --ci-root /Volumes/dev --wait
+```
+
+`--ci` binds the order to a Preflight-owned checkout,
+`<ci-root>/.preflight-ci/<repo>`. The claiming runner clones the remote there,
+fetches the commit and hard-resets to it, so nothing is written in your
+checkout or in a seed. The commit must be on the remote; the CLI checks this
+before queueing. Set the default once with `PREFLIGHT_CI_ROOT` or `"ciRoot"`
+in the CLI config. Without a CI root the checkout goes next to yours, which
+only a runner serving that directory can reach (`runner_workspace_missing`).
+For jj workspaces, the fetch URL of the remote holding the commit is used,
+including when the remote has a separate push URL.
+
 For queued iOS builds, pass the **app directory** (the directory containing
 `.preflight`) as the cleanup root:
 
