@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,5 +58,60 @@ func TestCICheckoutRootUsesRunnerServedRoot(t *testing.T) {
 	}
 	if got := ciCheckoutRoot("/Users/me/work/app/feature", "/Volumes/dev", "app"); got != "/Volumes/dev/.preflight-ci/app" {
 		t.Fatalf("explicit root = %q", got)
+	}
+}
+
+func TestNormalizeBuildProviderPreferenceMapsLocalNames(t *testing.T) {
+	for input, want := range map[string]string{
+		"":            "",
+		"local":       "local_first",
+		"local_first": "local_first",
+		"local_only":  "local_only",
+		" local ":     "local_first",
+	} {
+		got, refusal := normalizeBuildProviderPreference(input)
+		if refusal != "" {
+			t.Fatalf("normalizeBuildProviderPreference(%q) refused: %s", input, refusal)
+		}
+		if got != want {
+			t.Fatalf("normalizeBuildProviderPreference(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// The server used to turn "cloud" (and any typo) into local_first, so the
+// order silently built locally. Cloud is refused outright now that the runner
+// has no EAS job kinds.
+func TestNormalizeBuildProviderPreferenceRefusesCloudAndUnknown(t *testing.T) {
+	for input, want := range map[string]string{
+		"cloud":      "no cloud build provider",
+		"cloud_only": "no cloud build provider",
+		"eas":        "not a provider",
+		"eas_cloud":  "not a provider",
+		"remote":     "not a provider",
+		"LOCAL":      "not a provider",
+	} {
+		got, refusal := normalizeBuildProviderPreference(input)
+		if refusal == "" || got != "" {
+			t.Fatalf("normalizeBuildProviderPreference(%q) = %q, should be refused", input, got)
+		}
+		if !strings.Contains(refusal, want) {
+			t.Fatalf("normalizeBuildProviderPreference(%q) message %q lacks %q", input, refusal, want)
+		}
+	}
+}
+
+func TestBuildRefusesCloudProviderBeforeAnyRequest(t *testing.T) {
+	for _, provider := range []string{"cloud", "cloud_only", "bogus"} {
+		var stdout, stderr bytes.Buffer
+		// http.DefaultClient would fail loudly only if a request were made; the
+		// refusal must come first, with exit 2.
+		code := runBuild([]string{"--app", "pfapp_x", "--provider", provider}, &stdout, &stderr, http.DefaultClient)
+		if code != 2 {
+			t.Errorf("--provider %s: exit %d, want 2", provider, code)
+		}
+		if !strings.Contains(stderr.String(), "--provider") {
+			t.Errorf("--provider %s: stderr %q does not explain the refusal", provider, stderr.String())
+		}
 	}
 }
