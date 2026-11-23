@@ -48,3 +48,12 @@ func TestWorkOrderAgeScalesWithElapsedTime(t *testing.T) {
 		}
 	}
 }
+
+func TestCICheckoutRootUsesRunnerServedRoot(t *testing.T) {
+	if got := ciCheckoutRoot("/Users/me/work/app/feature", "", "app"); got != "/Users/me/work/app/.preflight-ci/app" {
+		t.Fatalf("default root = %q", got)
+	}
+	if got := ciCheckoutRoot("/Users/me/work/app/feature", "/Volumes/dev", "app"); got != "/Volumes/dev/.preflight-ci/app" {
+		t.Fatalf("explicit root = %q", got)
+	}
+}

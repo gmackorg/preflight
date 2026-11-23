@@ -69,7 +69,7 @@ func jjSourceRemotes(root string) (map[string]string, []string, error) {
 		if !ok {
 			continue
 		}
-		remotes[name] = strings.TrimSpace(remote)
+		remotes[name] = jjFetchURL(remote)
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -83,6 +83,18 @@ func jjSourceRemotes(root string) (map[string]string, []string, error) {
 		names = filtered
 	}
 	return remotes, names, nil
+}
+
+// jjFetchURL returns the fetch URL from one `jj git remote list` entry. A
+// remote whose push URL differs prints as `<fetch> (push: <push>)`; taking
+// the whole tail made a URL no runner could clone and a basename ending in
+// ")" (FORGE-468).
+func jjFetchURL(entry string) string {
+	entry = strings.TrimSpace(entry)
+	if fetch, _, found := strings.Cut(entry, " (push: "); found {
+		return strings.TrimSpace(fetch)
+	}
+	return entry
 }
 
 func jjCommitOnRemote(root, remoteName, sha string) bool {
