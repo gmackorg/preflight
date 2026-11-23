@@ -10796,6 +10796,12 @@ func runExpoAppOpen(client *http.Client, registration runnerRegistrationData, op
 		}
 		flushExpoRunLog()
 	}
+	// A CI enqueue binds only the checkout, so the app identity is blank and the
+	// deep link would fall back to exp:// (Expo Go), which the dev build does
+	// not register. Fill the blanks from the checked-out app config.
+	if binding := job.Payload.SourceBinding; binding.IOSBundleID == "" || binding.AppScheme == "" || binding.AndroidPackage == "" {
+		hydrateBindingIdentity(&job.Payload.SourceBinding, resolveExpoConfig(appDir, laneProfileEnvForJob(job)).identity)
+	}
 	if err := openExpoDevelopmentClient(logFile, options, platform, providerIdentity, port, job, cancellationCheck); err != nil {
 		return logPath, err
 	}
@@ -15100,6 +15106,20 @@ func readNestedMapString(record map[string]any, keys ...string) string {
 	}
 	value, _ := current.(string)
 	return value
+}
+
+// hydrateBindingIdentity fills blank app-identity fields of a source binding
+// from the resolved app config. Values the control plane bound are kept.
+func hydrateBindingIdentity(binding *runnerJobSourceBinding, identity expoAppIdentity) {
+	fill := func(dst *string, value string) {
+		if strings.TrimSpace(*dst) == "" {
+			*dst = strings.TrimSpace(value)
+		}
+	}
+	fill(&binding.AppScheme, identity.scheme)
+	fill(&binding.ExpoSlug, identity.slug)
+	fill(&binding.IOSBundleID, identity.iosBundleID)
+	fill(&binding.AndroidPackage, identity.androidPackage)
 }
 
 type expoConfigResolution struct {
