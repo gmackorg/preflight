@@ -39,7 +39,8 @@ const (
 	defaultClaimMaxDefer       = 3 * time.Minute
 
 	// kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical.
-	memoryPressureWarn = 2
+	memoryPressureWarn     = 2
+	memoryPressureCritical = 4
 )
 
 type hostPressure struct {
@@ -54,6 +55,13 @@ type runnerClaimLoadPolicy struct {
 	maxLoadPerCore float64
 	maxXcodebuilds int
 	maxDefer       time.Duration
+	// minMemoryLevel is the kern.memorystatus_vm_pressure_level that counts
+	// as busy. Critical by default: macOS sits at "warn" for minutes at a time
+	// on a 24GB Mac during ordinary builds, and on 2026-11-23 that alone kept
+	// an otherwise idle gmacko-mini (load ~4 on 10 cores) deferring, steering
+	// work back toward labtop. The labtop meltdown itself (load 930 on 12
+	// cores) trips the load signal without help from memory.
+	minMemoryLevel int
 }
 
 func defaultRunnerClaimLoadPolicy() runnerClaimLoadPolicy {
@@ -62,6 +70,13 @@ func defaultRunnerClaimLoadPolicy() runnerClaimLoadPolicy {
 		maxLoadPerCore: defaultClaimMaxLoadPerCore,
 		maxXcodebuilds: defaultClaimMaxXcodebuilds,
 		maxDefer:       nonNegativeDurationFromEnv("PREFLIGHT_CLAIM_MAX_DEFER", defaultClaimMaxDefer),
+		minMemoryLevel: memoryPressureCritical,
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PREFLIGHT_CLAIM_MEMORY_PRESSURE"))) {
+	case "warn":
+		policy.minMemoryLevel = memoryPressureWarn
+	case "off", "0", "false", "no":
+		policy.minMemoryLevel = 0
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("PREFLIGHT_CLAIM_LOAD_GATE"))) {
 	case "0", "false", "off", "no":
@@ -91,9 +106,9 @@ func (policy runnerClaimLoadPolicy) busyReason(pressure hostPressure) string {
 			reasons = append(reasons, fmt.Sprintf("load %.1f on %d cores (%.2f/core > %.2f)", pressure.load1, pressure.cores, perCore, policy.maxLoadPerCore))
 		}
 	}
-	if pressure.memoryLevel >= memoryPressureWarn {
+	if policy.minMemoryLevel > 0 && pressure.memoryLevel >= policy.minMemoryLevel {
 		level := "warn"
-		if pressure.memoryLevel >= 4 {
+		if pressure.memoryLevel >= memoryPressureCritical {
 			level = "critical"
 		}
 		reasons = append(reasons, "memory pressure "+level)
