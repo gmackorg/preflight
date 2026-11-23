@@ -48,6 +48,18 @@ rm -f <target> && cp <new> <target> && xattr -c <target> && codesign --force --s
 Below `PREFLIGHT_MIN_FREE_DISK_GB` (15 on the Macs) a runner *declines* jobs
 rather than failing them, so a host that fills up looks idle rather than sick.
 `com.forgegraph.preflight-disk-sweep` runs hourly at a 40GB headroom; check with
-`preflight disk`. Keep large regenerable trees (CI checkouts, DerivedData) off
-the boot volume — `/Volumes/dev/.preflight-ci` is a symlink to external storage
-for this reason.
+`preflight disk`.
+
+**Runner workspaces live on internal storage**, never on an external drive:
+labtop uses `/Volumes/dev/preflight-ci` (an internal APFS volume in the boot
+container), gmacko-mini uses `~/preflight-ci`. Keep the pnpm store on the same
+volume as the workspace (`/Volumes/dev/.pnpm-store` on labtop) so pnpm
+hard-links instead of copying.
+
+Until 2026-11-23 labtop's workspace sat on the USB SSD `/Volumes/dev-ssd`.
+While Spotlight crawled that drive, directory reads took 20s or failed with
+EINTR and `mkdir` hung for over 12 minutes. The runner wedged in its startup
+cleanup without ever claiming, every process touching the drive stalled, and
+the host reported load 400-900 that looked like build pressure. An external
+drive that stalls takes the whole node out; a full internal disk only makes
+the runner decline claims, which the floor above already handles.
