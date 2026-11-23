@@ -126,14 +126,15 @@ func nextRunnerIdleDelay(previous time.Duration, policy runnerIdlePolicy) time.D
 	return next
 }
 
-// waitForIdleRunnerJob backs off after an empty claim or disk admission
-// refusal. Low disk skips claims while registration and heartbeats remain
+// waitForIdleRunnerJob backs off after an empty claim, a disk admission
+// refusal or a host-pressure deferral (gate, which may be nil). Low disk skips claims while registration and heartbeats remain
 // active. When the bounded idle window ends, the supervisor re-registers.
 func waitForIdleRunnerJob(
 	client *http.Client,
 	options runnerOnceOptions,
 	registration runnerRegistrationData,
 	stdout io.Writer,
+	gate *runnerClaimGate,
 ) (*runnerClaimData, error) {
 	if options.idle.wait <= 0 {
 		return nil, nil
@@ -147,8 +148,7 @@ func waitForIdleRunnerJob(
 			return nil, nil
 		}
 		runnerIdleSleep(delay)
-		if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
-			fmt.Fprintf(stdout, "declining claims: %v\n", err)
+		if !admitRunnerClaim(options, gate, stdout) {
 			continue
 		}
 		claim, err := claimRunnerJob(client, options, registration)

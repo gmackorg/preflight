@@ -582,8 +582,15 @@ func printQueueOnce(ctx buildOpsContext, client *http.Client, status, appID stri
 	// pull runner state whenever anything is actually waiting.
 	waiting := byStatus["queued"] + byStatus["waiting_for_resource"]
 	if waiting > 0 {
-		if online, total, ok := nodeHeadcount(ctx, client); ok && online == 0 {
-			fmt.Fprintf(stdout, "WARNING: %d work order(s) waiting and 0 of %d node(s) online — run `preflight nodes`.\n", waiting, total)
+		if nodes, summary, err := fetchNodes(ctx, client); err == nil {
+			if summary.Online == 0 {
+				fmt.Fprintf(stdout, "WARNING: %d work order(s) waiting and 0 of %d node(s) online — run `preflight nodes`.\n", waiting, summary.Total)
+			}
+			// Name the online nodes that will not take this work, and why.
+			lines, _ := claimAdmissionWarnings(nodes)
+			for _, line := range lines {
+				fmt.Fprintln(stdout, line)
+			}
 		}
 	}
 	return 0
@@ -651,12 +658,55 @@ type farmNode struct {
 	FreeDiskGb        *int     `json:"freeDiskGb"`
 	DiskPressure      string   `json:"diskPressure"`
 	LastSeenAgeSecond *int     `json:"lastSeenAgeSeconds"`
-	Jobs              *struct {
+	// Whether the node's live agents are taking work, from their heartbeats.
+	// Absent on control planes that predate it.
+	ClaimAdmission *nodeClaimAdmission `json:"claimAdmission"`
+	Jobs           *struct {
 		Running     int `json:"running"`
 		Queued      int `json:"queued"`
 		Succeeded24 int `json:"succeeded24h"`
 		Failed24    int `json:"failed24h"`
 	} `json:"jobs"`
+}
+
+// nodeClaimAdmission summarises a node's agents: how many are declining work
+// outright (disk under their floor) or deferring it (host busy), and why.
+type nodeClaimAdmission struct {
+	Agents        int      `json:"agents"`
+	Declining     int      `json:"declining"`
+	Deferring     int      `json:"deferring"`
+	Reason        string   `json:"reason"`
+	Detail        string   `json:"detail"`
+	MinFreeDiskGb *float64 `json:"minFreeDiskGb"`
+}
+
+// claimAdmissionWarnings explains, per node, why live agents are not taking
+// work. A node whose agents all decline looks merely idle in the table, which
+// is how gmacko-mini sat out the farm on 2026-11-23 while labtop melted down.
+// blocking reports whether any node is declining (not just deferring).
+func claimAdmissionWarnings(nodes []farmNode) (lines []string, blocking bool) {
+	for _, node := range nodes {
+		admission := node.ClaimAdmission
+		if node.Status != "online" || admission == nil {
+			continue
+		}
+		detail := strings.TrimSpace(admission.Detail)
+		if admission.Declining > 0 {
+			blocking = true
+			hint := ""
+			if admission.Reason == "disk" {
+				hint = " Free space on that host (`preflight disk --reclaim`) or lower PREFLIGHT_MIN_FREE_DISK_GB."
+			}
+			lines = append(lines, fmt.Sprintf("WARNING: %s: %d of %d agent(s) declining claims (%s): %s.%s",
+				node.Name, admission.Declining, admission.Agents, admission.Reason, detail, hint))
+			continue
+		}
+		if admission.Deferring > 0 {
+			lines = append(lines, fmt.Sprintf("NOTE: %s: %d of %d agent(s) deferring claims, host busy: %s. They claim anyway if no other node takes the work.",
+				node.Name, admission.Deferring, admission.Agents, detail))
+		}
+	}
+	return lines, blocking
 }
 
 type nodeSummary struct {
@@ -692,16 +742,6 @@ func fetchNodes(ctx buildOpsContext, client *http.Client) ([]farmNode, nodeSumma
 		return nil, nodeSummary{}, err
 	}
 	return response.Nodes, response.Summary, nil
-}
-
-// nodeHeadcount is the cheap form used to annotate the queue. Failures are
-// silent: an unavailable node list must not break `queue`.
-func nodeHeadcount(ctx buildOpsContext, client *http.Client) (online int, total int, ok bool) {
-	_, summary, err := fetchNodes(ctx, client)
-	if err != nil {
-		return 0, 0, false
-	}
-	return summary.Online, summary.Total, true
 }
 
 func runNodes(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
@@ -787,6 +827,13 @@ func printNodesOnce(ctx buildOpsContext, client *http.Client, jsonOut bool, stdo
 		summary.Total, summary.Online, summary.Stale, summary.Retired,
 		summary.LiveAgents, summary.QueuedJobs, summary.RunningJobs)
 	exit := 0
+	admissionLines, blocking := claimAdmissionWarnings(nodes)
+	for _, line := range admissionLines {
+		fmt.Fprintln(stdout, line)
+	}
+	if blocking {
+		exit = 1
+	}
 	if summary.DiskCritical > 0 {
 		fmt.Fprintf(stdout, "WARNING: disk critical on %s — these hosts decline work below the free-space floor.\n",
 			strings.Join(summary.DiskCriticalNodes, ", "))
