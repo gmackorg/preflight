@@ -230,6 +230,15 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 		fmt.Fprintf(stderr, "unknown --kind %q; expected one of: %s\n", kind, strings.Join(workOrderKinds, ", "))
 		return 2
 	}
+	// The API turns any buildProviderPreference it does not recognise into
+	// local_first, so an unchecked value (the advertised "cloud" included) was
+	// accepted and silently built locally. Check it here instead.
+	normalized, providerErr := normalizeBuildProviderPreference(preference)
+	if providerErr != "" {
+		fmt.Fprintf(stderr, "--provider %s\n", providerErr)
+		return 2
+	}
+	preference = normalized
 	if platform != "ios" && platform != "android" {
 		fmt.Fprintf(stderr, "--platform must be ios or android, got %q\n", platform)
 		return 2
@@ -467,7 +476,8 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --kind <kind>          default build; one of:")
 	fmt.Fprintf(w, "                         %s\n", strings.Join(workOrderKinds, ", "))
 	fmt.Fprintln(w, "  --priority-class <c>   background|normal|… default normal")
-	fmt.Fprintln(w, "  --provider <p>         build provider preference (local/cloud)")
+	fmt.Fprintln(w, "  --provider <p>         build provider preference: local (= local_first) or local_only;")
+	fmt.Fprintln(w, "                         cloud builds are not available")
 	fmt.Fprintln(w, "  --idempotency-key <k>  reuse an existing order instead of duplicating")
 	fmt.Fprintln(w, "  --app-dir <dir>        the Expo app package (default \".\"); its workspace")
 	fmt.Fprintln(w, "                         root is what the runner matches jobs against")
@@ -1038,4 +1048,23 @@ func retireNode(ctx buildOpsContext, client *http.Client, name string, stdout, s
 		target.Name, response.Revoked)
 	fmt.Fprintln(stdout, "If the machine comes back, its agents re-register and the node returns.")
 	return 0
+}
+
+// normalizeBuildProviderPreference maps the --provider value onto the API's
+// vocabulary. It returns a non-empty message when the value must be refused.
+// Cloud preferences are refused because the runner no longer runs EAS jobs
+// (PREFLT-66): the server would plan an eas_cloud build that nothing can run.
+func normalizeBuildProviderPreference(preference string) (string, string) {
+	switch value := strings.TrimSpace(preference); value {
+	case "":
+		return "", ""
+	case "local", "local_first":
+		return "local_first", ""
+	case "local_only":
+		return "local_only", ""
+	case "cloud", "cloud_only":
+		return "", fmt.Sprintf("%q is not available: Preflight has no cloud build provider since EAS builds were removed (PREFLT-66); use local, local_first or local_only", value)
+	default:
+		return "", fmt.Sprintf("%q is not a provider; expected one of: local, local_first, local_only", value)
+	}
 }
