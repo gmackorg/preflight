@@ -9151,6 +9151,14 @@ type runnerJobCompletionData struct {
 }
 
 func completeRunnerJobWithResponse(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, result map[string]any) (runnerJobCompletionData, error) {
+	// A failed, cancelled or final device job ends the workflow's use of its
+	// SimLock simulator; anything else keeps it for the workflow's next job.
+	if options.simlockLease != nil && job.WorkflowID == options.simlockLease.workflowID {
+		status, _ := result["status"].(string)
+		if status == "failed" || status == "cancelled" || simlockWorkflowTerminalJob(job) {
+			options.simlockLease.finish()
+		}
+	}
 	data, err := postPreflightJSON(
 		client,
 		runnerEndpoint(options.apiURL, fmt.Sprintf("/api/preflight/v1/runners/%s/jobs/%s/complete", registration.Runner.ID, job.ID)),

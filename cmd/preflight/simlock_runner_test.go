@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,59 @@ func simlockTestGrant(t *testing.T, platform string) simlockGrant {
 		grant.Environment.ADBPort = "5038"
 	}
 	return grant
+}
+
+// fakeSimlockCLI installs a fake `simlock` that answers a detached lease with
+// grantLine (nothing for "waiting"), records each invocation in dir/calls, and
+// touches dir/released on `release`. A renew fails once dir/gone exists.
+func fakeSimlockCLI(t *testing.T, dir string, grantLine string, waiting bool) {
+	t.Helper()
+	calls := filepath.Join(dir, "calls")
+	released := filepath.Join(dir, "released")
+	gone := filepath.Join(dir, "gone")
+	leaseBody := "echo " + simlockShellQuote(grantLine) + "\nexit 0\n"
+	if waiting {
+		leaseBody = "while :; do sleep 0.1; done\n"
+	}
+	body := "#!/bin/sh\necho \"$*\" >> " + simlockShellQuote(calls) + "\n" +
+		"if [ \"$1\" = --local ]; then shift; fi\n" +
+		"case \"$1 $2\" in\n" +
+		"'lease renew') if [ -e " + simlockShellQuote(gone) + " ]; then echo '{\"error\":{\"code\":\"LEASE_NOT_FOUND\"}}'; exit 1; fi; exit 0;;\n" +
+		"esac\n" +
+		"case \"$1\" in\n" +
+		"release) touch " + simlockShellQuote(released) + "; exit 0;;\n" +
+		"lease) " + leaseBody + ";;\n" +
+		"esac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "simlock"), []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PREFLIGHT_SIMLOCK_STATE_DIR", filepath.Join(dir, "state"))
+}
+
+func simlockCallCount(t *testing.T, dir, prefix string) int {
+	t.Helper()
+	data, _ := os.ReadFile(filepath.Join(dir, "calls"))
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+func simlockReleased(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "released"))
+	return err == nil
+}
+
+func simlockWorkflowGrantJSON(t *testing.T, platform, workflowID string) string {
+	t.Helper()
+	grant := simlockTestGrant(t, platform)
+	grant.Lease.ID = "pfwl_" + simlockWorkflowKey(workflowID, platform) + "_000000000001"
+	data, _ := json.Marshal(grant)
+	return string(data)
 }
 
 func TestSimlockGrantBoundary(t *testing.T) {
@@ -133,40 +187,131 @@ func TestSimlockAndroidMaestroNeverUsesDefaultADBDiscovery(t *testing.T) {
 	}
 }
 
-func TestSimlockHolderReleasesOnCancellationAndInvalidGrant(t *testing.T) {
+func TestSimlockDetachedLeaseReleasesOnCancellationAndInvalidGrant(t *testing.T) {
 	for _, mode := range []string{"invalid", "waiting", "valid"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
-			released := filepath.Join(dir, "released")
-			grant := simlockTestGrant(t, "ios")
-			data, _ := json.Marshal(grant)
-			body := "#!/bin/sh\ntrap 'echo released > " + simlockShellQuote(released) + "; exit 0' TERM\n"
-			switch mode {
-			case "valid":
-				body += "echo " + simlockShellQuote(string(data)) + "\n"
-			case "invalid":
-				body += "echo '{\"bad\":true}'\n"
+			grantLine := simlockWorkflowGrantJSON(t, "ios", "workflow")
+			if mode == "invalid" {
+				grantLine = `{"bad":true}`
 			}
-			body += "while :; do sleep 0.1; done\n"
-			if err := os.WriteFile(filepath.Join(dir, "simlock"), []byte(body), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			fakeSimlockCLI(t, dir, grantLine, mode == "waiting")
 			job := apiRunnerJob{WorkflowID: "workflow", Payload: runnerJobPayload{Platform: "ios"}}
 			lease, err := acquireSimlockRunnerLease(runnerOnceOptions{hostIdentity: "test"}, job, io.Discard, func() (bool, error) { return true, nil })
-			if mode == "valid" {
-				if err != nil {
-					t.Fatal(err)
+			if mode != "valid" {
+				if err == nil {
+					t.Fatal("invalid/cancelled lease accepted")
 				}
-				lease.close()
-				lease.close()
-			} else if err == nil {
-				t.Fatal("invalid/cancelled lease accepted")
+				if !simlockReleased(dir) {
+					t.Fatal("detached lease was not released after refusal")
+				}
+				return
 			}
-			if _, err := os.Stat(released); err != nil {
-				t.Fatal("holder was not gracefully released", err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(mustRead(t, filepath.Join(dir, "calls"))), "--detach") {
+				t.Fatal("workflow lease was not requested detached")
+			}
+			lease.finish()
+			lease.close()
+			lease.close()
+			if !simlockReleased(dir) {
+				t.Fatal("finished workflow did not release its lease")
+			}
+			if lease.alive() == nil {
+				t.Fatal("released lease still reads as alive")
 			}
 		})
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// The regression behind "Invalid device" boots: a workflow's simulator must
+// survive the end of the runner process that discovered it, and the next
+// process must reuse it instead of provisioning a different UDID.
+func TestSimlockWorkflowLeaseOutlivesProcessAndIsAdopted(t *testing.T) {
+	dir := t.TempDir()
+	fakeSimlockCLI(t, dir, simlockWorkflowGrantJSON(t, "ios", "wf"), false)
+	job := apiRunnerJob{WorkflowID: "wf", Kind: "device.discover", Payload: runnerJobPayload{Platform: "ios"}}
+	first, err := acquireSimlockRunnerLease(runnerOnceOptions{hostIdentity: "agent-1"}, job, io.Discard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.close() // process ends between jobs, workflow not finished
+	if simlockReleased(dir) {
+		t.Fatal("lease released between a workflow's jobs")
+	}
+	job.Kind = "dev_session.start"
+	job.Payload.ProviderIdentity = first.grant.Device.Address
+	second, err := acquireSimlockRunnerLease(runnerOnceOptions{hostIdentity: "agent-2"}, job, io.Discard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := simlockCallCount(t, dir, "--local lease"); got != 1 {
+		t.Fatalf("next process provisioned a new device (%d lease requests)", got)
+	}
+	if second.grant.Device.Address != first.grant.Device.Address || second.validateJob(job) != nil {
+		t.Fatal("next process did not adopt the workflow's simulator")
+	}
+	second.finish()
+	second.close()
+	if !simlockReleased(dir) {
+		t.Fatal("finished workflow kept its lease")
+	}
+	if _, err := os.Stat(second.statePath); !os.IsNotExist(err) {
+		t.Fatal("released lease left adoption state behind")
+	}
+}
+
+func TestSimlockExpiredWorkflowLeaseIsReprovisioned(t *testing.T) {
+	dir := t.TempDir()
+	fakeSimlockCLI(t, dir, simlockWorkflowGrantJSON(t, "ios", "wf"), false)
+	job := apiRunnerJob{WorkflowID: "wf", Kind: "device.discover", Payload: runnerJobPayload{Platform: "ios"}}
+	first, err := acquireSimlockRunnerLease(runnerOnceOptions{hostIdentity: "test"}, job, io.Discard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.close()
+	if err := os.WriteFile(filepath.Join(dir, "gone"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireSimlockRunnerLease(runnerOnceOptions{hostIdentity: "test"}, job, io.Discard, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := simlockCallCount(t, dir, "--local lease"); got != 2 {
+		t.Fatalf("expired lease was not re-requested (%d lease requests)", got)
+	}
+}
+
+func TestSimlockWorkflowLeaseIDsAreFreshAndValid(t *testing.T) {
+	workflow := "pfw_8eee75a6-042b-43d2-adc5-48182ff3dea6"
+	if simlockWorkflowKey(workflow, "ios") != simlockWorkflowKey(workflow, "ios") || simlockWorkflowKey(workflow, "ios") == simlockWorkflowKey(workflow, "android") {
+		t.Fatal("workflow key is not a stable function of workflow and platform")
+	}
+	first, second := simlockWorkflowLeaseID(workflow, "ios"), simlockWorkflowLeaseID(workflow, "ios")
+	// SimLock refuses an ended lease's ID (LEASE_ENDED), so a retry needs a new one.
+	if first == second {
+		t.Fatal("lease ID reused across requests")
+	}
+	pattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+	if !pattern.MatchString(first) {
+		t.Fatalf("lease ID %q breaks SimLock's ID pattern", first)
+	}
+}
+
+func TestSimlockDevSessionStartRunsUnderTheWorkflowLease(t *testing.T) {
+	job := apiRunnerJob{Kind: "dev_session.start", Payload: runnerJobPayload{Platform: "ios", Lane: "simulator", TargetClass: "simulator"}}
+	if !simlockDeviceJob(job) {
+		t.Fatal("dev_session.start boots the workflow simulator outside SimLock's device set")
 	}
 }
 
@@ -243,17 +388,36 @@ func TestSimlockLive(t *testing.T) {
 	root := t.TempDir()
 	job := apiRunnerJob{ID: "simlock-live", WorkflowID: "PREFLT-65-live", Kind: "device.discover", Payload: runnerJobPayload{Platform: platform, Lane: "simulator", TargetClass: "simulator"}}
 	options := runnerOnceOptions{hostIdentity: "preflight-live-check", workspaceRoot: root, xcrunPath: "xcrun", adbPath: "adb"}
+	t.Setenv("PREFLIGHT_SIMLOCK_STATE_DIR", filepath.Join(root, "simlock-state"))
+	discovered, err := acquireSimlockRunnerLease(options, job, os.Stdout, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The discovering process ends; the next one must get the same simulator.
+	discovered.close()
 	lease, err := acquireSimlockRunnerLease(options, job, os.Stdout, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lease.close()
+	defer func() {
+		lease.finish()
+		lease.close()
+	}()
+	if lease.grant.Device.Address != discovered.grant.Device.Address {
+		t.Fatalf("workflow simulator changed between processes: %s then %s", discovered.grant.Device.Address, lease.grant.Device.Address)
+	}
 	options.simlockLease = lease
 	undo, err := lease.configure(&options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer undo()
+	if platform == "ios" {
+		// The boot path dev_session.start takes, through the lease's xcrun shim.
+		if err := bootIOSSimulator(options, lease.grant.Device.Address, nil); err != nil {
+			t.Fatalf("boot leased simulator: %v", err)
+		}
+	}
 	appID := "com.android.settings"
 	if platform == "ios" {
 		appID = "com.apple.Preferences"
@@ -291,14 +455,8 @@ func TestSimlockIOSMaestroCannotProbeAndroidPorts(t *testing.T) {
 
 func TestSimlockWorkflowRetainsLeaseScopeAndReleasesOnRunError(t *testing.T) {
 	dir := t.TempDir()
+	fakeSimlockCLI(t, dir, simlockWorkflowGrantJSON(t, "android", "ours"), false)
 	released := filepath.Join(dir, "released")
-	grant := simlockTestGrant(t, "android")
-	data, _ := json.Marshal(grant)
-	fake := "#!/bin/sh\ntrap 'touch " + simlockShellQuote(released) + "; exit 0' TERM\necho " + simlockShellQuote(string(data)) + "\nwhile :; do sleep 0.1; done\n"
-	if err := os.WriteFile(filepath.Join(dir, "simlock"), []byte(fake), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	retired := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/claim") {
@@ -366,54 +524,84 @@ func TestSimlockMaestroDoesNotReadForeignAVDMetadata(t *testing.T) {
 func TestSimlockDiscoveryLeaseSpansNextClaim(t *testing.T) {
 	// The development-lane dispatcher went away with eas.build.dev (PREFLT-66);
 	// discovery continues through the generic claim handler only.
-	for _, dispatch := range []string{"generic"} {
-		t.Run(dispatch, func(t *testing.T) {
-			dir := t.TempDir()
-			released := filepath.Join(dir, "released")
-			grant := simlockTestGrant(t, "android")
-			data, _ := json.Marshal(grant)
-			fake := "#!/bin/sh\ntrap 'touch " + simlockShellQuote(released) + "; exit 0' TERM\necho " + simlockShellQuote(string(data)) + "\nwhile :; do sleep 0.1; done\n"
-			if err := os.WriteFile(filepath.Join(dir, "simlock"), []byte(fake), 0700); err != nil {
-				t.Fatal(err)
+	dir := t.TempDir()
+	fakeSimlockCLI(t, dir, simlockWorkflowGrantJSON(t, "android", "ours"), false)
+	claimed := false
+	retired := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/targets/android-emulators"):
+			var body struct {
+				ADB string `json:"adbDevicesOutput"`
 			}
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			claimed := false
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case strings.HasSuffix(r.URL.Path, "/targets/android-emulators"):
-					_, _ = w.Write([]byte(`{"data":{"targets":[{"id":"ours","providerIdentity":"emulator-5580","kind":"android_emulator","platform":"android","availability":"available"}]}}`))
-				case strings.HasSuffix(r.URL.Path, "/targets/ours/lock"):
-					_, _ = w.Write([]byte(`{"data":{"target":{"id":"ours","displayName":"Pixel 9"}}}`))
-				case strings.HasSuffix(r.URL.Path, "/claim"):
-					claimed = true
-					if _, err := os.Stat(released); err == nil {
-						t.Error("discovery released SimLock before the next job claim")
-					}
-					var body struct {
-						WorkflowID string `json:"workflowId"`
-					}
-					_ = json.NewDecoder(r.Body).Decode(&body)
-					if body.WorkflowID != "ours" {
-						t.Error("continuation lost SimLock workflow scope")
-					}
-					_, _ = w.Write([]byte(`{"data":null}`))
-				default:
-					t.Errorf("unexpected request %s", r.URL.Path)
-				}
-			}))
-			defer server.Close()
-			job := apiRunnerJob{ID: "discover", WorkflowID: "ours", Kind: "device.discover", Payload: runnerJobPayload{Platform: "android", Lane: "simulator", TargetClass: "simulator", SourceBinding: runnerJobSourceBinding{WorkspaceRoot: dir}}}
-			options := runnerOnceOptions{simlock: true, apiURL: server.URL, workspaceRoot: dir, hostIdentity: "test"}
-			err := handleRunnerClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, map[string]any{})
-			if err != nil {
-				t.Fatal(err)
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if !strings.Contains(body.ADB, "emulator-5580") {
+				retired = true
 			}
-			if !claimed {
-				t.Error("discovery did not continue")
+			_, _ = w.Write([]byte(`{"data":{"targets":[{"id":"ours","providerIdentity":"emulator-5580","kind":"android_emulator","platform":"android","availability":"available"}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/targets/ours/lock"):
+			_, _ = w.Write([]byte(`{"data":{"target":{"id":"ours","displayName":"Pixel 9"}}}`))
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			claimed = true
+			if simlockReleased(dir) {
+				t.Error("discovery released SimLock before the next job claim")
 			}
-			if _, err := os.Stat(released); err != nil {
-				t.Error("lease did not release after sequence", err)
+			var body struct {
+				WorkflowID string `json:"workflowId"`
 			}
-		})
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.WorkflowID != "ours" {
+				t.Error("continuation lost SimLock workflow scope")
+			}
+			_, _ = w.Write([]byte(`{"data":null}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	job := apiRunnerJob{ID: "discover", WorkflowID: "ours", Kind: "device.discover", Payload: runnerJobPayload{Platform: "android", Lane: "simulator", TargetClass: "simulator", SourceBinding: runnerJobSourceBinding{WorkspaceRoot: dir}}}
+	options := runnerOnceOptions{simlock: true, apiURL: server.URL, workspaceRoot: dir, hostIdentity: "test"}
+	if err := handleRunnerClaim(server.Client(), options, scopedRegistration(t), job, io.Discard, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Error("discovery did not continue")
+	}
+	// No next job yet (not queued, or this host declined it): the workflow's
+	// simulator and its advertised target must survive for whoever claims it.
+	if simlockReleased(dir) {
+		t.Error("lease released while the workflow still needs its simulator")
+	}
+	if retired {
+		t.Error("target retired while the workflow still holds its simulator")
+	}
+}
+
+func TestSimlockLeaseEndsOnFailedOrFinalJobOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer server.Close()
+	for _, tc := range []struct {
+		kind, status string
+		finished     bool
+	}{
+		{"device.discover", "succeeded", false},
+		{"dev_session.start", "succeeded", false},
+		{"simulator.open", "succeeded", false},
+		{"dev_session.start", "failed", true},
+		{"simulator.open", "cancelled", true},
+		{"maestro.run", "succeeded", true},
+		{"maestro.run", "failed", true},
+	} {
+		lease := &simlockRunnerLease{workflowID: "wf", done: make(chan struct{}), stopRenew: make(chan struct{})}
+		options := runnerOnceOptions{apiURL: server.URL, simlockLease: lease}
+		job := apiRunnerJob{ID: "job", WorkflowID: "wf", Kind: tc.kind}
+		if err := completeRunnerJob(server.Client(), options, scopedRegistration(t), job, map[string]any{"status": tc.status}); err != nil {
+			t.Fatal(err)
+		}
+		if lease.finished != tc.finished {
+			t.Errorf("%s %s: finished=%v, want %v", tc.kind, tc.status, lease.finished, tc.finished)
+		}
 	}
 }
