@@ -5389,10 +5389,13 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 
 	// Disk pressure never authorizes deleting another runner's products. Check
 	// the configured floor without enumerating any shared cache directories.
+	// Host pressure gates fresh claims so a busy host leaves work to a
+	// quieter one; see runner_load.go.
+	gate := newRunnerClaimGate(options)
 	var claim *runnerClaimData
 	if err := ensureBuildDiskHeadroom(options.workspaceRoot, stdout); err != nil {
 		fmt.Fprintf(stdout, "declining claims: %v\n", err)
-	} else {
+	} else if gate.admit(stdout) {
 		claim, err = claimRunnerJob(client, options, registration)
 		if err != nil {
 			return err
@@ -5401,7 +5404,7 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	if claim == nil {
 		// Keep registration and heartbeats while idle or under disk pressure,
 		// rather than repeating startup in the supervisor loop (PREFLT-51).
-		claim, err = waitForIdleRunnerJob(client, options, registration, stdout)
+		claim, err = waitForIdleRunnerJob(client, options, registration, stdout, gate)
 		if err != nil {
 			return err
 		}

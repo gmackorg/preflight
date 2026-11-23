@@ -19,6 +19,9 @@ import (
 // expect the command to return. The idle tests below opt back in explicitly.
 func TestMain(m *testing.M) {
 	defaultRunnerIdleWait = 0
+	// Tests run on loaded build hosts; real host pressure must not make the
+	// claim gate defer. runner_load_test.go drives the gate explicitly.
+	sampleHostPressure = func() hostPressure { return hostPressure{load1: 0, cores: 1, xcodebuilds: 0} }
 	os.Exit(m.Run())
 }
 
@@ -291,7 +294,7 @@ func TestWaitForIdleRunnerJobStopsPollingWhenWorkArrives(t *testing.T) {
 		t.Fatalf("expected an empty first claim, got %#v %v", first, err)
 	}
 	var stdout bytes.Buffer
-	claim, err := waitForIdleRunnerJob(server.Client(), options, registration, &stdout)
+	claim, err := waitForIdleRunnerJob(server.Client(), options, registration, &stdout, nil)
 	if err != nil {
 		t.Fatalf("wait for idle job: %v", err)
 	}
@@ -314,6 +317,7 @@ func TestWaitForIdleRunnerJobDisabledByZeroWait(t *testing.T) {
 		runnerOnceOptions{apiURL: server.URL, workspaceRoot: t.TempDir()},
 		runnerRegistrationData{Runner: apiRunner{ID: "pfrun_idle"}, Token: "runner_token"},
 		&bytes.Buffer{},
+		nil,
 	)
 	if err != nil || claim != nil {
 		t.Fatalf("expected nothing, got %#v %v", claim, err)
