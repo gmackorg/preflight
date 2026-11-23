@@ -53,7 +53,7 @@ func newBuildOpsContext() buildOpsContext {
 
 // ciCheckoutRoot is where a --ci build's Preflight-owned checkout lives:
 // <ciRoot>/.preflight-ci/<repo>. Runners only claim jobs under their
-// --workspace-root, so ciRoot should be that root (/Volumes/dev on the fleet);
+// --workspace-root, so ciRoot should be that root (/Users/mackieg/preflight-ci on gmacko-mini);
 // the runner clones the remote there and resets it to the pushed commit
 // itself, so the caller's checkout can live anywhere and nothing is written
 // in it (FORGE-468). With no ciRoot the checkout sits next to the caller's
@@ -323,7 +323,7 @@ func runBuild(args []string, stdout io.Writer, stderr io.Writer, client *http.Cl
 	}, binding); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		if ciBuild && firstNonEmpty(ciRoot, os.Getenv("PREFLIGHT_CI_ROOT"), ctx.ciRoot) == "" {
-			fmt.Fprintln(stderr, "hint: --ci put the checkout next to this one; pass --ci-root <a root the runners serve, e.g. /Volumes/dev>")
+			fmt.Fprintln(stderr, "hint: --ci put the checkout next to this one; pass --ci-root <a root the runners serve, e.g. /Users/mackieg/preflight-ci>")
 		}
 		return 2
 	}
@@ -439,7 +439,7 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "                         root is what the runner matches jobs against")
 	fmt.Fprintln(w, "  --ci                   build a Preflight-owned checkout of the pushed commit")
 	fmt.Fprintln(w, "  --ci-root <dir>        put that checkout in <dir>/.preflight-ci/<repo>; use a root the runners serve")
-	fmt.Fprintln(w, "                         (e.g. /Volumes/dev). Also PREFLIGHT_CI_ROOT or \"ciRoot\" in the CLI config.")
+	fmt.Fprintln(w, "                         (e.g. /Users/mackieg/preflight-ci). Also PREFLIGHT_CI_ROOT or \"ciRoot\" in the CLI config.")
 	fmt.Fprintln(w, "                         instead of your working tree (required for farm builds)")
 	fmt.Fprintln(w, "  --wait                 poll until the order reaches a terminal state")
 	fmt.Fprintln(w, "  --json                 machine-readable output")

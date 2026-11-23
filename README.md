@@ -111,12 +111,14 @@ automatically.
 ### Building a pushed commit (`--ci`)
 
 A runner only claims work orders whose `sourceBinding.workspaceRoot` is under
-its `--workspace-root` (`/Volumes/dev` on the fleet), and it never writes in a
-developer checkout there. To build a pushed or merged commit from anywhere
+its `--workspace-root`, and it never writes in a developer checkout there. On
+the fleet (2026-11-23) gmacko-mini's three agents serve
+`/Users/mackieg/preflight-ci` and labtop's agent serves
+`/Volumes/dev-ssd/preflight-ci`; no runner serves `/Volumes/dev`. To build a pushed or merged commit from anywhere
 (a clean clone in `~/work`, or a jj workspace), check that commit out and run:
 
 ```sh
-preflight build --app <id> --platform ios --ci --ci-root /Volumes/dev --wait
+preflight build --app <id> --platform ios --ci --ci-root /Users/mackieg/preflight-ci --wait
 ```
 
 `--ci` binds the order to a Preflight-owned checkout,
