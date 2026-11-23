@@ -374,6 +374,31 @@ capability, source and resource admission checks still apply; this option does
 not reserve the host or increase its build capacity.
 
 
+### Fleet simulator policy
+
+Every iOS simulator lease, build and run in the fleet uses one iPhone image and
+one iPad image on one iOS runtime (PREFLT-73). The control plane owns the
+policy; `preflight simulator-policy` prints it (`--json` for tools). Runners
+get it in their registration response and the control plane stamps the
+concrete target (`payload.simulatorTarget`) on every iOS simulator job:
+
+- `--simlock` leases name the policy model and OS (`--device <model> --os
+  <version>`, not `--class phone`), and a grant for any other model or OS is
+  released and refused.
+- Without SimLock, only simulators of the policy device type on the policy
+  runtime are reported and selected; the runner creates one with `simctl
+  create` when the host has none.
+- At registration and in each heartbeat a macOS runner reports
+  `capabilities.iosSimulatorToolchain` (Xcode version, `simctl list runtimes
+  -j`, `simctl list devicetypes -j`) and its verdict
+  `capabilities.iosSimulatorPolicy`. A host that lacks the policy Xcode,
+  runtime or device types is refused iOS simulator work at claim; Android,
+  physical-device and store work are unaffected.
+
+A job may choose only between the two policy images (`simulatorDevice:
+"iphone" | "ipad"` in its payload or source binding); any other model is
+ignored.
+
 ### Shared SimLock devices
 
 `preflight runner once --simlock` (or `PREFLIGHT_SIMLOCK=1`) leases a local

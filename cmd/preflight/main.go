@@ -126,6 +126,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runTestFlight(args[1:], stdout, stderr, client)
 	case "capabilities":
 		return runCapabilities(args[1:], stdout, stderr, client)
+	case "simulator-policy":
+		return runSimulatorPolicy(args[1:], stdout, stderr, client)
 	case "targets":
 		return runTargets(args[1:], stdout, stderr, client)
 	case "credentials":
@@ -183,6 +185,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "  testflight    Manage TestFlight tester enrollment")
 	fmt.Fprintln(w, "  config        Inspect local Preflight CLI config")
 	fmt.Fprintln(w, "  capabilities  Probe /api/preflight/v1/capabilities")
+	fmt.Fprintln(w, "  simulator-policy  Print the fleet iOS simulator target (iPhone, iPad, runtime)")
 	fmt.Fprintln(w, "  targets       Register and list local simulator/device inventory")
 	fmt.Fprintln(w, "  credentials   Signing credentials (list/import-eas/doctor/upload) and secret references")
 	fmt.Fprintln(w, "  signing-targets  iOS signing targets for store builds")
@@ -5106,6 +5109,7 @@ func runRunnerOnce(args []string, stdout io.Writer, stderr io.Writer, client *ht
 
 type runnerOnceOptions struct {
 	simlock               bool
+	simulatorPolicy       *simulatorPolicy
 	simlockLease          *simlockRunnerLease
 	apiURL                string
 	token                 string
@@ -5347,11 +5351,21 @@ func executeRunnerOnce(options runnerOnceOptions, stdout io.Writer, client *http
 	capabilities := defaultRunnerCapabilities(options.hostMode)
 	capabilities["preparedPackages"] = preparedIOSPackages(options.workspaceRoot)
 	capabilities["ascApiKey"] = hasASCApiKeyCredentials()
+	// PREFLT-73: the raw simulator toolchain facts; the control plane judges
+	// them against the fleet policy and keeps a drifting host off iOS
+	// simulator work.
+	platforms, _ := capabilities["platforms"].([]string)
+	toolchain := probeLocalSimulatorToolchain(options, platforms)
+	if toolchain != nil {
+		capabilities["iosSimulatorToolchain"] = toolchain.capability()
+	}
 	registration, err := registerRunner(client, options, capabilities)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "registered runner %s\n", registration.Runner.ID)
+	options.simulatorPolicy = registration.SimulatorPolicy
+	applySimulatorPolicyToCapabilities(capabilities, registration.SimulatorPolicy, toolchain, stdout)
 	if err := requireRunnerWorkflowClaimScope(options, registration); err != nil {
 		return err
 	}
@@ -5738,6 +5752,9 @@ type runnerRegistrationData struct {
 	Runner      apiRunner `json:"runner"`
 	Token       string    `json:"token"`
 	ClaimScopes []string  `json:"claimScopes"`
+	// SimulatorPolicy is the fleet iOS simulator target (PREFLT-73); nil from
+	// a control plane that predates it.
+	SimulatorPolicy *simulatorPolicy `json:"simulatorPolicy"`
 }
 
 type apiRunner struct {
@@ -5778,8 +5795,11 @@ type runnerJobPayload struct {
 	DeviceProvider    string   `json:"deviceProvider"`
 	// BuildProfileName is the local lane profile (see lane_profiles.go); the
 	// wire name predates PREFLT-66 and is kept for control-plane compatibility.
-	BuildProfileName         string                             `json:"easProfileName"`
-	TargetClass              string                             `json:"targetClass"`
+	BuildProfileName string `json:"easProfileName"`
+	TargetClass      string `json:"targetClass"`
+	// SimulatorTarget is the policy simulator the control plane resolved for
+	// this iOS simulator job at claim (PREFLT-73).
+	SimulatorTarget          *simulatorTarget                   `json:"simulatorTarget"`
 	SourceBinding            runnerJobSourceBinding             `json:"sourceBinding"`
 	DevSession               runnerJobDevSession                `json:"devSession"`
 	NetworkPolicy            runnerJobNetworkPolicy             `json:"networkPolicy"`
@@ -9369,7 +9389,15 @@ func reportDiscoveryTargets(client *http.Client, options runnerOnceOptions, regi
 		return targets, nil
 	}
 
-	simctlInventory, err := loadSimctlInventory(options)
+	// PREFLT-73: report (and so select from) only the policy simulator, and
+	// create it when this host has none yet.
+	var simctlInventory json.RawMessage
+	var err error
+	if target := jobSimulatorTarget(options, job); target != nil {
+		simctlInventory, err = loadPolicySimctlInventory(options, target, execCommandOutput)
+	} else {
+		simctlInventory, err = loadSimctlInventory(options)
+	}
 	if err != nil {
 		return runnerTargetsData{}, err
 	}
@@ -9439,6 +9467,11 @@ func isPhysicalIOSDeviceDiscovery(job apiRunnerJob) bool {
 func automaticDiscoveryTarget(options runnerOnceOptions, job apiRunnerJob, targets []apiTarget) *apiTarget {
 	if isPhysicalIOSDeviceDiscovery(job) {
 		return nil
+	}
+	// PREFLT-73: without SimLock, only a simulator of the policy device type
+	// on the policy runtime is eligible; never fall back to another model.
+	if target := jobSimulatorTarget(options, job); target != nil && options.simlockLease == nil {
+		targets = policySimulatorTargets(options, target, targets)
 	}
 	return preferredSimulatorTarget(options, job.Payload.Platform, targets)
 }

@@ -57,6 +57,9 @@ type simlockRunnerLease struct {
 	closeOnce  sync.Once
 	finished   bool
 	shimDir    string
+	// target is the fleet policy simulator this workflow leases (PREFLT-73);
+	// nil for Android or a control plane that serves no policy.
+	target *simulatorTarget
 }
 
 func simlockDeviceJob(job apiRunnerJob) bool {
@@ -278,6 +281,7 @@ func acquireSimlockRunnerLease(options runnerOnceOptions, job apiRunnerJob, outp
 		statePath: filepath.Join(simlockLeaseStateDir(), key+".json"),
 		done:      make(chan struct{}),
 		stopRenew: make(chan struct{}),
+		target:    jobSimulatorTarget(options, job),
 	}
 	adopted, err := lease.adopt(platform)
 	if err != nil {
@@ -306,7 +310,13 @@ func acquireSimlockRunnerLease(options runnerOnceOptions, job apiRunnerJob, outp
 }
 
 func (lease *simlockRunnerLease) requestDetached(platform string, output io.Writer, cancelled func() (bool, error)) (simlockGrant, error) {
-	args := []string{"--local", "lease", "--platform", platform, "--class", "phone", "--mode", "full", "--timeout", "4m", "--detach", "--ttl", simlockTTLArg(lease.ttl), "--lease-id", lease.grant.Lease.ID, "--meta", "preflight.workflowId=" + lease.workflowID}
+	args := []string{"--local", "lease", "--platform", platform}
+	// PREFLT-73: lease the policy model on the policy iOS, not any phone.
+	args = append(args, simlockLeaseDeviceArgs(lease.target)...)
+	args = append(args, "--mode", "full", "--timeout", "4m", "--detach", "--ttl", simlockTTLArg(lease.ttl), "--lease-id", lease.grant.Lease.ID, "--meta", "preflight.workflowId="+lease.workflowID)
+	if lease.target.valid() {
+		args = append(args, "--meta", "preflight.simulatorPolicy="+lease.target.PolicyID)
+	}
 	command := exec.Command(lease.binary, args...)
 	command.Env = append(os.Environ(), "SIMLOCK_AGENT_ID="+lease.agentID)
 	refusals := &simlockRefusalWriter{next: output}
@@ -374,6 +384,9 @@ func (lease *simlockRunnerLease) requestDetached(platform string, output io.Writ
 				return simlockGrant{}, fmt.Errorf("SimLock %s: %s", refusal.Error.Code, refusal.Error.Message)
 			}
 			grant, err := parseSimlockGrant(result.data, platform)
+			if err == nil {
+				err = grantMatchesSimulatorTarget(grant, lease.target)
+			}
 			if err != nil {
 				stop()
 				// A detached grant is held even if this side rejects it.
@@ -611,7 +624,12 @@ func reportSimlockDiscoveryTargets(client *http.Client, options runnerOnceOption
 	} else {
 		endpoint = "ios-simulators"
 		runtime := "com.apple.CoreSimulator.SimRuntime.iOS-" + strings.ReplaceAll(grant.Device.Spec.OSVersion, ".", "-")
-		payload = map[string]any{"simctlInventory": map[string]any{"devices": map[string]any{runtime: []map[string]any{{"udid": grant.Device.Address, "name": grant.Device.Spec.Model, "state": "Booted", "isAvailable": true}}}}}
+		device := map[string]any{"udid": grant.Device.Address, "name": grant.Device.Spec.Model, "state": "Booted", "isAvailable": true}
+		if lease.target.valid() && grantMatchesSimulatorTarget(grant, lease.target) == nil {
+			runtime = lease.target.RuntimeIdentifier
+			device["deviceTypeIdentifier"] = lease.target.DeviceTypeIdentifier
+		}
+		payload = map[string]any{"simctlInventory": map[string]any{"devices": map[string]any{runtime: []map[string]any{device}}}}
 	}
 	data, err := postPreflightJSON(client, runnerEndpoint(options.apiURL, "/api/preflight/v1/runners/"+registration.Runner.ID+"/targets/"+endpoint), registration.Token, payload)
 	if err != nil {
