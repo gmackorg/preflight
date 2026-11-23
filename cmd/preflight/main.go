@@ -9788,6 +9788,15 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 // failed/partial prior install (marker absent) is always repaired — checking
 // only "node_modules exists" would keep a broken partial install. The package
 // manager is detected from the committed lockfile (pnpm/yarn/npm).
+// pnpmWorkspaceFilter selects the app's workspace package and every workspace
+// package it depends on. The path has to be braced: pnpm reads a bare
+// `./apps/mobile...` as the directory alone and drops the dependency suffix, so
+// a sibling package the app imports (e.g. @bob/notifications) is linked into
+// the app without its own dependencies and Metro fails to resolve them.
+func pnpmWorkspaceFilter(packagePath string) []string {
+	return []string{"--filter", "{./" + strings.TrimSuffix(strings.TrimPrefix(packagePath, "./"), "/") + "}..."}
+}
+
 func ensureCiDependencies(repoRoot string, headSha string, packagePath string) error {
 	marker := filepath.Join(repoRoot, ".preflight", "ci-deps.sha")
 	if headSha != "" {
@@ -9821,7 +9830,7 @@ func ensureCiDependencies(repoRoot string, headSha string, packagePath string) e
 	// package (+ its deps) so a broken SIBLING package (e.g. apps/web) doesn't
 	// fail the whole install and block the mobile build.
 	if pm == "pnpm" && atWorkspaceRoot && packagePath != "" && packagePath != "." {
-		filter := []string{"--filter", "./" + strings.TrimPrefix(packagePath, "./") + "..."}
+		filter := pnpmWorkspaceFilter(packagePath)
 		frozen = append(filter, frozen...)
 		nonFrozen = append(append([]string{}, filter...), nonFrozen...)
 	}
