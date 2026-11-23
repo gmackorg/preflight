@@ -53,7 +53,7 @@ func newBuildOpsContext() buildOpsContext {
 
 // ciCheckoutRoot is where a --ci build's Preflight-owned checkout lives:
 // <ciRoot>/.preflight-ci/<repo>. Runners only claim jobs under their
-// --workspace-root, so ciRoot should be that root (/Volumes/dev on the fleet);
+// --workspace-root, so ciRoot should be that root (/Users/mackieg/preflight-ci on gmacko-mini);
 // the runner clones the remote there and resets it to the pushed commit
 // itself, so the caller's checkout can live anywhere and nothing is written
 // in it (FORGE-468). With no ciRoot the checkout sits next to the caller's
