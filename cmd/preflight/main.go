@@ -9707,6 +9707,20 @@ func (err *sourceBindingMismatchError) Error() string {
 // working tree under the ordinary runner workspace root.
 const ciCheckoutRootSegment = ".preflight-ci"
 
+// ciCheckoutRootSegmentInternalSSD is the dot-less spelling the farm's
+// internal-SSD CI roots use (gmacko-mini serves --workspace-root
+// $HOME/preflight-ci; labtop's /Volumes/dev-ssd/preflight-ci). Bindings under
+// it are just as Preflight-owned; without it ensureCiCheckout treated them as
+// developer checkouts and never cloned them. Keep in sync with the control
+// plane's CI_CHECKOUT_ROOT_SEGMENTS (preflight-app runner-control-plane.ts).
+const ciCheckoutRootSegmentInternalSSD = "preflight-ci"
+
+// isCiCheckoutRoot reports whether p sits under a Preflight-owned CI root.
+func isCiCheckoutRoot(p string) bool {
+	return pathHasSegment(p, ciCheckoutRootSegment) ||
+		pathHasSegment(p, ciCheckoutRootSegmentInternalSSD)
+}
+
 // pathHasSegment reports whether any path component of p equals segment.
 func pathHasSegment(p string, segment string) bool {
 	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
@@ -9746,7 +9760,7 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 	if err != nil {
 		return nil
 	}
-	if !pathHasSegment(abs, ciCheckoutRootSegment) {
+	if !isCiCheckoutRoot(abs) {
 		return nil
 	}
 	remote := strings.TrimSpace(binding.GitRemoteURL)
@@ -9911,7 +9925,7 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	// tree (lockfile, node_modules, .preflight/ artifacts).
 	isCiRoot := func() bool {
 		abs, absErr := filepath.Abs(bindingRoot)
-		return absErr == nil && pathHasSegment(abs, ciCheckoutRootSegment)
+		return absErr == nil && isCiCheckoutRoot(abs)
 	}()
 	if strings.TrimSpace(bindingRoot) != "" {
 		absoluteBindingRoot, err := resolvedPathForBindingCheck(bindingRoot)
