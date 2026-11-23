@@ -110,7 +110,7 @@ func TestAdmitRunnerClaimRecordsLoadDeferral(t *testing.T) {
 		t.Fatal("expected a busy host to defer")
 	}
 	snapshot := runnerAdmission.snapshot()
-	if snapshot["state"] != "deferring" || snapshot["reason"] != "load" || !strings.Contains(snapshot["detail"].(string), "memory pressure warn") {
+	if snapshot["state"] != "deferring" || snapshot["reason"] != "load" || !strings.Contains(snapshot["detail"].(string), "load 930.0 on 12 cores") {
 		t.Fatalf("unexpected admission %v", snapshot)
 	}
 	gate.sample = func() hostPressure { return hostPressure{load1: 1, cores: 12, memoryLevel: 1} }

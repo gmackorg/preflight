@@ -8,7 +8,7 @@ import (
 )
 
 func testClaimLoadPolicy() runnerClaimLoadPolicy {
-	return runnerClaimLoadPolicy{enabled: true, maxLoadPerCore: 1.5, maxXcodebuilds: 2, maxDefer: 3 * time.Minute}
+	return runnerClaimLoadPolicy{enabled: true, maxLoadPerCore: 1.5, maxXcodebuilds: 2, maxDefer: 3 * time.Minute, minMemoryLevel: memoryPressureCritical}
 }
 
 func TestClaimLoadPolicyBusyReasons(t *testing.T) {
@@ -22,7 +22,8 @@ func TestClaimLoadPolicyBusyReasons(t *testing.T) {
 		{"at the per-core limit", hostPressure{load1: 15, cores: 10, memoryLevel: 1}, ""},
 		// labtop on 2026-11-23.
 		{"labtop meltdown", hostPressure{load1: 930, cores: 12, memoryLevel: 2}, "load 930.0 on 12 cores"},
-		{"memory warn alone", hostPressure{load1: 1, cores: 10, memoryLevel: 2}, "memory pressure warn"},
+		// gmacko-mini on 2026-11-23: warn for minutes while otherwise idle.
+		{"memory warn alone is not busy", hostPressure{load1: 4, cores: 10, memoryLevel: 2}, ""},
 		{"memory critical", hostPressure{load1: 1, cores: 10, memoryLevel: 4}, "memory pressure critical"},
 		{"one xcodebuild is fine", hostPressure{load1: 1, cores: 10, xcodebuilds: 1}, ""},
 		{"two xcodebuilds", hostPressure{load1: 1, cores: 10, xcodebuilds: 2}, "2 xcodebuild builds running"},
@@ -36,6 +37,12 @@ func TestClaimLoadPolicyBusyReasons(t *testing.T) {
 		if tc.want != "" && !strings.Contains(got, tc.want) {
 			t.Errorf("%s: expected %q in %q", tc.name, tc.want, got)
 		}
+	}
+	// PREFLIGHT_CLAIM_MEMORY_PRESSURE=warn restores the stricter signal.
+	strict := policy
+	strict.minMemoryLevel = memoryPressureWarn
+	if got := strict.busyReason(hostPressure{load1: 1, cores: 10, memoryLevel: 2}); !strings.Contains(got, "memory pressure warn") {
+		t.Errorf("expected warn to count under the strict policy, got %q", got)
 	}
 	// A zero xcodebuild limit turns that signal off.
 	policy.maxXcodebuilds = 0
@@ -104,15 +111,16 @@ func TestClaimGateDisabledAndNilAlwaysAdmit(t *testing.T) {
 
 func TestClaimLoadPolicyFromEnv(t *testing.T) {
 	policy := defaultRunnerClaimLoadPolicy()
-	if !policy.enabled || policy.maxLoadPerCore != defaultClaimMaxLoadPerCore || policy.maxXcodebuilds != defaultClaimMaxXcodebuilds || policy.maxDefer != defaultClaimMaxDefer {
+	if !policy.enabled || policy.maxLoadPerCore != defaultClaimMaxLoadPerCore || policy.maxXcodebuilds != defaultClaimMaxXcodebuilds || policy.maxDefer != defaultClaimMaxDefer || policy.minMemoryLevel != memoryPressureCritical {
 		t.Fatalf("unexpected defaults %+v", policy)
 	}
 	t.Setenv("PREFLIGHT_CLAIM_LOAD_GATE", "off")
 	t.Setenv("PREFLIGHT_CLAIM_MAX_LOAD_PER_CORE", "1.0")
 	t.Setenv("PREFLIGHT_CLAIM_MAX_XCODEBUILDS", "0")
 	t.Setenv("PREFLIGHT_CLAIM_MAX_DEFER", "90s")
+	t.Setenv("PREFLIGHT_CLAIM_MEMORY_PRESSURE", "warn")
 	policy = defaultRunnerClaimLoadPolicy()
-	if policy.enabled || policy.maxLoadPerCore != 1.0 || policy.maxXcodebuilds != 0 || policy.maxDefer != 90*time.Second {
+	if policy.enabled || policy.maxLoadPerCore != 1.0 || policy.maxXcodebuilds != 0 || policy.maxDefer != 90*time.Second || policy.minMemoryLevel != memoryPressureWarn {
 		t.Fatalf("expected env overrides, got %+v", policy)
 	}
 }
