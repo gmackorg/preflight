@@ -95,7 +95,7 @@ func TestBuildWorkOrderRejectsInvalidProfileBeforeRequests(t *testing.T) {
 	for _, tc := range []struct{ platform, kind, profile, want string }{
 		{"ios", "build", "preview", "packaged simulator app"},
 		{"android", "device_test", "preview-android", "packaged simulator app"},
-		{"ios", "release_candidate", "production", "separate store build workflow"},
+		{"ios", "build", "production", "separate store build workflow"},
 	} {
 		t.Run(tc.kind+"/"+tc.profile, func(t *testing.T) {
 			app := writeWorkOrderApp(t)
