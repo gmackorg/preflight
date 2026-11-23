@@ -241,3 +241,64 @@ func TestJJSourceRemotesReadsFetchURLWhenPushURLDiffers(t *testing.T) {
 		t.Fatalf("origin = %q", got)
 	}
 }
+
+// The gmacko-mini runner serves --workspace-root $HOME/preflight-ci (internal
+// SSD), so bob's CI binds /Users/mackieg/preflight-ci/bob. The dot-less root
+// carries no ".preflight-ci" segment, so ensureCiCheckout treated it as a
+// developer checkout and never cloned it: the job could only fail on a missing
+// directory. A dot-less "preflight-ci" root is just as Preflight-owned.
+func TestColdCICheckoutClonesUnderDotlessPreflightCIRoot(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	runGit(t, root, "init", "--bare", remote)
+	seed := filepath.Join(root, "seed")
+	runGit(t, root, "clone", remote, seed)
+	app := filepath.Join(seed, "apps", "mobile-bob")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app, "package.json"), []byte(`{"name":"fixture","dependencies":{"expo":"55"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", ".")
+	runGit(t, seed, "-c", "user.email=fixture@example.invalid", "-c", "user.name=Fixture", "commit", "-m", "source")
+	runGit(t, seed, "push", "origin", "HEAD:main")
+	sha := runGitOutput(t, seed, "rev-parse", "HEAD")
+
+	tools := filepath.Join(root, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "pnpm"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	runnerRoot := filepath.Join(root, "preflight-ci")
+	if err := os.MkdirAll(runnerRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(runnerRoot, "bob")
+	binding := runnerJobSourceBinding{WorkspaceRoot: checkout, PackagePath: "apps/mobile-bob", GitRemoteURL: remote, GitCommitSHA: sha}
+	job := apiRunnerJob{Payload: runnerJobPayload{SourceBinding: binding}}
+	if err := validateRunnerJobSourceBinding(runnerOnceOptions{workspaceRoot: runnerRoot}, job); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGitOutput(t, checkout, "rev-parse", "HEAD"); got != sha {
+		t.Fatalf("CI checkout HEAD = %s, want %s", got, sha)
+	}
+}
+
+func TestCICheckoutRootRecognisesBothMarkers(t *testing.T) {
+	for path, want := range map[string]bool{
+		"/Volumes/dev/.preflight-ci/bob":   true,
+		"/Users/mackieg/preflight-ci/bob":  true,
+		"/Volumes/dev-ssd/preflight-ci/fg": true,
+		"/Volumes/dev/bob":                 false,
+		"/Volumes/dev/my-preflight-ci/bob": false,
+	} {
+		if got := isCiCheckoutRoot(path); got != want {
+			t.Fatalf("isCiCheckoutRoot(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
