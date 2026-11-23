@@ -114,7 +114,9 @@ A runner only claims work orders whose `sourceBinding.workspaceRoot` is under
 its `--workspace-root`, and it never writes in a developer checkout there. On
 the fleet (2026-11-23) gmacko-mini's three agents serve
 `/Users/mackieg/preflight-ci` and labtop's agent serves
-`/Volumes/dev-ssd/preflight-ci`; no runner serves `/Volumes/dev`. To build a pushed or merged commit from anywhere
+`/Volumes/dev/preflight-ci` (both internal disks; labtop moved off the external
+`/Volumes/dev-ssd` on 2026-11-23, see ops/RUNNER-HOSTS.md). No runner serves
+`/Volumes/dev` itself or `/Volumes/dev-ssd`. To build a pushed or merged commit from anywhere
 (a clean clone in `~/work`, or a jj workspace), check that commit out and run:
 
 ```sh
