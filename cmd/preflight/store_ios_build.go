@@ -163,6 +163,9 @@ func committedNativeProject(appDir string, platform string) bool {
 // android/ directory is then built as-is, keeping hand-made targets and build
 // configurations that prebuild --clean would delete.
 func runExpoStorePrebuild(rt *storeJobRuntime, platform string, env []string) error {
+	if err := runStorePreBuildHook(rt, platform, env); err != nil {
+		return err
+	}
 	if committedNativeProject(rt.appDir, platform) {
 		_, _ = fmt.Fprintf(rt.log, "%s/ is committed in the checkout: using the committed native project, skipping expo prebuild\n", platform)
 		return nil

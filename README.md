@@ -284,6 +284,14 @@ chosen track. `--destination none` builds without uploading. `--wait` polls
 until the build is uploaded or fails and prints the App Store Connect build id
 or the Play version code.
 
+Build inputs that are not in git (a prebuilt framework, a generated config)
+come from the app's own `preflight-build-pre-install` script in its
+`package.json`. The runner runs it in the app directory before `expo prebuild`
+with `PREFLIGHT_BUILD_PLATFORM` (and `EAS_BUILD_PLATFORM`, for scripts ported
+from EAS) set to `ios` or `android`, plus the lane's build environment; a
+non-zero exit fails the build as `store_pre_build_hook_failed`. EAS's
+`eas-build-pre-install` is not run: those hooks assume EAS's build image.
+
 ### Push
 
 ```sh
