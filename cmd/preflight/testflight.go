@@ -59,6 +59,8 @@ func runTestFlight(args []string, stdout io.Writer, stderr io.Writer, client *ht
 		return runTestFlightEnroll(args[1:], stdout, stderr, client)
 	case "groups":
 		return runTestFlightGroups(args[1:], stdout, stderr, client)
+	case "distribute":
+		return runTestFlightDistribute(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown testflight subcommand %q\n", args[0])
 		printTestFlightHelp(stderr)
@@ -71,9 +73,102 @@ func printTestFlightHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight testflight enroll --email <apple-id> --all-apps [--dry-run] [--workspace-id <id>] [--json]")
 	fmt.Fprintln(w, "  preflight testflight groups list <app-id|slug|name> [--json]")
 	fmt.Fprintln(w, "  preflight testflight groups create <app-id|slug|name> [--name <group-name>] [--internal] [--json]")
+	fmt.Fprintln(w, "  preflight testflight distribute <app-id|slug|name> <store-build-id> [--group <name>]... [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Enroll an App Store Connect team member in every managed app's internal TestFlight group,")
 	fmt.Fprintln(w, "or manage an app's TestFlight beta groups (an internal group is what `enroll` enrolls into).")
+	fmt.Fprintln(w, "Distribute a processed store build to its internal groups, or to the groups named with --group.")
+}
+
+type cliTestFlightDistributionGroup struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type cliTestFlightDistribution struct {
+	BuildID      string `json:"buildId"`
+	ASCBuildID   string `json:"ascBuildId"`
+	Distribution struct {
+		Status           string                           `json:"status"`
+		AssignedGroups   []cliTestFlightDistributionGroup `json:"assignedGroups"`
+		AlreadyInGroups  []cliTestFlightDistributionGroup `json:"alreadyInGroups"`
+		ExportCompliance string                           `json:"exportCompliance,omitempty"`
+		Error            string                           `json:"error,omitempty"`
+	} `json:"distribution"`
+}
+
+func runTestFlightDistribute(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		printTestFlightHelp(stdout)
+		return 0
+	}
+	options, ok := parseReleaseStatusCLIOptions(args, stderr)
+	if !ok {
+		return 2
+	}
+	var positional []string
+	body := struct {
+		GroupNames []string `json:"groupNames,omitempty"`
+	}{}
+	for index := 0; index < len(options.rest); index++ {
+		arg := options.rest[index]
+		if arg == "--group" {
+			group, ok := nextFlagValue(options.rest, &index)
+			if !ok || strings.TrimSpace(group) == "" || strings.HasPrefix(group, "--") {
+				fmt.Fprintln(stderr, "--group requires a group name")
+				return 2
+			}
+			body.GroupNames = append(body.GroupNames, strings.TrimSpace(group))
+		} else if strings.HasPrefix(arg, "-") {
+			fmt.Fprintf(stderr, "unknown testflight distribute flag %q\n", arg)
+			return 2
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) != 2 || !strings.HasPrefix(positional[1], "pfbuild_") || options.platform != "ios" {
+		fmt.Fprintln(stderr, "Usage: preflight testflight distribute <app-id|slug|name> <pfbuild_id> [--group <name>]... [--json]")
+		return 2
+	}
+	appID, err := resolveTestFlightAppID(client, options, positional[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve app failed: %v\n", err)
+		return 1
+	}
+	ctx := newBuildOpsContext()
+	ctx.apiURL = options.apiURL
+	endpoint := ctx.endpoint("/apps/"+url.PathEscape(appID)+"/store-builds/"+url.PathEscape(positional[1])+"/testflight-groups", nil)
+	data, err := postPreflightWorkspaceJSON(client, endpoint, options.token, ctx.workspaceID, body)
+	if err != nil {
+		fmt.Fprintf(stderr, "distribute TestFlight build failed: %v\n", err)
+		return 1
+	}
+	var response cliTestFlightDistribution
+	if err := decodeEnvelopeData(data, &response); err != nil {
+		fmt.Fprintf(stderr, "decode TestFlight distribution: %v\n", err)
+		return 1
+	}
+	if options.jsonOut {
+		if code := writeJSON(stdout, response); code != 0 {
+			return code
+		}
+	} else {
+		fmt.Fprintf(stdout, "%s: %s\n", response.BuildID, response.Distribution.Status)
+		for _, group := range response.Distribution.AssignedGroups {
+			fmt.Fprintf(stdout, "Added to %s\n", group.Name)
+		}
+		for _, group := range response.Distribution.AlreadyInGroups {
+			fmt.Fprintf(stdout, "Already available to %s\n", group.Name)
+		}
+		if response.Distribution.ExportCompliance == "missing" {
+			fmt.Fprintln(stdout, "App Store Connect is waiting for export compliance.")
+		}
+	}
+	if response.Distribution.Status != "assigned" {
+		fmt.Fprintf(stderr, "TestFlight distribution: %s\n", firstNonEmpty(response.Distribution.Error, response.Distribution.Status, "unknown result"))
+		return 1
+	}
+	return 0
 }
 
 func runTestFlightEnroll(args []string, stdout io.Writer, stderr io.Writer, client *http.Client) int {

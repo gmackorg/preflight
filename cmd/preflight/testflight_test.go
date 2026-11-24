@@ -10,6 +10,50 @@ import (
 	"testing"
 )
 
+func TestTestFlightDistributeUsesStoreBuildEndpoint(t *testing.T) {
+	t.Setenv("PREFLIGHT_TOKEN", "test-token")
+	t.Setenv("PREFLIGHT_WORKSPACE_ID", "ws-1")
+	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/preflight/v1/release-status":
+			_, _ = w.Write([]byte(`{"data":{"apps":[{"appId":"pfapp_playtrek","slug":"playtrek"}]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/preflight/v1/apps/pfapp_playtrek/store-builds/pfbuild_22/testflight-groups":
+			if r.Header.Get("Authorization") != "Bearer test-token" || r.Header.Get("x-preflight-workspace-id") != "ws-1" {
+				t.Error("missing Preflight auth headers")
+			}
+			var payload struct {
+				GroupNames []string `json:"groupNames"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			if strings.Join(payload.GroupNames, ",") != "testers,QA" {
+				t.Errorf("group names = %v", payload.GroupNames)
+			}
+			_, _ = w.Write([]byte(`{"data":{"buildId":"pfbuild_22","ascBuildId":"asc-22","distribution":{"status":"assigned","assignedGroups":[{"id":"q","name":"QA"}],"alreadyInGroups":[{"id":"t","name":"testers"}],"exportCompliance":"missing"}}}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"testflight", "distribute", "playtrek", "pfbuild_22",
+		"--api-url", server.URL, "--group", "testers", "--group", "QA",
+	}, &stdout, &stderr, server.Client())
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, &stderr)
+	}
+	for _, want := range []string{"Added to QA", "Already available to testers", "waiting for export compliance"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q: %s", want, &stdout)
+		}
+	}
+}
+
 func TestTestFlightEnrollPostsFleetRequestAndPrintsSummary(t *testing.T) {
 	t.Setenv("PREFLIGHT_TOKEN", "token-123")
 	t.Setenv("PREFLIGHT_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
