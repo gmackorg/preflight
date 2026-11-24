@@ -6571,6 +6571,7 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 			if content, err := os.ReadFile(pidPath); err == nil && strings.TrimSpace(string(content)) == strconv.Itoa(startedDevServer.pid) {
 				_ = os.Remove(pidPath)
 				_ = os.Remove(filepath.Join(appDir, ".preflight", "expo-dev-session-owner.json"))
+				removeDevSessionSigningKey(appDir)
 			}
 		}
 	}()
@@ -6579,8 +6580,21 @@ func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, re
 		if err := requireAppDirectory(appDir); err != nil {
 			return false, err
 		}
-		startedDevServer, err = startExpoDevServer(options, appDir, job)
+		// An app that embeds updates.codeSigningCertificate needs Metro to sign
+		// its dev manifests; the job carries the app's key when it has one.
+		signingKeyPath, signingErr := prepareDevSessionSigningKey(job, func(secretRefID string) (runnerJobSecretRevealData, error) {
+			return revealRunnerJobSecret(client, options, registration, job, secretRefID)
+		})
+		if signingErr != nil {
+			return false, signingErr
+		}
+		startedDevServer, err = startExpoDevServer(options, appDir, job, signingKeyPath)
 		if err != nil {
+			removeDevSessionSigningKeyFile(signingKeyPath)
+			return false, err
+		}
+		if err := recordDevSessionSigningKey(appDir, signingKeyPath); err != nil {
+			removeDevSessionSigningKeyFile(signingKeyPath)
 			return false, err
 		}
 		if err := waitForMetroStatusWithCancellation(
@@ -10343,6 +10357,16 @@ func preflightOwnedMetroReady(client *http.Client, appDir string, statusURL stri
 }
 
 func stopPreflightOwnedDevSession(appDir string, expectedPID int) (string, error) {
+	outcome, err := stopPreflightOwnedDevSessionProcess(appDir, expectedPID)
+	// The session's Metro is gone (or never ran), so nothing reads its OTA
+	// signing key any more. A pid mismatch leaves a live foreign session alone.
+	if outcome == "already_stopped" || outcome == "terminated" {
+		removeDevSessionSigningKey(appDir)
+	}
+	return outcome, err
+}
+
+func stopPreflightOwnedDevSessionProcess(appDir string, expectedPID int) (string, error) {
 	pidPath := filepath.Join(appDir, ".preflight", "expo-dev-session.pid")
 	pidContent, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -10442,7 +10466,7 @@ type expoDevServerProcess struct {
 	logOffset int64
 }
 
-func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJob) (*expoDevServerProcess, error) {
+func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJob, signingKeyPath string) (*expoDevServerProcess, error) {
 	logDir := filepath.Join(appDir, ".preflight")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create Preflight log directory: %w", err)
@@ -10457,7 +10481,7 @@ func startExpoDevServer(options runnerOnceOptions, appDir string, job apiRunnerJ
 		return nil, fmt.Errorf("open Expo dev session log: %w", err)
 	}
 
-	command := exec.Command("npx", "expo", "start", "--dev-client", "--host", expoHostArgForJob(options.hostMode, job), "--port", strconv.Itoa(options.metroPort))
+	command := exec.Command("npx", expoDevServerArgs(options, job, signingKeyPath)...)
 	command.Dir = appDir
 	command.Env = expoDevServerEnv(options, job)
 	command.Stdout = logFile
@@ -10621,6 +10645,7 @@ func cleanupStalePreflightDevServers(currentAppDir string, stdout io.Writer) {
 	if err := os.Remove(pidPath); err == nil {
 		fmt.Fprintf(stdout, "removed dead Preflight dev-session handle for %s (pid %d)\n", currentAppDir, pid)
 	}
+	removeDevSessionSigningKey(currentAppDir)
 }
 
 // concurrentPreflightBuildActive reports whether another runner on this host is

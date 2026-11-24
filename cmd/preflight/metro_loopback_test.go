@@ -61,7 +61,7 @@ func TestLocalhostExpoProcessBindsAdvertisedIPv4WithExistingNodeOptions(t *testi
 	t.Setenv("PREFLIGHT_TEST_METRO_SCRIPT", script)
 	t.Setenv("PREFLIGHT_TEST_METRO_ADDRESS", address)
 	t.Setenv("NODE_OPTIONS", "--max-old-space-size=128 --dns-result-order=ipv6first")
-	process, err := startExpoDevServer(runnerOnceOptions{hostMode: "localhost", metroPort: 19000}, appDir, apiRunnerJob{Payload: runnerJobPayload{Lane: "simulator"}})
+	process, err := startExpoDevServer(runnerOnceOptions{hostMode: "localhost", metroPort: 19000}, appDir, apiRunnerJob{Payload: runnerJobPayload{Lane: "simulator"}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
