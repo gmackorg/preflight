@@ -710,8 +710,49 @@ func isolateSimlockIOSMaestro(command *exec.Cmd) error {
 // runner once executes one chain in a dedicated process. Hold the environment
 // and lease around that complete recursive chain, including development-lane
 // handlers that dispatch their next job directly instead of handleRunnerClaim.
+// A cold fetch or install can outlast a device job lease. Renew it during
+// preparation and stop the owned commands if another runner takes over.
+func validateDeviceJobSource(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob) error {
+	root := firstNonEmpty(job.Payload.SourceBinding.WorkspaceRoot, options.workspaceRoot)
+	if !isCiCheckoutRoot(root) || runnerJobSourceBindingEmpty(job.Payload.SourceBinding) {
+		return validateRunnerJobSourceBinding(options, job)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	done := make(chan error, 1)
+	go func() { done <- validateRunnerJobSourceBindingContext(ctx, options, job) }()
+
+	check := runnerJobCancellationCheck(client, options, registration, job)
+	checkOwnership := func() error {
+		cancelled, err := check()
+		if cancelled {
+			return errCommandCancelled
+		}
+		return err
+	}
+	ticker := time.NewTicker(runnerJobHeartbeatInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			// Even a warm checkout can lose its claim. Check before either
+			// allocating a simulator or reporting a source mismatch.
+			if ownershipErr := checkOwnership(); ownershipErr != nil {
+				return ownershipErr
+			}
+			return err
+		case <-ticker.C:
+			if err := checkOwnership(); err != nil {
+				cancel(err)
+				<-done
+				return err
+			}
+		}
+	}
+}
+
 func runWithSimlockRunnerLease(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, output io.Writer, run func(runnerOnceOptions) error) error {
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+	if err := validateDeviceJobSource(client, options, registration, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, output, err)
 	}
 	options.workflowID = job.WorkflowID

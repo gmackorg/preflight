@@ -6437,7 +6437,7 @@ func completeCapabilityProbe(client *http.Client, options runnerOnceOptions, reg
 
 func handleDevSessionStartJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) (bool, error) {
 	defer startJobHeartbeat(client, options, registration, job)()
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+	if err := validateDeviceJobSource(client, options, registration, job); err != nil {
 		if completeErr := completeSourceBindingMismatchJob(client, options, registration, job, stdout, err); completeErr != nil {
 			return false, completeErr
 		}
@@ -6814,7 +6814,7 @@ func handleDevSessionOpenJob(client *http.Client, options runnerOnceOptions, reg
 			return handleDevSessionOpenJob(client, scoped, registration, job, stdout)
 		})
 	}
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+	if err := validateDeviceJobSource(client, options, registration, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
 
@@ -7055,7 +7055,7 @@ func handleSimulatorOpenJob(client *http.Client, options runnerOnceOptions, regi
 		})
 	}
 	defer startJobHeartbeat(client, options, registration, job)()
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+	if err := validateDeviceJobSource(client, options, registration, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
 
@@ -7244,7 +7244,7 @@ func handleMaestroRunJob(client *http.Client, options runnerOnceOptions, registr
 		})
 	}
 	defer startJobHeartbeat(client, options, registration, job)()
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+	if err := validateDeviceJobSource(client, options, registration, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
 
@@ -9312,7 +9312,7 @@ func isSafeEnvironmentKey(key string) bool {
 
 func handleDeviceDiscoveryJob(client *http.Client, options runnerOnceOptions, registration runnerRegistrationData, job apiRunnerJob, stdout io.Writer) error {
 	defer startJobHeartbeat(client, options, registration, job)()
-	if err := validateRunnerJobSourceBinding(options, job); err != nil {
+	if err := validateDeviceJobSource(client, options, registration, job); err != nil {
 		return completeSourceBindingMismatchJob(client, options, registration, job, stdout, err)
 	}
 
@@ -9815,8 +9815,8 @@ func gitRun(dir string, args ...string) (string, error) {
 // is not under a .preflight-ci/ root, so developer checkouts under the runner
 // workspace root are never touched. On a CI root it clones the repo when
 // missing and fetches + force-checks-out the requested commit (detached HEAD),
-// skipping the network round-trip when HEAD already matches.
-func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error {
+// then installing dependencies for the requested package.
+func ensureCiCheckout(ctx context.Context, bindingRoot string, binding runnerJobSourceBinding) error {
 	if strings.TrimSpace(bindingRoot) == "" {
 		return nil
 	}
@@ -9839,7 +9839,7 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 		if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
 			return fmt.Errorf("create parent: %w", mkErr)
 		}
-		if _, cloneErr := gitRun("", "clone", remote, abs); cloneErr != nil {
+		if _, cloneErr := runCICommand(ctx, "", "git", "clone", remote, abs); cloneErr != nil {
 			return fmt.Errorf("clone %s: %w", remote, cloneErr)
 		}
 	}
@@ -9849,20 +9849,23 @@ func ensureCiCheckout(bindingRoot string, binding runnerJobSourceBinding) error 
 	// prior build's install left behind, so a frozen install is reproducible.
 	// (A prior non-frozen fallback could otherwise corrupt the lockfile and
 	// poison every later build of this checkout.)
-	if _, fetchErr := gitRun(abs, "fetch", "--tags", "--force", "origin"); fetchErr != nil {
+	if _, fetchErr := runCICommand(ctx, abs, "git", "fetch", "--tags", "--force", "origin"); fetchErr != nil {
 		return fmt.Errorf("fetch: %w", fetchErr)
 	}
 	ref := sha
 	if ref == "" {
 		ref = "origin/" + branch
 	}
-	if _, rErr := gitRun(abs, "reset", "--hard", ref); rErr != nil {
+	if _, rErr := runCICommand(ctx, abs, "git", "reset", "--hard", ref); rErr != nil {
 		return fmt.Errorf("reset %s: %w", ref, rErr)
 	}
 
 	// A fresh CI checkout has no node_modules, so metro/dev-build would fail.
-	resolved, _ := gitOutput(abs, "rev-parse", "HEAD")
-	if err := ensureCiDependencies(abs, resolved, binding.PackagePath); err != nil {
+	resolved, err := runCICommand(ctx, abs, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("read checkout HEAD: %w", err)
+	}
+	if err := ensureCiDependencies(ctx, abs, resolved, binding.PackagePath); err != nil {
 		return err
 	}
 	return nil
@@ -9883,7 +9886,7 @@ func pnpmWorkspaceFilter(packagePath string) []string {
 	return []string{"--filter", "{./" + strings.TrimSuffix(strings.TrimPrefix(packagePath, "./"), "/") + "}..."}
 }
 
-func ensureCiDependencies(repoRoot string, headSha string, packagePath string) error {
+func ensureCiDependencies(ctx context.Context, repoRoot string, headSha string, packagePath string) error {
 	marker := filepath.Join(repoRoot, ".preflight", "ci-deps.sha")
 	if headSha != "" {
 		if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == headSha {
@@ -9920,15 +9923,15 @@ func ensureCiDependencies(repoRoot string, headSha string, packagePath string) e
 		frozen = append(filter, frozen...)
 		nonFrozen = append(append([]string{}, filter...), nonFrozen...)
 	}
-	if _, err := runCmd(installDir, pm, frozen...); err != nil {
+	if _, err := runCICommand(ctx, installDir, pm, frozen...); err != nil {
 		// Lockfile drift shouldn't hard-fail a CI build — fall back to a
 		// non-frozen install (reset --hard restores the lockfile next run).
-		if _, err2 := runCmd(installDir, pm, nonFrozen...); err2 != nil {
+		if _, err2 := runCICommand(ctx, installDir, pm, nonFrozen...); err2 != nil {
 			// A failing lifecycle script (e.g. a workspace-lint postinstall like
 			// `sherif`) shouldn't block a build — retry skipping scripts so the
 			// dependency tree still gets installed.
 			noScripts := append(append([]string{}, nonFrozen...), "--ignore-scripts")
-			if _, err3 := runCmd(installDir, pm, noScripts...); err3 != nil {
+			if _, err3 := runCICommand(ctx, installDir, pm, noScripts...); err3 != nil {
 				return fmt.Errorf("install deps (%s): %w", pm, err2)
 			}
 		}
@@ -9956,7 +9959,25 @@ func runCmd(dir string, name string, args ...string) (string, error) {
 	return trimmed, nil
 }
 
+// runCICommand owns the checkout subprocess group. Git and package managers
+// spawn helpers that can otherwise keep running after the job loses its lease.
+func runCICommand(ctx context.Context, dir, name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "CI=1", "GIT_TERMINAL_PROMPT=0")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := runCommandWithContextAndCancellation(ctx, cmd, nil, 0); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stdout.String()+"\n"+stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob) error {
+	return validateRunnerJobSourceBindingContext(context.Background(), options, job)
+}
+
+func validateRunnerJobSourceBindingContext(ctx context.Context, options runnerOnceOptions, job apiRunnerJob) error {
 	if err := validatePinnedSimulatorJob(options, job); err != nil {
 		return err
 	}
@@ -9970,10 +9991,17 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	if bindingRoot == "" {
 		bindingRoot = options.workspaceRoot
 	}
+	absoluteRoot, rootErr := filepath.Abs(bindingRoot)
+	isCiRoot := rootErr == nil && isCiCheckoutRoot(absoluteRoot)
+	if isCiRoot {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, durationFromEnv("PREFLIGHT_CI_CHECKOUT_TIMEOUT", 30*time.Minute))
+		defer cancel()
+	}
 	// CI-driven builds target a Preflight-owned checkout under .preflight-ci/;
 	// sync it to the requested commit before validating. No-op for developer
 	// working trees, which are never under a CI root.
-	if err := ensureCiCheckout(bindingRoot, binding); err != nil {
+	if err := ensureCiCheckout(ctx, bindingRoot, binding); err != nil {
 		return sourceBindingMismatch("ciCheckout", bindingRoot, err.Error())
 	}
 	absoluteAppDir, err := resolvedPathForBindingCheck(appDir)
@@ -9987,10 +10015,6 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	// client computed them against the same tree, but CI omits them (sends a
 	// placeholder digest for persistence) and install legitimately mutates the
 	// tree (lockfile, node_modules, .preflight/ artifacts).
-	isCiRoot := func() bool {
-		abs, absErr := filepath.Abs(bindingRoot)
-		return absErr == nil && isCiCheckoutRoot(abs)
-	}()
 	if strings.TrimSpace(bindingRoot) != "" {
 		absoluteBindingRoot, err := resolvedPathForBindingCheck(bindingRoot)
 		if err != nil {
@@ -10070,7 +10094,7 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	}
 
 	if binding.GitRemoteURL != "" || binding.GitCommitSHA != "" || (!isCiRoot && binding.GitBranch != "") {
-		repository, repositoryErr := readSourceRepository(bindingRoot)
+		repository, repositoryErr := readBoundRepository(ctx, bindingRoot, binding, isCiRoot)
 		if repositoryErr != nil {
 			return sourceBindingMismatch("sourceRepository", "inspectable source", repositoryErr.Error())
 		}
@@ -10100,6 +10124,26 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 	}
 
 	return nil
+}
+
+// Managed Git checkouts only validate origin and HEAD. Computing dirty state
+// scans the installed tree and may run filters that CI validation never uses.
+func readBoundRepository(ctx context.Context, root string, binding runnerJobSourceBinding, ci bool) (sourceRepositoryState, error) {
+	if !ci || jjOnlyWorkspace(root) {
+		return readSourceRepository(root)
+	}
+	var repository sourceRepositoryState
+	var err error
+	if binding.GitRemoteURL != "" {
+		repository.remote, err = runCICommand(ctx, root, "git", "config", "--get", "remote.origin.url")
+		if err != nil {
+			return repository, err
+		}
+	}
+	if binding.GitCommitSHA != "" {
+		repository.commit, err = runCICommand(ctx, root, "git", "rev-parse", "HEAD")
+	}
+	return repository, err
 }
 
 func runnerJobSourceBindingEmpty(binding runnerJobSourceBinding) bool {
@@ -12346,6 +12390,20 @@ func runCommandWithTimeoutAndCancellation(
 	if timeout <= 0 {
 		return command.Run()
 	}
+	ctx, cancel := context.WithTimeoutCause(context.Background(), timeout, fmt.Errorf("%w after %s", errCommandTimedOut, timeout))
+	defer cancel()
+	return runCommandWithContextAndCancellation(ctx, command, cancellationCheck, pollInterval)
+}
+
+func runCommandWithContextAndCancellation(
+	ctx context.Context,
+	command *exec.Cmd,
+	cancellationCheck func() (bool, error),
+	pollInterval time.Duration,
+) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
 	if pollInterval <= 0 {
 		pollInterval = defaultRunnerPollInterval
 	}
@@ -12370,8 +12428,6 @@ func runCommandWithTimeoutAndCancellation(
 		done <- command.Wait()
 	}()
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	var ticker *time.Ticker
 	var tick <-chan time.Time
 	type cancellationResult struct {
@@ -12412,10 +12468,12 @@ func runCommandWithTimeoutAndCancellation(
 				<-done
 				return errCommandCancelled
 			}
-		case <-timer.C:
-			terminateCommandProcess(command.Process.Pid)
+		case <-ctx.Done():
+			// Git needs TERM to remove its own lockfiles. The original group
+			// may still contain helpers even if its leader has already exited.
+			cleanupCompletedCommandGroup(command.Process.Pid)
 			<-done
-			return fmt.Errorf("%w after %s", errCommandTimedOut, timeout)
+			return context.Cause(ctx)
 		}
 	}
 }
