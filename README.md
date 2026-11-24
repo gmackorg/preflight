@@ -62,6 +62,7 @@ Configuration lives in `~/.config/preflight/config.json`. Useful overrides:
 | `PREFLIGHT_WORKSPACE_ID` | Workspace to operate on |
 | `PREFLIGHT_MIN_FREE_DISK_GB` | Free-space floor below which a runner declines jobs |
 | `PREFLIGHT_IOS_SIMULATOR_BOOT_TIMEOUT` | Total iOS boot/readiness deadline (default `3m`); runner cancellation also stops the wait |
+| `PREFLIGHT_CI_CHECKOUT_TIMEOUT` | Total time for managed checkout preparation and source verification (default `30m`) |
 | `PREFLIGHT_COMMAND_OUTPUT_DRAIN_TIMEOUT` | Output pipe drain grace after a command exits (default `5s`); an incomplete drain still fails the command. iOS boot probes retain their explicit `250ms` grace |
 | `PREFLIGHT_UPDATE_REPO` | Where `update` looks for releases |
 | `PREFLIGHT_OTA_STORE` | Runner's filesystem OTA store when the control plane has no store of its own |
