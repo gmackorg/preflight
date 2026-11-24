@@ -172,7 +172,7 @@ func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  version       Print CLI and contract version")
 	fmt.Fprintln(w, "  login         Authenticate with the Preflight API")
-	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist/doctor/screenshots/submit-for-review)")
+	fmt.Fprintln(w, "  apps          Release-program status (list/status/checklist/doctor/screenshots/submit-for-review/demo-accounts)")
 	fmt.Fprintln(w, "  fleet         Fleet cockpit: `fleet next` = per-app next action + owner")
 	fmt.Fprintln(w, "  build         Queue a build/test work order; `build store` builds and uploads a store binary")
 	fmt.Fprintln(w, "  cancel        Cancel a work order and its active workflow")
@@ -16006,6 +16006,8 @@ func runApps(args []string, stdout io.Writer, stderr io.Writer, client *http.Cli
 		return runAppsScanBundle(args[1:], stdout, stderr)
 	case "review":
 		return runAppsReview(args[1:], stdout, stderr, client)
+	case "demo-accounts":
+		return runAppsDemoAccounts(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown apps subcommand %q\n", args[0])
 		printAppsHelp(stderr)
@@ -16024,6 +16026,7 @@ func printAppsHelp(w io.Writer) {
 	fmt.Fprintln(w, "  preflight apps submit-for-review <app-id|slug|name>  submit the uploaded build to App Review (R6; gated)")
 	fmt.Fprintln(w, "  preflight apps screenshots --scheme <s> --sim <udid> [--flow f.yaml] [--app <id> --upload]  capture App Store screenshots (R5)")
 	fmt.Fprintln(w, "  preflight apps review compile <flow.review.yaml>     compile a TrueFlight review workflow → Maestro flow + reviewer guide")
+	fmt.Fprintln(w, "  preflight apps demo-accounts <app> [--reveal <label> [--output-file <path>]] [--json]  App Review demo accounts; --reveal fetches one's secret (owner only)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Release-program status: where each app sits on the ladder")
 	fmt.Fprintln(w, "identity -> compliance -> asc_record -> store_build -> testflight -> metadata -> submitted -> released.")
