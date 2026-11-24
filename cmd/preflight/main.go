@@ -100,6 +100,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer, client *http.Client)
 		return runProveApp(args[1:], stdout, stderr, client)
 	case "runner":
 		return runRunner(args[1:], stdout, stderr, client)
+	case simlockAppleSimutilsCommand:
+		return runSimlockAppleSimutils(args[1:], stdout, stderr)
 	case "apps":
 		return runApps(args[1:], stdout, stderr, client)
 	case "build":
