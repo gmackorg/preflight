@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -11,17 +13,30 @@ concurrency:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    # `apps`: the fleet's app-CI label (container runners with the
+    # /go-cache and other fleet cache mounts).
+    runs-on: apps
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # Push to master: skip the heavy steps (and stay green) when master
+      # already has a newer commit, whose own run verifies it. PRs always run.
+      - name: Superseded?
+        id: superseded
+        uses: https://git.forgegraf.com/gmackie/ci-actions/fleet/superseded@ddd693744c0254b1cb078eec0e4d5a1bc38f57eb
 
+      - uses: actions/checkout@v4
+        if: steps.superseded.outputs.skip != 'true'
+
+      # Go from go.mod, GOMODCACHE/GOCACHE on the runner's /go-cache mount
+      # (instead of setup-go's archive cache), and `go mod download`.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        if: steps.superseded.outputs.skip != 'true'
+        uses: https://git.forgegraf.com/gmackie/ci-actions/fleet/setup@ddd693744c0254b1cb078eec0e4d5a1bc38f57eb
         with:
-          go-version-file: go.mod
+          stacks: go
 
       - name: Install Jujutsu for source-binding integration tests
+        if: steps.superseded.outputs.skip != 'true'
         run: |
           curl --fail --silent --show-error --location \
             https://github.com/jj-vcs/jj/releases/download/v0.38.0/jj-v0.38.0-x86_64-unknown-linux-musl.tar.gz \
@@ -34,42 +49,21 @@ jobs:
           jj --version
 
       - name: Build
+        if: steps.superseded.outputs.skip != 'true'
         run: go build ./...
 
       - name: Vet
+        if: steps.superseded.outputs.skip != 'true'
         run: go vet ./...
 
       - name: Test
+        if: steps.superseded.outputs.skip != 'true'
         run: go test ./...
 
       - name: Report CI result to ForgeGraph
-        if: always()
-        env:
-          FG_CI_TOKEN: ${{ secrets.FORGEGRAPH_TOKEN }}
-        run: |
-          if [ "${{ job.status }}" = "success" ]; then
-            STATUS="success"
-          elif [ "${{ job.status }}" = "cancelled" ]; then
-            STATUS="cancelled"
-          else
-            STATUS="failure"
-          fi
-
-          REPO_FULL="${{ github.repository }}"
-          OWNER="${REPO_FULL%%/*}"
-          REPO="${REPO_FULL##*/}"
-          BRANCH="${{ github.head_ref || github.ref_name }}"
-
-          curl -sf -X POST "https://forgegraf.com/api/fg/ci/report" \
-            -H "Authorization: Bearer ${FG_CI_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"owner\": \"${OWNER}\",
-              \"repo\": \"${REPO}\",
-              \"sha\": \"${{ github.sha }}\",
-              \"branch\": \"${BRANCH}\",
-              \"status\": \"${STATUS}\",
-              \"runId\": \"${{ github.run_id }}\",
-              \"runUrl\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
-              \"workflowName\": \"CI\"
-            }" || echo "::warning::Failed to report CI result to ForgeGraph"
+        if: always() && steps.superseded.outputs.skip != 'true'
+        uses: https://git.forgegraf.com/gmackie/ci-actions/fleet/report@ddd693744c0254b1cb078eec0e4d5a1bc38f57eb
+        with:
+          token: ${{ secrets.FORGEGRAPH_TOKEN }}
+          status: ${{ job.status }}
+          workflow-name: CI
