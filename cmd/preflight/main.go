@@ -10075,8 +10075,14 @@ func validateRunnerJobSourceBinding(options runnerOnceOptions, job apiRunnerJob)
 			return sourceBindingMismatch("sourceRepository", "inspectable source", repositoryErr.Error())
 		}
 		if expected := strings.TrimSpace(binding.GitRemoteURL); expected != "" {
-			if err := compareSourceBindingValue("gitRemoteUrl", expected, repository.remote); err != nil {
-				return err
+			// The same repository cloned over ssh (git@host:owner/repo.git)
+			// and https (https://host/owner/repo.git) must match: a CI checkout
+			// first cloned over ssh refused every https-bound store build with
+			// source_binding_mismatch (PREFLT-83, PlayTrek, 2026-11-24).
+			if !sameGitRemote(expected, repository.remote) {
+				if err := compareSourceBindingValue("gitRemoteUrl", expected, repository.remote); err != nil {
+					return err
+				}
 			}
 		}
 		// CI checkouts can be detached; their exact source SHA is authoritative.
@@ -10141,6 +10147,13 @@ func compareSourceBindingFileList(field string, expected []string, actual []stri
 		return sourceBindingMismatch(field, expectedValue, actualValue)
 	}
 	return nil
+}
+
+// sameGitRemote reports whether two remotes name the same repository,
+// whatever the clone protocol (see normalizeGitRemote).
+func sameGitRemote(a string, b string) bool {
+	na := normalizeGitRemote(a)
+	return na != "" && na == normalizeGitRemote(b)
 }
 
 func compareSourceBindingValue(field string, expected string, actual string) error {
