@@ -412,3 +412,22 @@ func TestHasASCApiKeyCredentials(t *testing.T) {
 		t.Fatal("expected false when the key file is unreadable")
 	}
 }
+
+// PREFLT-83: a CI checkout cloned over ssh satisfies an https-bound source
+// binding for the same repository, and a different repository still does not.
+func TestSameGitRemoteBridgesSshAndHttps(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"https://git.forgegraf.com/gmackie/playtrek.git", "git@git.forgegraf.com:gmackie/playtrek.git", true},
+		{"https://git.forgegraf.com/gmackie/playtrek", "ssh://git@git.forgegraf.com/gmackie/playtrek.git", true},
+		{"https://git.forgegraf.com/gmackie/playtrek.git", "git@git.forgegraf.com:gmackie/preflight.git", false},
+		{"https://git.forgegraf.com/gmackie/playtrek.git", "", false},
+	}
+	for _, c := range cases {
+		if got := sameGitRemote(c.a, c.b); got != c.want {
+			t.Errorf("sameGitRemote(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
