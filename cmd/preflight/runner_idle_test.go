@@ -26,6 +26,10 @@ func TestMain(m *testing.M) {
 	// Never prune the real pnpm store from a test.
 	autoPruneStampPath = func() string { return "" }
 	autoPruneRun = func(io.Writer) bool { return false }
+	// The host's real Xcode is not part of any `runner once` fixture (and some
+	// assert xcrun is never called); simulator_policy_test.go drives the
+	// toolchain probe with fake commands.
+	probeLocalSimulatorToolchain = func(runnerOnceOptions, []string) *iosSimulatorToolchain { return nil }
 	os.Exit(m.Run())
 }
 
