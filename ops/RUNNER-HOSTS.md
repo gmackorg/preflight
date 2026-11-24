@@ -57,9 +57,17 @@ volume as the workspace (`/Volumes/dev/.pnpm-store` on labtop) so pnpm
 hard-links instead of copying.
 
 Until 2026-11-23 labtop's workspace sat on the USB SSD `/Volumes/dev-ssd`.
-While Spotlight crawled that drive, directory reads took 20s or failed with
-EINTR and `mkdir` hung for over 12 minutes. The runner wedged in its startup
-cleanup without ever claiming, every process touching the drive stalled, and
-the host reported load 400-900 that looked like build pressure. An external
-drive that stalls takes the whole node out; a full internal disk only makes
-the runner decline claims, which the floor above already handles.
+External drives are gated by macOS privacy (TCC "Removable Volumes"). When
+access isn't granted, every directory read waits on a consent prompt that
+nobody at a headless host answers. It blocked about 20s, then failed with
+EINTR (or EPERM after a reboot), even for raw device reads as root. The runner
+wedged in its startup cleanup without ever claiming, every process touching
+the drive piled up, and the host reported load 400-900 that looked like build
+pressure. A rebuilt ad-hoc-signed binary counts as a new app to TCC, so a
+grant can silently stop applying after a deploy. Internal storage needs no
+such grant. A full internal disk only makes the runner decline claims, which
+the floor above already handles.
+
+Diagnose before blaming hardware: `/usr/bin/log show --last 1m --predicate
+'process == "tccd"' | grep SystemPolicyRemovableVolumes`. In zsh, plain `log`
+is a builtin.
