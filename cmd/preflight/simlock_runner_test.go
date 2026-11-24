@@ -386,6 +386,13 @@ func TestSimlockLive(t *testing.T) {
 		t.Fatal("invalid live platform")
 	}
 	root := t.TempDir()
+	if keep := os.Getenv("PREFLIGHT_SIMLOCK_LIVE_ROOT"); keep != "" {
+		// Keep Maestro's logs and artifacts for diagnosis.
+		root = keep
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	job := apiRunnerJob{ID: "simlock-live", WorkflowID: "PREFLT-65-live", Kind: "device.discover", Payload: runnerJobPayload{Platform: platform, Lane: "simulator", TargetClass: "simulator"}}
 	options := runnerOnceOptions{hostIdentity: "preflight-live-check", workspaceRoot: root, xcrunPath: "xcrun", adbPath: "adb"}
 	t.Setenv("PREFLIGHT_SIMLOCK_STATE_DIR", filepath.Join(root, "simlock-state"))

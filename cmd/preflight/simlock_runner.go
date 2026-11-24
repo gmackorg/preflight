@@ -538,7 +538,21 @@ func (lease *simlockRunnerLease) configure(options *runnerOnceOptions) (func(), 
 		if err != nil {
 			return nil, err
 		}
-		scripts["xcrun"] = "#!/bin/sh\nif [ \"${1:-}\" = simctl ]; then\nshift\nexport PATH=" + simlockShellQuote(os.Getenv("PATH")) + "\nexport SIMLOCK_AGENT_ID=" + simlockShellQuote(identity) + "\nexec " + simlockShellQuote(binary) + " --local simctl --lease " + simlockShellQuote(lease.grant.Lease.ID) + " \"$@\"\nfi\nexec " + simlockShellQuote(realXcrun) + " \"$@\"\n"
+		// Maestro 2.6 finds SimLock simulators itself and calls
+		// `simctl --set <SimLock's set>`; `simlock simctl` refuses a
+		// caller-supplied --set, so a call already scoped to the lease's own
+		// device set goes straight to the real xcrun. Anything else is routed
+		// through SimLock.
+		ownSet := ""
+		if set := lease.grant.Environment.IOSDeviceSet; set != "" {
+			ownSet = "if [ \"${2:-}\" = --set ] && [ \"${3:-}\" = " + simlockShellQuote(set) + " ]; then\nexec " + simlockShellQuote(realXcrun) + " \"$@\"\nfi\n"
+		}
+		scripts["xcrun"] = "#!/bin/sh\nif [ \"${1:-}\" = simctl ]; then\n" + ownSet + "shift\nexport PATH=" + simlockShellQuote(os.Getenv("PATH")) + "\nexport SIMLOCK_AGENT_ID=" + simlockShellQuote(identity) + "\nexec " + simlockShellQuote(binary) + " --local simctl --lease " + simlockShellQuote(lease.grant.Lease.ID) + " \"$@\"\nfi\nexec " + simlockShellQuote(realXcrun) + " \"$@\"\n"
+		// Maestro's permission grants go through applesimutils, which cannot
+		// see SimLock's device set; translate them to simctl privacy here.
+		if self, err := simlockTranslatorBinary(); err == nil {
+			scripts["applesimutils"] = "#!/bin/sh\nexport PATH=" + simlockShellQuote(os.Getenv("PATH")) + "\nexport SIMLOCK_AGENT_ID=" + simlockShellQuote(identity) + "\nexec " + simlockShellQuote(self) + " " + simlockAppleSimutilsCommand + " --lease " + simlockShellQuote(lease.grant.Lease.ID) + " --device " + simlockShellQuote(lease.grant.Device.Address) + " -- \"$@\"\n"
+		}
 		if lease.grant.Environment.IOSDeviceSet != "" {
 			realBuild, err := exec.LookPath("xcodebuild")
 			if err != nil {
@@ -802,4 +816,14 @@ func claimHeldSimlockWorkflowJob(client *http.Client, options runnerOnceOptions,
 		}
 	}
 	return nil, nil
+}
+
+// simlockTranslatorBinary is the preflight CLI the applesimutils shim calls
+// back into: this binary, or PREFLIGHT_SIMLOCK_TRANSLATOR (tests run as a
+// test binary, which has no CLI subcommands).
+func simlockTranslatorBinary() (string, error) {
+	if path := os.Getenv("PREFLIGHT_SIMLOCK_TRANSLATOR"); path != "" {
+		return path, nil
+	}
+	return os.Executable()
 }
