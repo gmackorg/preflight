@@ -39,6 +39,49 @@ func TestCheckAppConfig_RequiresNativeIdentity(t *testing.T) {
 	}
 }
 
+func TestDoctorResolvesVariantIdentity(t *testing.T) {
+	app := t.TempDir()
+	writeDoctorFile(t, app, "app.json", `{"expo":{"ios":{"bundleIdentifier":"com.example.current"}}}`)
+	writeDoctorFile(t, app, "app.config.js", `
+const base = require("./app.json").expo;
+const variant = process.env.APP_VARIANT;
+module.exports = {ios: variant === "web" ? {} : {
+  bundleIdentifier: base.ios.bundleIdentifier + (variant === "development" ? ".dev" : "")
+}};
+`)
+	npx := writeFakeExecutable(t, "npx", `#!/bin/sh
+[ "$*" = 'expo config --json --type public' ] || exit 1
+exec node -p 'JSON.stringify(require("./app.config.js"))'
+`)
+	t.Setenv("PATH", filepath.Dir(npx)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PREFLIGHT_FORCE_EXPO_CONFIG_CLI", "1")
+	for _, tc := range []struct {
+		variant string
+		want    doctorSeverity
+	}{{"production", doctorOK}, {"development", doctorOK}, {"web", doctorBroken}} {
+		t.Run(tc.variant, func(t *testing.T) {
+			t.Setenv("APP_VARIANT", tc.variant)
+			if got := checkAppConfig(app); len(got) != 1 || got[0].Severity != tc.want {
+				t.Fatalf("checkAppConfig(%s) = %+v, want %s", tc.variant, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDoctorUnresolvedDynamicConfig(t *testing.T) {
+	app := t.TempDir()
+	writeDoctorFile(t, app, "app.config.js", `module.exports = require("./base");`)
+	npx := writeFakeExecutable(t, "npx", "#!/bin/sh\nexit 1\n")
+	t.Setenv("PATH", filepath.Dir(npx)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PREFLIGHT_FORCE_EXPO_CONFIG_CLI", "1")
+	if got := checkAppConfig(app); len(got) != 1 || got[0].Severity != doctorWarn {
+		t.Fatalf("failed resolution should report an unverified identity, got %+v", got)
+	}
+	if got := doctorFastChecks(app); len(got) == 0 || got[0].Severity != doctorWarn {
+		t.Fatalf("the static fleet scan should report an unverified identity, got %+v", got)
+	}
+}
+
 func TestFindExpoAppDirs_FindsAppsWithoutEASConfig(t *testing.T) {
 	root := t.TempDir()
 	app := filepath.Join(root, "repo", "apps", "mobile")

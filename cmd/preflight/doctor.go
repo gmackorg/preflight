@@ -159,6 +159,10 @@ func doctorWorstSeverity(findings []doctorFinding) doctorSeverity {
 // Store builds read both from here; build settings live in Preflight build
 // profiles (`preflight build-profiles`), not in the checkout.
 func checkAppConfig(appDir string) []doctorFinding {
+	return inspectAppConfig(appDir, true)
+}
+
+func inspectAppConfig(appDir string, evaluateDynamic bool) []doctorFinding {
 	configPath := expoConfigPath(appDir)
 	if configPath == "" {
 		return []doctorFinding{{
@@ -166,16 +170,38 @@ func checkAppConfig(appDir string) []doctorFinding {
 			Message: "no app.config.ts, app.config.js or app.json",
 		}}
 	}
-	identity := readExpoAppIdentity(appDir)
+	name := filepath.Base(configPath)
+	dynamic := name != "app.json"
+	resolved := !dynamic
+	var identity expoAppIdentity
+	if dynamic && evaluateDynamic && shouldUseExpoConfigCLI(appDir) {
+		config, ok := resolveExpoConfigWithExpoCLI(appDir, nil)
+		if !ok {
+			return []doctorFinding{{
+				Check: "app-config", Severity: doctorWarn,
+				Message: fmt.Sprintf("Could not evaluate %s. Run expo config --type public from the app directory to inspect the error.", name),
+			}}
+		}
+		identity = expoIdentityFromConfig(config)
+		resolved = true
+	} else {
+		identity = readExpoAppIdentity(appDir)
+	}
 	if identity.iosBundleID == "" && identity.androidPackage == "" {
+		if !resolved {
+			return []doctorFinding{{
+				Check: "app-config", Severity: doctorWarn,
+				Message: fmt.Sprintf("Native identifiers in %s need evaluation. Install the app dependencies and run preflight apps doctor --path <app-dir>.", name),
+			}}
+		}
 		return []doctorFinding{{
 			Check: "app-config", Severity: doctorBroken,
-			Message: fmt.Sprintf("%s sets neither ios.bundleIdentifier nor android.package", filepath.Base(configPath)),
+			Message: fmt.Sprintf("%s sets neither ios.bundleIdentifier nor android.package", name),
 		}}
 	}
 	return []doctorFinding{{
 		Check: "app-config", Severity: doctorOK,
-		Message: fmt.Sprintf("%s names the native app", filepath.Base(configPath)),
+		Message: fmt.Sprintf("%s names the native app", name),
 	}}
 }
 
@@ -235,7 +261,7 @@ func runDoctorChecks(appDir string) []doctorFinding {
 // The full lockfile probe (which regenerates the lockfile) is deep-mode only,
 // reachable per app via `apps doctor --path`.
 func doctorFastChecks(appDir string) []doctorFinding {
-	f := checkAppConfig(appDir)
+	f := inspectAppConfig(appDir, false)
 	f = append(f, checkConfigPoison(appDir)...)
 	f = append(f, checkExpoSDKAlign(appDir)...)
 	if root := findUp(appDir, "pnpm-lock.yaml"); root != "" {
