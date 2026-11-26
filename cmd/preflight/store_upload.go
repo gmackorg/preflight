@@ -191,7 +191,7 @@ func handleStoreUploadJob(client *http.Client, options runnerOnceOptions, regist
 func runStoreUpload(runtime *storeJobRuntime, job apiRunnerJob, artifact storeBuildArtifact, destination string, workspaceRoot string) (map[string]any, error) {
 	switch destination {
 	case "testflight":
-	case "play_internal", "play_alpha", "play_beta", "play_production":
+	case "play_internal", "play_alpha", "play_beta", "play_production", "play_production_draft":
 	default:
 		return nil, storeFailuref("store_upload_payload_invalid", "unsupported store upload destination %q", destination)
 	}

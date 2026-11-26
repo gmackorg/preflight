@@ -195,7 +195,9 @@ func (play *fakePlay) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		play.uploaded, _ = io.ReadAll(r.Body)
 		_, _ = w.Write([]byte(`{"versionCode":42,"sha256":"abc"}`))
-	case r.Method == http.MethodPut && r.URL.Path == app+"/edit-1/tracks/beta":
+	case r.Method == http.MethodGet && r.URL.Path == app+"/edit-1/tracks/production":
+		_, _ = w.Write([]byte(`{"track":"production","releases":[{"status":"inProgress","versionCodes":["39"],"userFraction":0.15},{"status":"completed","versionCodes":["31"]}]}`))
+	case r.Method == http.MethodPut && (r.URL.Path == app+"/edit-1/tracks/beta" || r.URL.Path == app+"/edit-1/tracks/production"):
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		play.trackBody = append(play.trackBody, body)
@@ -229,7 +231,7 @@ func playUploadJob() apiRunnerJob {
 	}
 }
 
-func runPlayFixture(t *testing.T, play *fakePlay) (map[string]any, error) {
+func runPlayFixture(t *testing.T, play *fakePlay, destination string) (map[string]any, error) {
 	t.Helper()
 	original := playAPIBaseURL
 	playAPIBaseURL = play.server.URL
@@ -240,12 +242,37 @@ func runPlayFixture(t *testing.T, play *fakePlay) (map[string]any, error) {
 	aab := filepath.Join(t.TempDir(), "app-release.aab")
 	mustWrite(t, aab, "aab-bytes")
 	defer runtime.cleanup.Run()
-	return runPlayStoreUpload(runtime, playUploadJob(), storeBuildArtifact{Kind: "aab", FileName: "app-release.aab"}, aab, "play_beta")
+	job := playUploadJob()
+	job.Payload.Destination = destination
+	return runPlayStoreUpload(runtime, job, storeBuildArtifact{Kind: "aab", FileName: "app-release.aab"}, aab, destination)
+}
+
+func TestExplicitPlayProductionDraftPreservesServingReleases(t *testing.T) {
+	play := newFakePlay(t)
+	result, err := runPlayFixture(t, play, "play_production_draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !play.committed || play.deleted || len(play.trackBody) != 1 || result["playTrack"] != "production" || result["playReleaseStatus"] != "draft" {
+		t.Fatalf("result %v, track updates %v", result, play.trackBody)
+	}
+	releases := play.trackBody[0]["releases"].([]any)
+	if len(releases) != 3 {
+		t.Fatalf("releases = %v", releases)
+	}
+	rollout := releases[0].(map[string]any)
+	serving := releases[1].(map[string]any)
+	draft := releases[2].(map[string]any)
+	if rollout["status"] != "inProgress" || rollout["userFraction"] != 0.15 || fmt.Sprint(rollout["versionCodes"]) != "[39]" ||
+		serving["status"] != "completed" || fmt.Sprint(serving["versionCodes"]) != "[31]" ||
+		draft["status"] != "draft" || fmt.Sprint(draft["versionCodes"]) != "[42]" {
+		t.Fatalf("updated production releases = %v", releases)
+	}
 }
 
 func TestRunPlayStoreUploadPublishesToTrack(t *testing.T) {
 	play := newFakePlay(t)
-	result, err := runPlayFixture(t, play)
+	result, err := runPlayFixture(t, play, "play_beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +298,7 @@ func TestRunPlayStoreUploadPublishesToTrack(t *testing.T) {
 func TestRunPlayStoreUploadRetriesDraftAppAsDraft(t *testing.T) {
 	play := newFakePlay(t)
 	play.draftApp = true
-	result, err := runPlayFixture(t, play)
+	result, err := runPlayFixture(t, play, "play_beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +310,7 @@ func TestRunPlayStoreUploadRetriesDraftAppAsDraft(t *testing.T) {
 func TestRunPlayStoreUploadMapsServerErrorsToTransientAndDeletesEdit(t *testing.T) {
 	play := newFakePlay(t)
 	play.failUpload = http.StatusServiceUnavailable
-	_, err := runPlayFixture(t, play)
+	_, err := runPlayFixture(t, play, "play_beta")
 	var failure *storeFailure
 	if !errors.As(err, &failure) || failure.code != "play_upload_transient" {
 		t.Fatalf("err = %v", err)
@@ -294,12 +321,12 @@ func TestRunPlayStoreUploadMapsServerErrorsToTransientAndDeletesEdit(t *testing.
 
 	play = newFakePlay(t)
 	play.failUpload = http.StatusTooManyRequests
-	if _, err := runPlayFixture(t, play); !errors.As(err, &failure) || failure.code != "play_upload_transient" {
+	if _, err := runPlayFixture(t, play, "play_beta"); !errors.As(err, &failure) || failure.code != "play_upload_transient" {
 		t.Fatalf("429 -> %v", err)
 	}
 	play = newFakePlay(t)
 	play.failUpload = http.StatusForbidden
-	if _, err := runPlayFixture(t, play); !errors.As(err, &failure) || failure.code != "play_auth_failed" {
+	if _, err := runPlayFixture(t, play, "play_beta"); !errors.As(err, &failure) || failure.code != "play_auth_failed" {
 		t.Fatalf("403 -> %v", err)
 	}
 }

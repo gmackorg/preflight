@@ -52,7 +52,7 @@ func playTrackForDestination(destination string) (string, bool) {
 		return "alpha", true
 	case "play_beta":
 		return "beta", true
-	case "play_production":
+	case "play_production", "play_production_draft":
 		return "production", true
 	}
 	return "", false
@@ -183,6 +183,7 @@ type playUploadRequest struct {
 	artifactPath string
 	kind         string
 	track        string
+	draft        bool
 	releaseNotes string
 	releaseName  string
 }
@@ -241,6 +242,19 @@ func publishToPlay(client *http.Client, baseURL string, account googleServiceAcc
 		return "", "", storeFailuref("play_upload_failed", "upload response had no versionCode")
 	}
 
+	trackURL := publisher.editsURL("/" + url.PathEscape(edit.ID) + "/tracks/" + url.PathEscape(request.track))
+	var current struct {
+		Releases []map[string]any `json:"releases"`
+	}
+	status := "completed"
+	if request.draft {
+		// A tracks.update replaces the release list. Keep any serving releases
+		// and their rollout settings when adding a draft to an existing track.
+		if err := publisher.doJSON(http.MethodGet, trackURL, nil, &current); err != nil {
+			return "", "", classifyPlayFailure("edits.tracks.get", err)
+		}
+		status = "draft"
+	}
 	trackRelease := func(status string) map[string]any {
 		releaseBody := map[string]any{
 			"versionCodes": []string{versionCode},
@@ -252,12 +266,10 @@ func publishToPlay(client *http.Client, baseURL string, account googleServiceAcc
 		if notes := strings.TrimSpace(request.releaseNotes); notes != "" {
 			releaseBody["releaseNotes"] = []map[string]string{{"language": "en-US", "text": notes}}
 		}
-		return map[string]any{"track": request.track, "releases": []map[string]any{releaseBody}}
+		return map[string]any{"track": request.track, "releases": append(current.Releases, releaseBody)}
 	}
-	trackURL := publisher.editsURL("/" + url.PathEscape(edit.ID) + "/tracks/" + url.PathEscape(request.track))
-	status := "completed"
 	if err := publisher.doJSON(http.MethodPut, trackURL, trackRelease(status), nil); err != nil {
-		if !playDraftAppError(err) {
+		if status == "draft" || !playDraftAppError(err) {
 			return "", "", classifyPlayFailure("edits.tracks.update", err)
 		}
 		// An app that has never been published only accepts draft releases.
@@ -307,6 +319,7 @@ func runPlayStoreUpload(rt *storeJobRuntime, job apiRunnerJob, artifact storeBui
 		artifactPath: artifactPath,
 		kind:         kind,
 		track:        track,
+		draft:        destination == "play_production_draft",
 		releaseNotes: job.Payload.ReleaseNotes,
 		releaseName:  releaseName,
 	})

@@ -1218,7 +1218,7 @@ func printBuildStoreHelp(w io.Writer) {
 	fmt.Fprintln(w, "Build a signed store binary on the runner fleet (expo prebuild + xcodebuild/gradle)")
 	fmt.Fprintln(w, "with the lane's build profile and the vault's signing credentials, then upload it.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "  --destination <d>       testflight, play_internal, play_beta, play_production or none")
+	fmt.Fprintln(w, "  --destination <d>       testflight, play_internal, play_alpha, play_beta, play_production, play_production_draft or none")
 	fmt.Fprintln(w, "                          (default per lane: iOS testflight; Android play_<lane>)")
 	fmt.Fprintln(w, "  --git-ref <ref>         branch or 40-hex commit (default: the app's recorded source)")
 	fmt.Fprintln(w, "  --version <v>           marketing version (default: the latest build's)")
