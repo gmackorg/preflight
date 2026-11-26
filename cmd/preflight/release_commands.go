@@ -1389,6 +1389,8 @@ func runOTA(args []string, stdout io.Writer, stderr io.Writer, client *http.Clie
 		return runOTARollback(args[1:], stdout, stderr, client)
 	case "republish":
 		return runOTARepublish(args[1:], stdout, stderr, client)
+	case "publish":
+		return runOTAPublish(args[1:], stdout, stderr, client)
 	default:
 		fmt.Fprintf(stderr, "unknown ota command %q\n", args[0])
 		printOTAHelp(stderr)
@@ -1652,6 +1654,9 @@ func printOTAHelp(w io.Writer) {
 	fmt.Fprintln(w, "  code-signing generate --app <id> [--out cert.pem] [--rotate]")
 	fmt.Fprintln(w, "        create the app's signing key in the vault; writes the public certificate")
 	fmt.Fprintln(w, "  code-signing get --app <id> [--out cert.pem]")
+	fmt.Fprintln(w, "  publish --app <id> --channel development|preview|production --platform ios|android|all")
+	fmt.Fprintln(w, "          [--app-dir <dir>] [--workspace-root <runner checkout>] [--message <m>] [--runtime-version <v>]")
+	fmt.Fprintln(w, "          resolves the installed Expo runtime per platform and queues an update from that checkout")
 	fmt.Fprintln(w, "  rollback --app <id> --channel <c> [--platform ios|android|all]")
 	fmt.Fprintln(w, "           [--to-embedded | --to <updateId> | --previous | --pause | --resume]")
 	fmt.Fprintln(w, "        default --previous; --platform defaults to both")
